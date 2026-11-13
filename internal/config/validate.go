@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/melon-tgj/melonarc/internal/dns"
 	"github.com/melon-tgj/melonarc/internal/rules"
 )
 
@@ -49,21 +50,158 @@ func (c *Config) validateGeneral(issues *Errors) {
 	if !logLevels[c.General.LogLevel] {
 		issues.add(0, "[General]", "log-level %q is not one of debug, info, warn, error", c.General.LogLevel)
 	}
-	if c.General.APIListen == "" {
+	c.validateListen(issues, "api-listen", c.General.APIListen)
+	c.validateListen(issues, "http-listen", c.General.HTTPListen)
+	c.validateListen(issues, "socks5-listen", c.General.SOCKS5Listen)
+	c.validateInboundAuth(issues)
+	c.validateDataDir(issues)
+	c.validateDNS(issues)
+	c.validateDatasets(issues)
+}
+
+// validateDNS checks the plaintext upstream settings.
+//
+// The server addresses are parsed with the same function the client uses, so a
+// configuration that validates is a configuration the client can ask. Whether a
+// server answers is a different question, and one validation must not answer: it
+// stays read-only and offline.
+func (c *Config) validateDNS(issues *Errors) {
+	for _, server := range c.General.NameServers {
+		if _, err := dns.ParseNameServer(server); err != nil {
+			issues.add(0, "[General]", "dns-nameserver: %v", err)
+		}
+	}
+	if c.General.DNSFallback != "" {
+		switch c.General.DNSFallback {
+		case DNSFallbackSystem, DNSFallbackNone:
+		default:
+			issues.add(0, "[General]", "dns-fallback %q is not one of system, none", c.General.DNSFallback)
+		}
+		if len(c.General.NameServers) == 0 {
+			issues.add(0, "[General]", "dns-fallback is set but dns-nameserver is empty, so it has no effect")
+		}
+	}
+	if c.General.DNSTimeout <= 0 {
+		issues.add(0, "[General]", "dns-timeout must be positive")
+	}
+}
+
+// maxDatasetPathLen bounds a configured data file path, for the same reason
+// data-dir is bounded: it is a path, not a document.
+const maxDatasetPathLen = 4096
+
+// validateDatasets checks the shape of the two MaxMind DB paths. Their existence
+// is not checked here: loading them belongs to the rule compiler, which reports a
+// missing or corrupt file with the path and the reason, and a validation run
+// stays free of file system side effects.
+func (c *Config) validateDatasets(issues *Errors) {
+	for _, path := range []struct {
+		key   string
+		value string
+	}{
+		{"geoip-db", c.General.GeoIPDB},
+		{"asn-db", c.General.ASNDB},
+	} {
+		if path.value == "" {
+			continue
+		}
+		if len(path.value) > maxDatasetPathLen {
+			issues.add(0, "[General]", "%s is longer than %d bytes", path.key, maxDatasetPathLen)
+			continue
+		}
+		for i := 0; i < len(path.value); i++ {
+			if path.value[i] < 0x20 || path.value[i] == 0x7f {
+				issues.add(0, "[General]", "%s must not contain control characters", path.key)
+				break
+			}
+		}
+	}
+}
+
+// maxDataDirLen bounds the data directory setting. It is a path, not a message:
+// a longer value is a pasted document rather than something a user typed.
+const maxDataDirLen = 4096
+
+// validateDataDir checks the shape of data-dir only. Whether the directory
+// exists is deliberately not part of validation: a configuration has to be
+// checkable without creating anything, and the directory is made when the core
+// first writes to it.
+func (c *Config) validateDataDir(issues *Errors) {
+	dir := c.General.DataDir
+	if dir == "" {
 		return
 	}
-	host, port, err := net.SplitHostPort(c.General.APIListen)
+	if len(dir) > maxDataDirLen {
+		issues.add(0, "[General]", "data-dir is longer than %d bytes", maxDataDirLen)
+		return
+	}
+	for i := 0; i < len(dir); i++ {
+		if dir[i] < 0x20 || dir[i] == 0x7f {
+			issues.add(0, "[General]", "data-dir must not contain control characters")
+			return
+		}
+	}
+}
+
+// validateListen checks one host:port listen setting. An empty value means the
+// service stays off. Every listener of this daemon stays on the loopback
+// interface: an inbound proxy that is reachable from the network would be an
+// open relay the moment it has no credentials, and sharing one across a LAN is
+// not in the MVP.
+func (c *Config) validateListen(issues *Errors, key, addr string) {
+	if addr == "" {
+		return
+	}
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		issues.add(0, "[General]", "api-listen %q must be host:port", c.General.APIListen)
+		issues.add(0, "[General]", "%s %q must be host:port", key, addr)
 		return
 	}
 	if n, err := parsePortNumber(port); err != nil {
-		issues.add(0, "[General]", "api-listen port: %v", err)
+		issues.add(0, "[General]", "%s port: %v", key, err)
 	} else if n == 0 {
-		issues.add(0, "[General]", "api-listen needs a fixed port, %q is 0", port)
+		issues.add(0, "[General]", "%s needs a fixed port, %q is 0", key, port)
 	}
 	if !isLoopbackHost(host) {
-		issues.add(0, "[General]", "api-listen %q is not a loopback address; the local API never listens on a routable interface", c.General.APIListen)
+		if key == "api-listen" {
+			issues.add(0, "[General]", "api-listen %q is not a loopback address; the local API never listens on a routable interface", addr)
+			return
+		}
+		issues.add(0, "[General]", "%s %q is not a loopback address; the inbound listens on loopback only", key, addr)
+	}
+}
+
+// maxCredentialLen bounds an inbound credential: both protocols carry each half
+// in one length byte.
+const maxCredentialLen = 255
+
+// validateInboundAuth checks the optional SOCKS5 inbound credentials. Half a
+// pair is a configuration mistake, not a silent fallback to no authentication.
+func (c *Config) validateInboundAuth(issues *Errors) {
+	user, pass := c.General.SOCKS5Username, c.General.SOCKS5Password
+	switch {
+	case user == "" && pass == "":
+		return
+	case user == "":
+		issues.add(0, "[General]", "socks5-password is set without socks5-username")
+		return
+	case pass == "":
+		issues.add(0, "[General]", "socks5-username is set without socks5-password")
+		return
+	}
+	if len(user) > maxCredentialLen || len(pass) > maxCredentialLen {
+		issues.add(0, "[General]", "socks5-username and socks5-password are limited to %d bytes each", maxCredentialLen)
+	}
+	for _, s := range []string{user, pass} {
+		for i := 0; i < len(s); i++ {
+			if s[i] < 0x20 || s[i] == 0x7f {
+				issues.add(0, "[General]", "socks5 credentials must not contain control characters")
+				break
+			}
+		}
+	}
+	if c.General.SOCKS5Listen == "" {
+		issues.add(0, "[General]", "socks5 credentials are set but socks5-listen is off, so they have no effect")
 	}
 }
 

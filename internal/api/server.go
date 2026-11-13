@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -40,6 +42,12 @@ type Options struct {
 	Provider Provider
 	// Version is reported by the status and health endpoints.
 	Version string
+	// Logger receives one line per write operation and per internal error. Nil
+	// discards them.
+	Logger *slog.Logger
+	// AuditCapacity is how many write operations the server remembers. Zero
+	// means DefaultAuditCapacity.
+	AuditCapacity int
 }
 
 // Server is the loopback-only HTTP API. It is created with New, which binds the
@@ -51,6 +59,8 @@ type Server struct {
 	listener net.Listener
 	http     *http.Server
 	started  time.Time
+	logger   *slog.Logger
+	audit    *auditLog
 }
 
 // New validates the options, binds the listener and returns a server that is
@@ -73,6 +83,10 @@ func New(opts Options) (*Server, error) {
 			return nil, err
 		}
 	}
+	capacity := opts.AuditCapacity
+	if capacity <= 0 {
+		capacity = DefaultAuditCapacity
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("api: listen on %s: %w", addr, err)
@@ -83,17 +97,30 @@ func New(opts Options) (*Server, error) {
 		token:    token,
 		listener: ln,
 		started:  time.Now(),
+		logger:   loggerOrDiscard(opts.Logger),
+		audit:    newAuditLog(capacity),
 	}
 	s.http = &http.Server{
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    64 << 10,
-		ErrorLog:          nil,
+		// A configuration reload compiles the rule program before answering,
+		// so the write timeout has to cover reloadTimeout plus the response.
+		WriteTimeout:   2 * reloadTimeout,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 64 << 10,
+		ErrorLog:       nil,
 	}
 	return s, nil
+}
+
+// loggerOrDiscard returns a logger that swallows everything when l is nil, so
+// the write paths never have to test for one.
+func loggerOrDiscard(l *slog.Logger) *slog.Logger {
+	if l != nil {
+		return l
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // checkLoopback rejects anything but a loopback listen address, which is the
@@ -182,6 +209,14 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/rules", s.only(http.MethodGet, s.handleRules))
 	mux.HandleFunc("/v1/rules/explain", s.only(http.MethodGet, s.handleExplain))
 	mux.HandleFunc("/v1/policies", s.only(http.MethodGet, s.handlePolicies))
+	mux.HandleFunc("/v1/inbound", s.only(http.MethodGet, s.handleInbound))
+	mux.HandleFunc("/v1/failures", s.only(http.MethodGet, s.handleFailures))
+	mux.HandleFunc("/v1/dns", s.only(http.MethodGet, s.handleDNS))
+	mux.HandleFunc("/v1/audit", s.only(http.MethodGet, s.handleAudit))
+	// The write endpoints keep the same authentication and the same error
+	// shape. They are the only two places that change a running daemon.
+	mux.HandleFunc("/v1/policies/select", s.only(http.MethodPost, s.handleSelect))
+	mux.HandleFunc("/v1/config/reload", s.only(http.MethodPost, s.handleReload))
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.withAuth(mux)
 }
@@ -276,6 +311,37 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 		policies = []PolicyView{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"policies": policies})
+}
+
+func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), handlerTimeout)
+	defer cancel()
+	view := s.provider.Inbound(ctx)
+	if view.Inbounds == nil {
+		view.Inbounds = []InboundStatsView{}
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleFailures(w http.ResponseWriter, r *http.Request) {
+	limit, err := parseLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), handlerTimeout)
+	defer cancel()
+	view := s.provider.Failures(ctx, limit)
+	if view.Failures == nil {
+		view.Failures = []FailureView{}
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleDNS(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), handlerTimeout)
+	defer cancel()
+	writeJSON(w, http.StatusOK, s.provider.DNS(ctx))
 }
 
 func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {

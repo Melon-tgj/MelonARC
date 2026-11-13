@@ -88,6 +88,10 @@ type Status struct {
 	Members []MemberStatus `json:"members"`
 	// Checked is the time of the last probe round, zero when never probed.
 	Checked time.Time `json:"checked,omitempty"`
+	// AllUnhealthy reports that every member was probed and failed, so the
+	// group has no healthy member to move to. A group that has never been
+	// probed is not all-unhealthy: an unprobed member is treated as up.
+	AllUnhealthy bool `json:"all_unhealthy"`
 }
 
 // MemberStatus is the health of one member.
@@ -98,6 +102,15 @@ type MemberStatus struct {
 	// Checked is false before the member has been probed; such a member is
 	// treated as healthy so that a group works before its first probe.
 	Checked bool `json:"checked"`
+	// CheckedAt is when the member was last probed, or when it last failed in
+	// use. It is zero when neither has happened.
+	CheckedAt time.Time `json:"checked_at,omitempty"`
+	// Failures is the number of consecutive failures. A healthy probe resets
+	// it to zero; a failed probe or a failure in use adds one.
+	Failures int `json:"failures"`
+	// Error is the most recent failure, shortened. It is empty after a healthy
+	// probe.
+	Error string `json:"error,omitempty"`
 }
 
 // probeResult is what a probe round learned about one member.
@@ -106,6 +119,11 @@ type probeResult struct {
 	healthy bool
 	checked bool
 	at      time.Time
+	// err is the reason the probe failed, nil after a healthy one.
+	err error
+	// failures counts consecutive failures, probe rounds and failures in use
+	// alike.
+	failures int
 }
 
 // Resolution is the outcome of following a target through nested groups.

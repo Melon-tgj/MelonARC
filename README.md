@@ -2,7 +2,7 @@
 
 MelonARC (Adaptive Routing Core) is an open-source, cross-platform rule-based proxy client that dispatches traffic to different outbound protocols according to user-defined rules, with the core daemon and the UI kept strictly separate.
 
-**Status: MVP in development.** Nothing here is usable yet; the repository currently holds the project scaffold and the technology validation spikes under `spikes/`.
+**Status: MVP in development.** The core daemon carries real traffic over its HTTP and SOCKS5 inbounds, classifies it with the indexed rule engine, resolves names through the local DNS layer and switches policy groups through the local API; `melonarc-cli` drives that API. The desktop UI and the TUN inbound are not there yet, and the encrypted outbound protocols of the MVP are still unimplemented.
 
 ## MVP scope
 
@@ -54,7 +54,7 @@ MelonARC (Adaptive Routing Core) is an open-source, cross-platform rule-based pr
 ```
 cmd/melonarc-core   core daemon entry point
 cmd/melonarc-cli    command line client entry point
-internal/           core packages (config, rules, policy, outbound, inbound, dns, api, store)
+internal/           core packages (config, rules, policy, outbound, inbound, dns, api, cli, datadir, store)
 spikes/             technology validation prototypes and their results
 docs/               design and development documents
 ```

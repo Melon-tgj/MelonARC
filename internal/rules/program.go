@@ -48,17 +48,27 @@ type Program struct {
 	final  *Rule
 	loader *setLoader
 
-	domains   *domainIndex
-	v4        *rangeTable[uint32]
-	v6        *rangeTable[u128]
-	ports     *rangeTable[uint32]
-	protocols map[string]int32
+	domains *domainIndex
+	// v4 and v6 hold every address rule; the resolved variants hold only the
+	// rules that may match an address obtained by a lookup, so a no-resolve
+	// rule stays out of the path a name takes. The resolved tables share the
+	// full tables when no rule carries no-resolve, which is the common case.
+	v4         *rangeTable[uint32]
+	v6         *rangeTable[u128]
+	v4Resolved *rangeTable[uint32]
+	v6Resolved *rangeTable[u128]
+	ports      *rangeTable[uint32]
+	protocols  map[string]int32
 
 	geo []*Rule
 	asn []*Rule
 
 	geoDB GeoIPLookup
 	asnDB ASNLookup
+
+	// resolvable reports whether some address rule can match a name, which is
+	// what makes a lookup worth doing before matching.
+	resolvable bool
 
 	counts map[Kind]int
 }
@@ -88,12 +98,34 @@ func Compile(opts Options) (*Program, error) {
 		asnDB:     opts.ASN,
 		counts:    make(map[Kind]int, len(kinds)),
 	}
+	var v4Count, v6Count, portCount int
 	for i, r := range rules {
 		r.index = int32(i)
 		p.counts[r.Kind]++
+		switch r.Kind {
+		case KindIPCIDR:
+			v4Count++
+		case KindIPCIDR6:
+			v6Count++
+		case KindDestPort:
+			portCount++
+		}
 	}
 
-	var v4Blocks, v6Blocks, portBlocks []block
+	// A rule carrying no-resolve needs a second view of the address index, one
+	// without it. Building that view doubles the block list, so it only happens
+	// when the program actually contains such a rule; a configuration that does
+	// not use the flag pays nothing.
+	needViews := hasNoResolve(rules)
+	v4Blocks := make([]block, 0, v4Count)
+	v6Blocks := make([]block, 0, v6Count)
+	portBlocks := make([]block, 0, portCount)
+	var v4Resolvable, v6Resolvable []block
+	if needViews {
+		v4Resolvable = make([]block, 0, v4Count)
+		v6Resolvable = make([]block, 0, v6Count)
+	}
+
 	for _, r := range rules {
 		idx := r.index
 		switch r.Kind {
@@ -125,6 +157,19 @@ func Compile(opts Options) (*Program, error) {
 			} else {
 				v6Blocks = append(v6Blocks, b)
 			}
+			if r.NoResolve {
+				continue
+			}
+			p.resolvable = true
+			if !needViews {
+				// Both views would be the same list, so only one is built.
+				continue
+			}
+			if isV4 {
+				v4Resolvable = append(v4Resolvable, b)
+			} else {
+				v6Resolvable = append(v6Resolvable, b)
+			}
 		case KindDestPort:
 			lo, hi, err := parsePortSpec(r.Payload)
 			if err != nil {
@@ -144,11 +189,17 @@ func Compile(opts Options) (*Program, error) {
 				return nil, fmt.Errorf("rule #%d %s needs a GEOIP database, none was supplied", idx, r)
 			}
 			p.geo = append(p.geo, r)
+			if !r.NoResolve {
+				p.resolvable = true
+			}
 		case KindIPASN:
 			if p.asnDB == nil {
 				return nil, fmt.Errorf("rule #%d %s needs an ASN database, none was supplied", idx, r)
 			}
 			p.asn = append(p.asn, r)
+			if !r.NoResolve {
+				p.resolvable = true
+			}
 		case KindFinal:
 			if p.final == nil {
 				p.final = r
@@ -160,9 +211,35 @@ func Compile(opts Options) (*Program, error) {
 
 	p.v4 = newRangeTable4(buildRanges(v4Blocks))
 	p.v6 = newRangeTable6(buildRanges(v6Blocks))
+	// A program without no-resolve rules answers the same way whether the
+	// address was supplied or looked up, so the second pair of tables is only
+	// built when it can differ; otherwise both views share one table.
+	p.v4Resolved = p.v4
+	p.v6Resolved = p.v6
+	if needViews {
+		p.v4Resolved = newRangeTable4(buildRanges(v4Resolvable))
+		p.v6Resolved = newRangeTable6(buildRanges(v6Resolvable))
+	}
 	p.ports = newRangeTablePorts(buildRanges(portBlocks))
 	return p, nil
 }
+
+// hasNoResolve reports whether some address rule carries no-resolve, which is
+// the only case where the index of resolved addresses differs from the full one.
+func hasNoResolve(rules []*Rule) bool {
+	for _, r := range rules {
+		if r.NoResolve && r.Kind.Dimension() == DimensionAddr {
+			return true
+		}
+	}
+	return false
+}
+
+// NeedsResolution reports whether a name has to be resolved before matching:
+// true when at least one address rule can accept an address obtained by a
+// lookup. When every address rule carries no-resolve, resolving would be work
+// that cannot change the decision, and the caller must not do it.
+func (p *Program) NeedsResolution() bool { return p.resolvable }
 
 // flatten expands RULE-SET references and keeps everything else in order.
 func flatten(rules []*Rule, loader *setLoader) ([]*Rule, error) {
@@ -226,15 +303,16 @@ func (p *Program) Stats() Stats {
 
 // prepared is a query normalised once for all index lookups.
 type prepared struct {
-	raw     Query
-	name    string
-	hasName bool
-	v4      uint32
-	v6      u128
-	family  int // 0 none, 4 or 6
-	port    uint32
-	hasPort bool
-	network string
+	raw      Query
+	name     string
+	hasName  bool
+	v4       uint32
+	v6       u128
+	family   int // 0 none, 4 or 6
+	resolved bool
+	port     uint32
+	hasPort  bool
+	network  string
 }
 
 func prepareQuery(q Query) prepared {
@@ -252,6 +330,7 @@ func prepareQuery(q Query) prepared {
 			pre.v6 = ipToU128(v6)
 			pre.family = 6
 		}
+		pre.resolved = pre.family != 0 && q.Resolved
 	}
 	if q.Port > 0 && q.Port <= 65535 {
 		pre.port, pre.hasPort = uint32(q.Port), true
@@ -361,20 +440,28 @@ func (p *Program) evaluate(pre *prepared, steps *[]Step) (*Rule, bool) {
 		}
 	}
 
-	// IP-CIDR
+	// IP-CIDR. The table chosen here is the only difference a resolved address
+	// makes: it selects the index that leaves the no-resolve rules out, so the
+	// rules themselves need no per-query check.
 	if p.v4.len() > 0 {
 		if pre.family != 4 {
 			if steps != nil {
 				add(Step{Kind: KindIPCIDR, Detail: "skipped: query carries no IPv4 address"})
 			}
-		} else if idx, ok := p.v4.lookup(pre.v4); ok {
-			take(idx)
-			if steps != nil {
-				add(Step{Kind: KindIPCIDR, Index: int(idx), Rule: p.rules[idx], Match: true,
-					Detail: fmt.Sprintf("prefix %s covers the address", p.rules[idx].Payload)})
+		} else {
+			idx, hit := p.v4.lookup(pre.v4)
+			if pre.resolved && p.v4Resolved != p.v4 {
+				idx, hit = p.v4Resolved.lookup(pre.v4)
 			}
-		} else if steps != nil {
-			add(Step{Kind: KindIPCIDR, Detail: "no IPv4 prefix covers the address"})
+			if hit {
+				take(idx)
+				if steps != nil {
+					add(Step{Kind: KindIPCIDR, Index: int(idx), Rule: p.rules[idx], Match: true,
+						Detail: fmt.Sprintf("prefix %s covers the address", p.rules[idx].Payload)})
+				}
+			} else if steps != nil {
+				add(Step{Kind: KindIPCIDR, Detail: addressMiss(p, "IPv4 prefix", p.v4, p.v4Resolved, pre.v4, pre.resolved)})
+			}
 		}
 	}
 
@@ -384,14 +471,20 @@ func (p *Program) evaluate(pre *prepared, steps *[]Step) (*Rule, bool) {
 			if steps != nil {
 				add(Step{Kind: KindIPCIDR6, Detail: "skipped: query carries no IPv6 address"})
 			}
-		} else if idx, ok := p.v6.lookup(pre.v6); ok {
-			take(idx)
-			if steps != nil {
-				add(Step{Kind: KindIPCIDR6, Index: int(idx), Rule: p.rules[idx], Match: true,
-					Detail: fmt.Sprintf("prefix %s covers the address", p.rules[idx].Payload)})
+		} else {
+			idx, hit := p.v6.lookup(pre.v6)
+			if pre.resolved && p.v6Resolved != p.v6 {
+				idx, hit = p.v6Resolved.lookup(pre.v6)
 			}
-		} else if steps != nil {
-			add(Step{Kind: KindIPCIDR6, Detail: "no IPv6 prefix covers the address"})
+			if hit {
+				take(idx)
+				if steps != nil {
+					add(Step{Kind: KindIPCIDR6, Index: int(idx), Rule: p.rules[idx], Match: true,
+						Detail: fmt.Sprintf("prefix %s covers the address", p.rules[idx].Payload)})
+				}
+			} else if steps != nil {
+				add(Step{Kind: KindIPCIDR6, Detail: addressMiss(p, "IPv6 prefix", p.v6, p.v6Resolved, pre.v6, pre.resolved)})
+			}
 		}
 	}
 
@@ -445,6 +538,13 @@ func (p *Program) evaluate(pre *prepared, steps *[]Step) (*Rule, bool) {
 			if best >= 0 && r.index >= best {
 				break
 			}
+			if pre.resolved && r.NoResolve {
+				if steps != nil {
+					add(Step{Kind: KindGeoIP, Index: int(r.index), Rule: r,
+						Detail: "skipped: no-resolve rule does not apply to a resolved address"})
+				}
+				continue
+			}
 			cc, ok := p.geoDB.Country(ip)
 			inSet := ok && strings.EqualFold(cc, r.Payload)
 			if inSet {
@@ -461,6 +561,13 @@ func (p *Program) evaluate(pre *prepared, steps *[]Step) (*Rule, bool) {
 		for _, r := range p.asn {
 			if best >= 0 && r.index >= best {
 				break
+			}
+			if pre.resolved && r.NoResolve {
+				if steps != nil {
+					add(Step{Kind: KindIPASN, Index: int(r.index), Rule: r,
+						Detail: "skipped: no-resolve rule does not apply to a resolved address"})
+				}
+				continue
 			}
 			asn, ok := p.asnDB.ASN(ip)
 			inSet := ok && strconv.FormatUint(uint64(asn), 10) == r.Payload
@@ -490,4 +597,19 @@ func (p *Program) evaluate(pre *prepared, steps *[]Step) (*Rule, bool) {
 	}
 	r := p.rules[best]
 	return r, true
+}
+
+// addressMiss explains an address dimension that found no rule. When a resolved
+// address is covered by a no-resolve rule alone, that rule is named, so the
+// report says why a prefix that covers the address did not decide the request.
+// It only runs for an explanation, which is why the extra lookup is acceptable
+// here and not in Match.
+func addressMiss[A comparable](p *Program, what string, full, resolvable *rangeTable[A], v A, fromLookup bool) string {
+	if fromLookup && resolvable != full {
+		if idx, ok := full.lookup(v); ok {
+			return fmt.Sprintf("%s %s covers the address, but that rule carries no-resolve and the address came from a lookup",
+				what, p.rules[idx].Payload)
+		}
+	}
+	return "no " + what + " covers the address"
 }

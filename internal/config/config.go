@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -32,6 +33,41 @@ type General struct {
 	// APIListen is the loopback address of the local API, empty when the API
 	// should not be started.
 	APIListen string
+	// HTTPListen is the loopback address of the HTTP inbound, empty when that
+	// listener is off.
+	HTTPListen string
+	// SOCKS5Listen is the loopback address of the SOCKS5 inbound, empty when
+	// that listener is off.
+	SOCKS5Listen string
+	// SOCKS5Username and SOCKS5Password make the SOCKS5 inbound ask for
+	// username and password authentication. Both empty means it accepts
+	// without authentication.
+	SOCKS5Username string
+	SOCKS5Password string
+	// DataDir is where the core keeps its local state, such as the API token
+	// file. Empty means the platform's configuration directory plus the
+	// product name; a relative value is resolved against the directory of the
+	// configuration file, the same rule rule sets follow.
+	DataDir string
+	// NameServers are the plaintext DNS servers, in the order they are asked.
+	// Empty means names go to the system resolver, which is also the fallback
+	// when every server here fails.
+	NameServers []string
+	// DNSFallback is "system" or "none": whether a failed upstream lookup falls
+	// back to the system resolver. Empty means "system", which is the default
+	// because an unreachable upstream should not take name resolution away.
+	DNSFallback string
+	// DNSTimeout bounds one attempt against one upstream server, over one
+	// transport. The whole lookup is still bounded by the resolver's own
+	// timeout.
+	DNSTimeout time.Duration
+	// GeoIPDB is the MaxMind DB file that answers GEOIP rules, empty when no
+	// such rule exists. A relative value is resolved against the directory of
+	// the configuration file.
+	GeoIPDB string
+	// ASNDB is the MaxMind DB file that answers IP-ASN rules, empty when no
+	// such rule exists.
+	ASNDB string
 }
 
 // Proxy is one entry of the [Proxy] section. Everything after the type is kept
@@ -86,6 +122,16 @@ type HostEntry struct {
 const (
 	TargetDirect = "DIRECT"
 	TargetReject = "REJECT"
+)
+
+// The values dns-fallback accepts.
+const (
+	// DNSFallbackSystem asks the system resolver when every configured upstream
+	// failed.
+	DNSFallbackSystem = "system"
+	// DNSFallbackNone fails the lookup instead, so a configuration can insist
+	// that names are only ever answered by the servers it names.
+	DNSFallbackNone = "none"
 )
 
 // BuiltinTargets lists the targets available without any declaration.
@@ -197,6 +243,17 @@ func (c *Config) HostByName(name string) ([]net.IP, bool) {
 	return nil, false
 }
 
+// HostMap returns the [Host] table in the shape the resolver takes: name to
+// addresses. Names are already lower case from parsing, but they are normalised
+// here too so the resolver does not depend on how the parser spelled them.
+func (c *Config) HostMap() map[string][]net.IP {
+	out := make(map[string][]net.IP, len(c.Hosts))
+	for _, h := range c.Hosts {
+		out[strings.ToLower(h.Name)] = append([]net.IP(nil), h.Addrs...)
+	}
+	return out
+}
+
 // RuleSetPaths returns the name to path map the rule compiler expects.
 func (c *Config) RuleSetPaths() map[string]string {
 	out := make(map[string]string, len(c.RuleSets))
@@ -204,4 +261,25 @@ func (c *Config) RuleSetPaths() map[string]string {
 		out[r.Name] = r.Path
 	}
 	return out
+}
+
+// FallbackToSystem reports whether a failed upstream lookup may be answered by
+// the system resolver. The default is yes: falling back keeps a stale
+// nameserver setting from taking name resolution away entirely, and the answer
+// is still cached and reported with its own source.
+func (g General) FallbackToSystem() bool {
+	return !strings.EqualFold(g.DNSFallback, DNSFallbackNone)
+}
+
+// DataPath resolves a path taken from the configuration against the directory of
+// the configuration file, the same rule rule sets follow. An absolute path is
+// kept as written, so a data set can live outside the configuration directory.
+//
+// Nothing is checked here: whether the file exists is a question for the loader,
+// because -check has to work without touching the file system.
+func (c *Config) DataPath(path string) string {
+	if path == "" || filepath.IsAbs(path) || c.BaseDir == "" {
+		return path
+	}
+	return filepath.Join(c.BaseDir, path)
 }

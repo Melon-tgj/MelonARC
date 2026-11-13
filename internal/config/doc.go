@@ -13,5 +13,8 @@
 //	RULE-SET,ads,REJECT
 //	FINAL,DIRECT
 //
-// Hot reload, share link and subscription import are later stages.
+// Hot reload is driven by the local API: the daemon re-reads the file it loaded,
+// validates it again and only then activates it, so a file that does not
+// validate never replaces the one in force. Share link and subscription import
+// are later stages.
 package config

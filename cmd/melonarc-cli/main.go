@@ -1,14 +1,16 @@
 // Command melonarc-cli is the command line client for MelonARC.
 //
 // It talks to a running core daemon over the local API and never performs
-// privileged work itself.
+// privileged work itself. The token is read from the data directory of the core
+// unless it is given explicitly, so no argument is needed in the common case.
 package main
 
-import "fmt"
+import (
+	"os"
 
-// version is the build version placeholder, overridden at link time later on.
-const version = "0.1.0-dev"
+	"github.com/melon-tgj/melonarc/internal/cli"
+)
 
 func main() {
-	fmt.Printf("melonarc-cli %s\n", version)
+	os.Exit(cli.Run(os.Args[1:], os.Stdout, os.Stderr))
 }

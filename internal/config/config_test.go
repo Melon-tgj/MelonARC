@@ -100,6 +100,40 @@ func TestParseDefaults(t *testing.T) {
 	if cfg.General.LogLevel != defaultLogLevel || cfg.General.APIListen != defaultAPIListen {
 		t.Fatalf("defaults = %+v", cfg.General)
 	}
+	if cfg.General.HTTPListen != defaultHTTPListen || cfg.General.SOCKS5Listen != defaultSOCKS5Listen {
+		t.Fatalf("inbound defaults = %+v", cfg.General)
+	}
+	if cfg.General.SOCKS5Username != "" || cfg.General.SOCKS5Password != "" {
+		t.Fatalf("authentication must be off by default: %+v", cfg.General)
+	}
+}
+
+func TestParseInboundSettings(t *testing.T) {
+	in := `[General]
+http-listen = off
+socks5-listen = 127.0.0.1:18081
+socks5-username = alice
+socks5-password = s3cret
+
+[Rule]
+FINAL,DIRECT
+`
+	cfg, err := Parse([]byte(in))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.General.HTTPListen != "" {
+		t.Errorf("HTTPListen = %q, want the listener switched off", cfg.General.HTTPListen)
+	}
+	if cfg.General.SOCKS5Listen != "127.0.0.1:18081" {
+		t.Errorf("SOCKS5Listen = %q", cfg.General.SOCKS5Listen)
+	}
+	if cfg.General.SOCKS5Username != "alice" || cfg.General.SOCKS5Password != "s3cret" {
+		t.Errorf("credentials = %q, %q", cfg.General.SOCKS5Username, cfg.General.SOCKS5Password)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
 }
 
 func TestParseSyntaxErrors(t *testing.T) {
@@ -233,6 +267,47 @@ func TestValidateErrors(t *testing.T) {
 			name: "bad log level",
 			in:   base("[General]\nlog-level = verbose", rule("FINAL,DIRECT")),
 			want: []string{"not one of debug, info, warn, error"},
+		},
+		{
+			name: "http inbound on all interfaces",
+			in:   base("[General]\nhttp-listen = 0.0.0.0:7890", rule("FINAL,DIRECT")),
+			want: []string{"http-listen", "not a loopback address"},
+		},
+		{
+			name: "socks5 inbound on a lan address",
+			in:   base("[General]\nsocks5-listen = 192.168.1.10:7891", rule("FINAL,DIRECT")),
+			want: []string{"socks5-listen", "not a loopback address"},
+		},
+		{
+			name: "inbound without port",
+			in:   base("[General]\nhttp-listen = 127.0.0.1", rule("FINAL,DIRECT")),
+			want: []string{"http-listen", "must be host:port"},
+		},
+		{
+			name: "inbound port zero",
+			in:   base("[General]\nsocks5-listen = 127.0.0.1:0", rule("FINAL,DIRECT")),
+			want: []string{"socks5-listen", "fixed port"},
+		},
+		{
+			name: "username without password",
+			in:   base("[General]\nsocks5-username = alice", rule("FINAL,DIRECT")),
+			want: []string{"socks5-username is set without socks5-password"},
+		},
+		{
+			name: "password without username",
+			in:   base("[General]\nsocks5-password = s3cret", rule("FINAL,DIRECT")),
+			want: []string{"socks5-password is set without socks5-username"},
+		},
+		{
+			name: "credentials with the listener off",
+			in:   base("[General]\nsocks5-listen = off\nsocks5-username = alice\nsocks5-password = s3cret", rule("FINAL,DIRECT")),
+			want: []string{"socks5-listen is off"},
+		},
+		{
+			name: "credential longer than one byte of length",
+			in: base("[General]\nsocks5-username = "+strings.Repeat("a", 256)+
+				"\nsocks5-password = s3cret", rule("FINAL,DIRECT")),
+			want: []string{"limited to 255 bytes"},
 		},
 		{
 			name: "unknown proxy type",

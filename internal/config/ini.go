@@ -24,12 +24,36 @@ const (
 	defaultLogLevel  = "info"
 )
 
+// Defaults for the inbound listeners. They are on by default because the
+// daemon exists to carry traffic: a configuration that says nothing about
+// them still gives a local application something to point at.
+const (
+	defaultHTTPListen   = "127.0.0.1:7890"
+	defaultSOCKS5Listen = "127.0.0.1:7891"
+)
+
+// listenOff is the value that switches a listener off. An empty value cannot be
+// written as "key = " because that is a syntax error, so the setting needs a
+// word of its own.
+const listenOff = "off"
+
 // Defaults for policy group timings.
 const (
 	defaultInterval  = 300 * time.Second
 	defaultTimeout   = 5 * time.Second
 	defaultTolerance = 50 * time.Millisecond
 )
+
+// defaultDNSTimeout bounds one attempt against one plaintext upstream, over one
+// transport.
+//
+// It is deliberately smaller than a quarter of the resolver's own budget: a
+// question costs one datagram and one stream attempt per server, so two
+// configured servers spend at most four attempts, and a five second lookup
+// budget still has a second left for the system fallback. A larger value spends
+// the budget on a server that is not talking and quietly turns the configured
+// fallback into "give up".
+const defaultDNSTimeout = time.Second
 
 // Load reads, parses and validates a configuration file. Both the parse result
 // and the errors are returned: a caller that wants to show every problem at
@@ -62,7 +86,13 @@ func Load(path string) (*Config, error) {
 // Validate for the semantic checks that decide whether the configuration may
 // take effect.
 func Parse(data []byte) (*Config, error) {
-	cfg := &Config{General: General{LogLevel: defaultLogLevel, APIListen: defaultAPIListen}}
+	cfg := &Config{General: General{
+		LogLevel:     defaultLogLevel,
+		APIListen:    defaultAPIListen,
+		HTTPListen:   defaultHTTPListen,
+		SOCKS5Listen: defaultSOCKS5Listen,
+		DNSTimeout:   defaultDNSTimeout,
+	}}
 	issues := &Errors{}
 	seen := make(map[string]int) // "section/key" -> first line
 	section := ""
@@ -189,10 +219,46 @@ func parseGeneralEntry(cfg *Config, key, value string, line int, seen map[string
 		cfg.General.LogLevel = strings.ToLower(value)
 	case "api-listen":
 		cfg.General.APIListen = value
+	case "http-listen":
+		cfg.General.HTTPListen = listenAddress(value)
+	case "socks5-listen":
+		cfg.General.SOCKS5Listen = listenAddress(value)
+	case "socks5-username":
+		cfg.General.SOCKS5Username = value
+	case "socks5-password":
+		cfg.General.SOCKS5Password = value
+	case "data-dir":
+		cfg.General.DataDir = value
+	case "dns-nameserver":
+		// The addresses keep the order they were written in: that order is the
+		// order they are asked, which is the only way to express a preference.
+		cfg.General.NameServers = splitList(value)
+	case "dns-fallback":
+		cfg.General.DNSFallback = strings.ToLower(strings.TrimSpace(value))
+	case "dns-timeout":
+		d, err := parseSeconds(value)
+		if err != nil {
+			return fmt.Errorf("dns-timeout: %v", err)
+		}
+		cfg.General.DNSTimeout = d
+	case "geoip-db":
+		cfg.General.GeoIPDB = value
+	case "asn-db":
+		cfg.General.ASNDB = value
 	default:
 		return fmt.Errorf("unknown setting %q", key)
 	}
 	return nil
+}
+
+// listenAddress normalises a listen setting: the word that switches a listener
+// off becomes the empty address, everything else is kept as written so that
+// Validate can report exactly what the user typed.
+func listenAddress(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), listenOff) {
+		return ""
+	}
+	return value
 }
 
 // parseProxy splits "type, server, port, ..." and keeps the tail as raw args.

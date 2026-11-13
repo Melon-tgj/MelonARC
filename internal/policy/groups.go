@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Default timings for groups that probe their members.
@@ -82,6 +83,7 @@ func probeRound(ctx context.Context, prober Prober, members []string, timeout ti
 				healthy: err == nil,
 				checked: true,
 				at:      time.Now(),
+				err:     err,
 			}}
 		}(m)
 	}
@@ -93,14 +95,46 @@ func probeRound(ctx context.Context, prober Prober, members []string, timeout ti
 	return out
 }
 
+// carryFailures keeps the consecutive failure count across probe rounds: a
+// healthy answer clears it, a failed one adds to what the member already had.
+// previous may be nil on the first round.
+func carryFailures(fresh, previous map[string]probeResult) {
+	for name, r := range fresh {
+		if r.healthy {
+			r.failures = 0
+			r.err = nil
+		} else {
+			r.failures = previous[name].failures + 1
+		}
+		fresh[name] = r
+	}
+}
+
+// allUnhealthy reports whether every member was probed and failed. A member
+// that has never been probed counts as up, which is what keeps a fresh group
+// from reporting itself dead before its first round.
+func allUnhealthy(members []string, results map[string]probeResult) bool {
+	if len(members) == 0 {
+		return false
+	}
+	for _, m := range members {
+		r := results[m]
+		if !r.checked || r.healthy {
+			return false
+		}
+	}
+	return true
+}
+
 // Select is a group that routes to the member the user picked. A selection
 // takes effect on the next lookup, with no probing involved.
 type Select struct {
 	name    string
 	members []string
 
-	mu     sync.RWMutex
-	active string
+	mu      sync.RWMutex
+	active  string
+	results map[string]probeResult
 }
 
 // NewSelect builds a select group. initial may be empty, in which case the
@@ -119,7 +153,12 @@ func NewSelect(name string, members []string, initial string) (*Select, error) {
 		}
 		active = initial
 	}
-	return &Select{name: name, members: append([]string(nil), members...), active: active}, nil
+	return &Select{
+		name:    name,
+		members: append([]string(nil), members...),
+		active:  active,
+		results: make(map[string]probeResult, len(members)),
+	}, nil
 }
 
 // Name implements Group.
@@ -149,9 +188,24 @@ func (g *Select) Select(name string) error {
 	return nil
 }
 
-// NotifyFailure implements Group. A manual group ignores it: the user owns the
-// choice and a failing member stays selected until they pick another one.
-func (g *Select) NotifyFailure(string) {}
+// NotifyFailure implements Group. The selection never changes: the user owns
+// the choice and a failing member stays selected until they pick another one.
+//
+// The failure is still counted. A manual group has no probe, so this is the
+// only way "the member I picked keeps failing" can reach an operator, and the
+// member is left marked as never probed rather than down, because nothing here
+// can bring it back up.
+func (g *Select) NotifyFailure(name string) {
+	if !contains(g.members, name) {
+		return
+	}
+	g.mu.Lock()
+	r := g.results[name]
+	r.failures++
+	r.at = time.Now()
+	g.results[name] = r
+	g.mu.Unlock()
+}
 
 // Start implements Group. A manual group has no background work.
 func (g *Select) Start(context.Context) {}
@@ -159,13 +213,13 @@ func (g *Select) Start(context.Context) {}
 // Status implements Group.
 func (g *Select) Status() Status {
 	g.mu.RLock()
-	active := g.active
-	g.mu.RUnlock()
-	members := make([]MemberStatus, 0, len(g.members))
-	for _, m := range g.members {
-		members = append(members, MemberStatus{Name: m, Healthy: true})
+	defer g.mu.RUnlock()
+	return Status{
+		Name:    g.name,
+		Kind:    KindSelect,
+		Active:  g.active,
+		Members: memberStatuses(g.members, g.results),
 	}
-	return Status{Name: g.name, Kind: KindSelect, Active: active, Members: members}
 }
 
 // Close implements Group.
@@ -253,6 +307,7 @@ func (g *URLTest) NotifyFailure(name string) {
 	r.healthy = false
 	r.checked = true
 	r.at = time.Now()
+	r.failures++
 	g.results[name] = r
 	g.reselectLocked()
 	g.mu.Unlock()
@@ -269,6 +324,7 @@ func (g *URLTest) Check(ctx context.Context) {
 	defer g.bg.checkMu.Unlock()
 	results := probeRound(ctx, g.prober, g.members, g.timeout)
 	g.mu.Lock()
+	carryFailures(results, g.results)
 	g.results = results
 	g.lastCheck = time.Now()
 	g.reselectLocked()
@@ -312,11 +368,12 @@ func (g *URLTest) Status() Status {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return Status{
-		Name:    g.name,
-		Kind:    KindURLTest,
-		Active:  g.active,
-		Members: memberStatuses(g.members, g.results),
-		Checked: g.lastCheck,
+		Name:         g.name,
+		Kind:         KindURLTest,
+		Active:       g.active,
+		Members:      memberStatuses(g.members, g.results),
+		Checked:      g.lastCheck,
+		AllUnhealthy: allUnhealthy(g.members, g.results),
 	}
 }
 
@@ -395,6 +452,7 @@ func (g *Fallback) NotifyFailure(name string) {
 	r.healthy = false
 	r.checked = true
 	r.at = time.Now()
+	r.failures++
 	g.results[name] = r
 	g.reselectLocked()
 	g.mu.Unlock()
@@ -411,6 +469,7 @@ func (g *Fallback) Check(ctx context.Context) {
 	defer g.bg.checkMu.Unlock()
 	results := probeRound(ctx, g.prober, g.members, g.timeout)
 	g.mu.Lock()
+	carryFailures(results, g.results)
 	g.results = results
 	g.lastCheck = time.Now()
 	g.reselectLocked()
@@ -438,11 +497,12 @@ func (g *Fallback) Status() Status {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return Status{
-		Name:    g.name,
-		Kind:    KindFallback,
-		Active:  g.active,
-		Members: memberStatuses(g.members, g.results),
-		Checked: g.lastCheck,
+		Name:         g.name,
+		Kind:         KindFallback,
+		Active:       g.active,
+		Members:      memberStatuses(g.members, g.results),
+		Checked:      g.lastCheck,
+		AllUnhealthy: allUnhealthy(g.members, g.results),
 	}
 }
 
@@ -455,13 +515,38 @@ func memberStatuses(members []string, results map[string]probeResult) []MemberSt
 	for _, m := range members {
 		r := results[m]
 		out = append(out, MemberStatus{
-			Name:    m,
-			Latency: r.latency,
-			Healthy: !r.checked || r.healthy,
-			Checked: r.checked,
+			Name:      m,
+			Latency:   r.latency,
+			Healthy:   !r.checked || r.healthy,
+			Checked:   r.checked,
+			CheckedAt: r.at,
+			Failures:  r.failures,
+			Error:     shortError(r.err),
 		})
 	}
 	return out
+}
+
+// maxErrorLen bounds the failure text a member snapshot carries. A probe error
+// repeats the URL that failed, which is configuration, but a snapshot is read
+// by a UI and must not grow with whatever a remote peer put in a message.
+const maxErrorLen = 160
+
+// shortError renders an error for a snapshot, cutting it at a rune boundary so
+// the result stays valid text.
+func shortError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if len(msg) <= maxErrorLen {
+		return msg
+	}
+	cut := maxErrorLen
+	for cut > 0 && !utf8.RuneStart(msg[cut]) {
+		cut--
+	}
+	return msg[:cut] + "..."
 }
 
 func contains(list []string, s string) bool {

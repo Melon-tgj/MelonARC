@@ -14,14 +14,24 @@ import (
 
 // fakeProvider serves fixed views so the transport can be tested on its own.
 type fakeProvider struct {
-	status     StatusView
-	config     ConfigView
-	rules      RuleListView
-	policies   []PolicyView
-	explain    ExplainView
-	explainErr error
-	lastLimit  int
-	lastReq    ExplainRequest
+	status        StatusView
+	config        ConfigView
+	rules         RuleListView
+	policies      []PolicyView
+	explain       ExplainView
+	explainErr    error
+	inbound       InboundView
+	failures      FailureListView
+	dns           DNSView
+	selectView    SelectView
+	selectErr     error
+	reloadView    ReloadView
+	reloadErr     error
+	lastLimit     int
+	lastReq       ExplainRequest
+	lastFailLimit int
+	lastSelect    [2]string
+	reloadCalls   int
 }
 
 func (f *fakeProvider) Status(context.Context) StatusView { return f.status }
@@ -34,6 +44,20 @@ func (f *fakeProvider) Policies(context.Context) []PolicyView { return f.policie
 func (f *fakeProvider) Explain(_ context.Context, req ExplainRequest) (ExplainView, error) {
 	f.lastReq = req
 	return f.explain, f.explainErr
+}
+func (f *fakeProvider) Inbound(context.Context) InboundView { return f.inbound }
+func (f *fakeProvider) Failures(_ context.Context, limit int) FailureListView {
+	f.lastFailLimit = limit
+	return f.failures
+}
+func (f *fakeProvider) DNS(context.Context) DNSView { return f.dns }
+func (f *fakeProvider) SelectPolicy(_ context.Context, group, member string) (SelectView, error) {
+	f.lastSelect = [2]string{group, member}
+	return f.selectView, f.selectErr
+}
+func (f *fakeProvider) ReloadConfig(context.Context) (ReloadView, error) {
+	f.reloadCalls++
+	return f.reloadView, f.reloadErr
 }
 
 func newTestServer(t *testing.T, p Provider) *Server {
