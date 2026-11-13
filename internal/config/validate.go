@@ -1,0 +1,366 @@
+package config
+
+import (
+	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"github.com/melon-tgj/melonarc/internal/rules"
+)
+
+// maxNameLen bounds the length of a proxy or group name.
+const maxNameLen = 128
+
+// Validate runs the semantic checks that decide whether a configuration may
+// take effect: every reference must resolve, every rule set must be declared,
+// the rule list must end with FINAL and the local API must stay on loopback.
+// All problems are reported together.
+func (c *Config) Validate() error {
+	issues := &Errors{}
+	c.normaliseTargets()
+	c.validateGeneral(issues)
+	targets := c.validateProxies(issues)
+	c.validateGroups(issues, targets)
+	c.validateRuleSets(issues)
+	c.validateRules(issues, targets)
+	c.validateHosts(issues)
+	return issues.Err()
+}
+
+// normaliseTargets upper-cases the built-in targets so that "direct" in a rule
+// means the same thing as "DIRECT". Proxy and group names stay case sensitive.
+func (c *Config) normaliseTargets() {
+	for _, r := range c.Rules {
+		switch {
+		case strings.EqualFold(r.Target, TargetDirect):
+			r.Target = TargetDirect
+		case strings.EqualFold(r.Target, TargetReject):
+			r.Target = TargetReject
+		}
+	}
+}
+
+func (c *Config) validateGeneral(issues *Errors) {
+	if c.General.LogLevel == "" {
+		c.General.LogLevel = defaultLogLevel
+	}
+	if !logLevels[c.General.LogLevel] {
+		issues.add(0, "[General]", "log-level %q is not one of debug, info, warn, error", c.General.LogLevel)
+	}
+	if c.General.APIListen == "" {
+		return
+	}
+	host, port, err := net.SplitHostPort(c.General.APIListen)
+	if err != nil {
+		issues.add(0, "[General]", "api-listen %q must be host:port", c.General.APIListen)
+		return
+	}
+	if n, err := parsePortNumber(port); err != nil {
+		issues.add(0, "[General]", "api-listen port: %v", err)
+	} else if n == 0 {
+		issues.add(0, "[General]", "api-listen needs a fixed port, %q is 0", port)
+	}
+	if !isLoopbackHost(host) {
+		issues.add(0, "[General]", "api-listen %q is not a loopback address; the local API never listens on a routable interface", c.General.APIListen)
+	}
+}
+
+// isLoopbackHost reports whether a host names the loopback interface.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// parsePortNumber parses a decimal port number.
+func parsePortNumber(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a number", s)
+	}
+	if n < 0 || n > 65535 {
+		return 0, fmt.Errorf("%q is outside 0-65535", s)
+	}
+	return n, nil
+}
+
+// validateProxies checks every [Proxy] entry and returns the set of names that
+// rules and groups may point at.
+func (c *Config) validateProxies(issues *Errors) map[string]bool {
+	targets := map[string]bool{TargetDirect: true, TargetReject: true}
+	seen := make(map[string]int, len(c.Proxies))
+	for _, p := range c.Proxies {
+		if err := validName(p.Name); err != nil {
+			issues.add(p.Line, "[Proxy]", "%v", err)
+		} else if _, dup := seen[p.Name]; dup {
+			issues.add(p.Line, "[Proxy]", "proxy %q is defined more than once", p.Name)
+		}
+		seen[p.Name] = p.Line
+		if isBuiltinName(p.Name) {
+			issues.add(p.Line, "[Proxy]", "%q is a reserved target and cannot be redefined", p.Name)
+		}
+		if !knownProxyTypes[p.Type] {
+			issues.add(p.Line, "[Proxy]", "proxy %q has unknown type %q", p.Name, p.Type)
+		}
+		if p.Server == "" {
+			issues.add(p.Line, "[Proxy]", "proxy %q has no server", p.Name)
+		} else if strings.ContainsAny(p.Server, " \t") {
+			issues.add(p.Line, "[Proxy]", "proxy %q: server %q contains whitespace", p.Name, p.Server)
+		}
+		if p.Port < 1 || p.Port > 65535 {
+			issues.add(p.Line, "[Proxy]", "proxy %q needs a port between 1 and 65535", p.Name)
+		}
+		targets[p.Name] = true
+	}
+	return targets
+}
+
+// validateGroups checks every [Proxy Group] entry, including the reference
+// graph formed by nested groups.
+func (c *Config) validateGroups(issues *Errors, targets map[string]bool) {
+	groups := make(map[string]*Group, len(c.Groups))
+	for i := range c.Groups {
+		g := &c.Groups[i]
+		if prev, dup := groups[g.Name]; dup {
+			issues.add(g.Line, "[Proxy Group]", "group %q is already defined on line %d", g.Name, prev.Line)
+			continue
+		}
+		groups[g.Name] = g
+		if err := validName(g.Name); err != nil {
+			issues.add(g.Line, "[Proxy Group]", "%v", err)
+		}
+		if isBuiltinName(g.Name) {
+			issues.add(g.Line, "[Proxy Group]", "%q is a reserved target and cannot be redefined", g.Name)
+		}
+		if _, taken := targets[g.Name]; taken && !isBuiltinName(g.Name) {
+			issues.add(g.Line, "[Proxy Group]", "group %q has the same name as a proxy", g.Name)
+		}
+		switch g.Type {
+		case GroupSelect, GroupURLTest, GroupFallback:
+		default:
+			issues.add(g.Line, "[Proxy Group]", "group %q has unknown type %q", g.Name, g.Type)
+		}
+		if len(g.Members) == 0 {
+			issues.add(g.Line, "[Proxy Group]", "group %q has no members", g.Name)
+		}
+		if g.Type == GroupURLTest || g.Type == GroupFallback {
+			if g.URL == "" {
+				issues.add(g.Line, "[Proxy Group]", "group %q needs url= to probe its members", g.Name)
+			} else if u, err := url.Parse(g.URL); err != nil || u.Host == "" {
+				issues.add(g.Line, "[Proxy Group]", "group %q: url %q is not an absolute URL", g.Name, g.URL)
+			} else if u.Scheme != "http" && u.Scheme != "https" {
+				issues.add(g.Line, "[Proxy Group]", "group %q: url scheme %q is not http or https", g.Name, u.Scheme)
+			}
+		}
+		if g.Interval <= 0 {
+			issues.add(g.Line, "[Proxy Group]", "group %q: interval must be positive", g.Name)
+		}
+		if g.Timeout <= 0 {
+			issues.add(g.Line, "[Proxy Group]", "group %q: timeout must be positive", g.Name)
+		}
+		if g.Tolerance < 0 {
+			issues.add(g.Line, "[Proxy Group]", "group %q: tolerance must not be negative", g.Name)
+		}
+		targets[g.Name] = true
+	}
+
+	// Members are checked once every group name is known, so a group may refer
+	// to one defined further down the file.
+	for _, g := range c.Groups {
+		for _, m := range g.Members {
+			if m == g.Name {
+				issues.add(g.Line, "[Proxy Group]", "group %q lists itself as a member", g.Name)
+				continue
+			}
+			if !targets[m] {
+				issues.add(g.Line, "[Proxy Group]", "group %q refers to unknown member %q", g.Name, m)
+			}
+		}
+	}
+
+	reportCycles(c.Groups, issues)
+}
+
+// reportCycles finds cycles in the group graph and reports each one once.
+func reportCycles(groups []Group, issues *Errors) {
+	members := make(map[string][]string, len(groups))
+	for _, g := range groups {
+		members[g.Name] = g.Members
+	}
+	const (
+		white = 0
+		grey  = 1
+		black = 2
+	)
+	state := make(map[string]int, len(groups))
+	reported := make(map[string]bool)
+
+	var visit func(name string, path []string)
+	visit = func(name string, path []string) {
+		state[name] = grey
+		path = append(path, name)
+		for _, m := range members[name] {
+			if _, ok := members[m]; !ok {
+				continue
+			}
+			switch state[m] {
+			case grey:
+				cycle := append(append([]string(nil), path...), m)
+				key := cycleKey(cycle)
+				if !reported[key] {
+					reported[key] = true
+					issues.add(0, "[Proxy Group]", "policy group cycle: %s", strings.Join(cycle, " -> "))
+				}
+			case white:
+				visit(m, path)
+			}
+		}
+		state[name] = black
+	}
+	for _, g := range groups {
+		if state[g.Name] == white {
+			visit(g.Name, nil)
+		}
+	}
+}
+
+// cycleKey normalises a cycle so rotations of the same loop collapse.
+func cycleKey(cycle []string) string {
+	if len(cycle) < 2 {
+		return ""
+	}
+	body := cycle[:len(cycle)-1]
+	min := 0
+	for i, s := range body {
+		if s < body[min] {
+			min = i
+		}
+	}
+	rotated := append(append([]string(nil), body[min:]...), body[:min]...)
+	return strings.Join(rotated, "->")
+}
+
+func (c *Config) validateRuleSets(issues *Errors) {
+	seen := make(map[string]int, len(c.RuleSets))
+	for _, rs := range c.RuleSets {
+		if err := validName(rs.Name); err != nil {
+			issues.add(rs.Line, "[Rule]", "rule set: %v", err)
+		}
+		if prev, dup := seen[rs.Name]; dup {
+			issues.add(rs.Line, "[Rule]", "rule set %q is declared again (first on line %d)", rs.Name, prev)
+		}
+		seen[rs.Name] = rs.Line
+		if strings.TrimSpace(rs.Path) == "" {
+			issues.add(rs.Line, "[Rule]", "rule set %q has an empty path", rs.Name)
+		}
+	}
+}
+
+func (c *Config) validateRules(issues *Errors, targets map[string]bool) {
+	if len(c.Rules) == 0 {
+		issues.add(0, "[Rule]", "the rule list is empty")
+		return
+	}
+	declared := make(map[string]bool, len(c.RuleSets))
+	for _, rs := range c.RuleSets {
+		declared[rs.Name] = true
+	}
+
+	finalLine := 0
+	for i, r := range c.Rules {
+		if r.Kind == rules.KindFinal {
+			if finalLine != 0 {
+				issues.add(r.Line, "[Rule]", "FINAL appears more than once (first on line %d)", finalLine)
+				continue
+			}
+			finalLine = r.Line
+			if i != len(c.Rules)-1 {
+				issues.add(r.Line, "[Rule]", "FINAL must be the last rule")
+			}
+		}
+		if r.Kind.IsSet() {
+			if !declared[r.Payload] {
+				issues.add(r.Line, "[Rule]", "%s refers to undeclared rule set %q", r.Kind, r.Payload)
+			}
+		}
+		if !targets[r.Target] {
+			issues.add(r.Line, "[Rule]", "rule targets unknown policy or outbound %q", r.Target)
+		}
+	}
+	if finalLine == 0 {
+		issues.add(0, "[Rule]", "the rule list must end with FINAL")
+	}
+}
+
+func (c *Config) validateHosts(issues *Errors) {
+	seen := make(map[string]int, len(c.Hosts))
+	for _, h := range c.Hosts {
+		if err := validHostName(h.Name); err != nil {
+			issues.add(h.Line, "[Host]", "%v", err)
+		}
+		if prev, dup := seen[h.Name]; dup {
+			issues.add(h.Line, "[Host]", "host %q is already mapped on line %d", h.Name, prev)
+		}
+		seen[h.Name] = h.Line
+		if len(h.Addrs) == 0 {
+			issues.add(h.Line, "[Host]", "host %q has no address", h.Name)
+		}
+	}
+}
+
+// isBuiltinName reports whether a name is reserved for a built-in target.
+func isBuiltinName(name string) bool {
+	return strings.EqualFold(name, TargetDirect) || strings.EqualFold(name, TargetReject)
+}
+
+// validName checks a proxy, group or rule set name. The character set matches
+// what a rule line can carry, since these names are written into rules.
+func validName(name string) error {
+	if name == "" {
+		return fmt.Errorf("name is empty")
+	}
+	if len(name) > maxNameLen {
+		return fmt.Errorf("name %q is longer than %d bytes", name, maxNameLen)
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.':
+		default:
+			return fmt.Errorf("name %q contains an unsupported character %q", name, c)
+		}
+	}
+	switch name[0] {
+	case '-', '.':
+		return fmt.Errorf("name %q must start with a letter, digit or underscore", name)
+	}
+	return nil
+}
+
+// validHostName checks a [Host] key.
+func validHostName(name string) error {
+	if name == "" {
+		return fmt.Errorf("host name is empty")
+	}
+	if len(name) > 253 {
+		return fmt.Errorf("host name %q is longer than 253 bytes", name)
+	}
+	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
+		return fmt.Errorf("host name %q has an empty label", name)
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.':
+		default:
+			return fmt.Errorf("host name %q contains an unsupported character %q", name, c)
+		}
+	}
+	return nil
+}

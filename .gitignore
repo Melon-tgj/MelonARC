@@ -28,6 +28,9 @@ go.work.sum
 .DS_Store
 Thumbs.db
 
+# Local tooling workspace
+.workbuddy/
+
 # Local runtime artifacts
 *.log
 /tmp/
