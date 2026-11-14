@@ -6,8 +6,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/melon-tgj/melonarc/internal/dns"
+	"github.com/melon-tgj/melonarc/internal/outbound"
 	"github.com/melon-tgj/melonarc/internal/rules"
 )
 
@@ -57,6 +59,87 @@ func (c *Config) validateGeneral(issues *Errors) {
 	c.validateDataDir(issues)
 	c.validateDNS(issues)
 	c.validateDatasets(issues)
+	c.validateTUN(issues)
+}
+
+// validateTUN checks the device settings and fills in their defaults. It is
+// shape-only: a TUN device is opened when the daemon starts, never during a
+// validation run, so -check stays free of privileged operations.
+//
+// The "settings written while the device is off" error follows the same rule as
+// SOCKS5 credentials with no listener: a setting that is silently ignored is a
+// configuration the operator believes is in force.
+func (c *Config) validateTUN(issues *Errors) {
+	t := &c.General.TUN
+	if !t.Enable {
+		if t.Name != "" || t.Address != "" || t.MTU != 0 || t.Routes != nil || t.UDPTimeout != 0 {
+			issues.add(0, "[General]", "tun-* settings are written but tun-enable is off, so they have no effect")
+		}
+		return
+	}
+	if t.Name == "" {
+		t.Name = defaultTUNName
+	}
+	if t.Address == "" {
+		t.Address = defaultTUNAddress
+	}
+	if t.MTU == 0 {
+		t.MTU = defaultTUNMTU
+	}
+	if t.UDPTimeout == 0 {
+		t.UDPTimeout = defaultTUNUDPTimeout
+	}
+	if !validTUNName(t.Name) {
+		issues.add(0, "[General]", "tun-name %q must be 1-%d ASCII letters, digits, '-', '_' or '.' and must not start with '-' or '.'",
+			t.Name, maxTUNNameLen)
+	}
+	addr, network, err := net.ParseCIDR(t.Address)
+	switch {
+	case err != nil:
+		issues.add(0, "[General]", "tun-address %q is not an IPv4 address with a prefix: %v", t.Address, err)
+	case addr.To4() == nil:
+		issues.add(0, "[General]", "tun-address %q is not IPv4", t.Address)
+	case addr.IsLoopback() || addr.IsUnspecified() || addr.IsMulticast():
+		issues.add(0, "[General]", "tun-address %q cannot be a loopback, unspecified or multicast address", t.Address)
+	default:
+		if ones, _ := network.Mask.Size(); ones < 1 || ones > 32 {
+			issues.add(0, "[General]", "tun-address %q has an invalid prefix length", t.Address)
+		}
+	}
+	if t.MTU < minTUNMTU || t.MTU > maxTUNMTU {
+		issues.add(0, "[General]", "tun-mtu %d is outside %d-%d", t.MTU, minTUNMTU, maxTUNMTU)
+	}
+	if len(t.Routes) > maxTUNRoutes {
+		issues.add(0, "[General]", "tun-route lists more than %d prefixes", maxTUNRoutes)
+	}
+	for _, route := range t.Routes {
+		ip, _, err := net.ParseCIDR(route)
+		if err != nil || ip.To4() == nil {
+			issues.add(0, "[General]", "tun-route %q is not an IPv4 prefix", route)
+		}
+	}
+	if t.UDPTimeout <= 0 || t.UDPTimeout > 24*time.Hour {
+		issues.add(0, "[General]", "tun-udp-timeout must be positive and no longer than a day")
+	}
+}
+
+// validTUNName checks the shape of a network interface name. Linux limits it to
+// 15 bytes and forbids '/' and whitespace, so this package accepts a narrower
+// ASCII set than the kernel does and reports the rest at load time.
+func validTUNName(name string) bool {
+	if name == "" || len(name) > maxTUNNameLen {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.':
+		default:
+			return false
+		}
+	}
+	return name[0] != '-' && name[0] != '.'
 }
 
 // validateDNS checks the plaintext upstream settings.
@@ -251,6 +334,13 @@ func (c *Config) validateProxies(issues *Errors) map[string]bool {
 		}
 		if p.Port < 1 || p.Port > 65535 {
 			issues.add(p.Line, "[Proxy]", "proxy %q needs a port between 1 and 65535", p.Name)
+		}
+		// The TLS options are shared by every secured outbound. Checking them
+		// here (rather than only when the daemon assembles its dialers) gives a
+		// bad sni or a TLS option on a plaintext type a section and a line in
+		// the aggregated report, in the same shape as every other problem.
+		if err := outbound.ValidateTLSOptions(p.Type, p.Args); err != nil {
+			issues.add(p.Line, "[Proxy]", "proxy %q: %v", p.Name, err)
 		}
 		targets[p.Name] = true
 	}

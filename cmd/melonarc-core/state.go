@@ -13,6 +13,7 @@ import (
 	"github.com/melon-tgj/melonarc/internal/config"
 	"github.com/melon-tgj/melonarc/internal/dns"
 	"github.com/melon-tgj/melonarc/internal/inbound"
+	"github.com/melon-tgj/melonarc/internal/outbound"
 	"github.com/melon-tgj/melonarc/internal/policy"
 	"github.com/melon-tgj/melonarc/internal/rules"
 )
@@ -34,6 +35,9 @@ type daemonState struct {
 	program  *rules.Program
 	registry *policy.Registry
 	resolver *dns.Resolver
+	// dialers owns the resources outbounds keep between connections. It is
+	// part of the snapshot so a reload can retire the set it replaced.
+	dialers *outbound.Set
 
 	handler   *inbound.Handler
 	metrics   *inbound.Metrics
@@ -52,13 +56,17 @@ type stateSnapshot struct {
 	program  *rules.Program
 	registry *policy.Registry
 	resolver *dns.Resolver
+	dialers  *outbound.Set
 }
 
 // snapshot returns the configuration currently in force.
 func (s *daemonState) snapshot() stateSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return stateSnapshot{cfg: s.cfg, program: s.program, registry: s.registry, resolver: s.resolver}
+	return stateSnapshot{
+		cfg: s.cfg, program: s.program, registry: s.registry,
+		resolver: s.resolver, dialers: s.dialers,
+	}
 }
 
 // install replaces the configuration and returns the previous one, so the
@@ -66,8 +74,12 @@ func (s *daemonState) snapshot() stateSnapshot {
 func (s *daemonState) install(next stateSnapshot) stateSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	previous := stateSnapshot{cfg: s.cfg, program: s.program, registry: s.registry, resolver: s.resolver}
-	s.cfg, s.program, s.registry, s.resolver = next.cfg, next.program, next.registry, next.resolver
+	previous := stateSnapshot{
+		cfg: s.cfg, program: s.program, registry: s.registry,
+		resolver: s.resolver, dialers: s.dialers,
+	}
+	s.cfg, s.program, s.registry, s.resolver, s.dialers =
+		next.cfg, next.program, next.registry, next.resolver, next.dialers
 	return previous
 }
 
@@ -112,6 +124,13 @@ func (s *daemonState) Config(context.Context) api.ConfigView {
 		DNSFallback:  fallback,
 		GeoIPDB:      cfg.DataPath(cfg.General.GeoIPDB),
 		ASNDB:        cfg.DataPath(cfg.General.ASNDB),
+		TUNEnable:    cfg.General.TUN.Enable,
+	}
+	if cfg.General.TUN.Enable {
+		view.TUNName = cfg.General.TUN.Name
+		view.TUNAddress = cfg.General.TUN.Address
+		view.TUNMTU = cfg.General.TUN.MTU
+		view.TUNRoutes = append([]string(nil), cfg.General.TUN.Routes...)
 	}
 	for _, p := range cfg.Proxies {
 		view.Proxies = append(view.Proxies, api.ProxyView{

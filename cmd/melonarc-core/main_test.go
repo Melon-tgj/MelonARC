@@ -39,9 +39,8 @@ func testResolver(t *testing.T) *dns.Resolver {
 }
 
 // TestBuildRegistryProbesThroughMembers wires a configuration the way the daemon
-// does and checks that the group decides on real probe results: a proxy that
-// cannot be reached and a protocol this build does not implement must both go
-// down, leaving the direct member active.
+// does and checks that the group decides on real probe results: two proxies that
+// cannot be reached must both go down, leaving the direct member active.
 func TestBuildRegistryProbesThroughMembers(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "ok")
@@ -53,7 +52,7 @@ log-level = error
 
 [Proxy]
 dead = socks5, 127.0.0.1, 9
-later = vmess, 127.0.0.1, 443
+later = trojan, 127.0.0.1, 9, password
 
 [Proxy Group]
 auto = url-test, dead, later, DIRECT, url=%s, interval=60, timeout=2
@@ -77,7 +76,7 @@ FINAL,auto
 		t.Fatalf("DIRECT is missing: %v", err)
 	}
 	if _, err := dialers.Dialer("later"); err != nil {
-		t.Fatalf("the unimplemented protocol has no dialer: %v", err)
+		t.Fatalf("the second proxy has no dialer: %v", err)
 	}
 	registry, err := buildRegistry(cfg, dialers)
 	if err != nil {

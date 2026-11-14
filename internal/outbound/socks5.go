@@ -54,6 +54,10 @@ type SOCKS5Options struct {
 	Port     int
 	Username string
 	Password string
+	// TLS secures the control connection before the SOCKS5 handshake. The
+	// type of a [Proxy] entry selects this variant; every TLS setting comes
+	// from the shared TLS base.
+	TLS TLSOptions
 	// Timeout bounds the dial and the handshake when the context has no
 	// deadline. Zero means DefaultTimeout.
 	Timeout time.Duration
@@ -63,7 +67,9 @@ type SOCKS5Options struct {
 // ASSOCIATE; both travel through the same server.
 type SOCKS5 struct {
 	server  string
+	host    string
 	auth    *basicAuth
+	tls     TLSOptions
 	timeout time.Duration
 }
 
@@ -89,7 +95,9 @@ func NewSOCKS5(opts SOCKS5Options) (*SOCKS5, error) {
 	}
 	return &SOCKS5{
 		server:  net.JoinHostPort(opts.Server, strconv.Itoa(opts.Port)),
+		host:    opts.Server,
 		auth:    auth,
+		tls:     opts.TLS,
 		timeout: timeout,
 	}, nil
 }
@@ -126,6 +134,14 @@ func (d *SOCKS5) DialPacket(ctx context.Context, address string) (PacketConn, er
 	return &relayPacketConn{relay: relay, dest: target}, nil
 }
 
+// DialSharedUDP implements SharedDialer. The association is the same one
+// DialUDP opens: a SOCKS5 UDP association already carries any number of
+// destinations, so the TUN path reuses it instead of opening one association
+// per destination.
+func (d *SOCKS5) DialSharedUDP(ctx context.Context) (SharedPacketConn, error) {
+	return d.DialUDP(ctx)
+}
+
 // DialUDP opens a UDP association with the server. One association carries
 // datagrams for any number of destinations, each framed with the SOCKS5 UDP
 // header, which is what an inbound listener or the TUN path needs. The
@@ -152,6 +168,14 @@ func (d *SOCKS5) openControl(ctx context.Context) (net.Conn, error) {
 		return nil, fmt.Errorf("socks5: connect to %s: %w", d.server, err)
 	}
 	setConnDeadline(conn, ctx, d.timeout)
+	if d.tls.Enabled {
+		secured, err := d.tls.Wrap(ctx, conn, d.host)
+		if err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("socks5: %w", err)
+		}
+		conn = secured
+	}
 	return conn, nil
 }
 

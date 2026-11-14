@@ -18,6 +18,7 @@ const DefaultFailureCapacity = 64
 const (
 	protocolHTTP   = "http"
 	protocolSOCKS5 = "socks5"
+	protocolTUN    = "tun"
 )
 
 // protocolCounters is the counter set of one listener. Every field is atomic:
@@ -77,6 +78,7 @@ type Snapshot struct {
 type Metrics struct {
 	http   protocolCounters
 	socks5 protocolCounters
+	tun    protocolCounters
 
 	failures atomic.Uint64
 	rejected atomic.Uint64
@@ -104,6 +106,8 @@ func (m *Metrics) counters(protocol string) *protocolCounters {
 		return &m.http
 	case protocolSOCKS5:
 		return &m.socks5
+	case protocolTUN:
+		return &m.tun
 	}
 	return nil
 }
@@ -149,6 +153,25 @@ func (m *Metrics) datagramClosed() {
 	m.socks5.datagrams.Add(-1)
 }
 
+// tunDatagramOpened and tunDatagramClosed count the UDP sessions a TUN device
+// keeps. They are separate from the SOCKS5 counters because an association and
+// a TUN session are different lifetimes: one TUN association can carry several
+// sessions, and a session can end while the association stays open.
+func (m *Metrics) tunDatagramOpened() {
+	if m == nil {
+		return
+	}
+	m.tun.datagrams.Add(1)
+	m.tun.datagramTotal.Add(1)
+}
+
+func (m *Metrics) tunDatagramClosed() {
+	if m == nil {
+		return
+	}
+	m.tun.datagrams.Add(-1)
+}
+
 // Record notes one request that was not carried.
 //
 // The category decides which counter moves; the record itself goes into the
@@ -182,7 +205,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		return Snapshot{}
 	}
 	snap := Snapshot{
-		Protocols:       make([]ProtocolStats, 0, 2),
+		Protocols:       make([]ProtocolStats, 0, 3),
 		Failures:        m.failures.Load(),
 		Rejected:        m.rejected.Load(),
 		FailureCapacity: m.ring.capacity(),
@@ -196,6 +219,7 @@ func (m *Metrics) Snapshot() Snapshot {
 	}{
 		{protocolHTTP, &m.http},
 		{protocolSOCKS5, &m.socks5},
+		{protocolTUN, &m.tun},
 	} {
 		if !entry.c.enabled.Load() {
 			continue

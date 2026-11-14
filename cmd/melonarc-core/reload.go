@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -104,13 +105,22 @@ func (r *reloader) reload(context.Context) (api.ReloadView, error) {
 	// Probing starts before the swap so a URL-Test group has a first round in
 	// flight by the time the first connection reaches it, exactly as at startup.
 	startGroups(r.ctx, registry, r.logger)
-	r.state.install(stateSnapshot{cfg: cfg, program: program, registry: registry, resolver: resolver})
+	r.state.install(stateSnapshot{
+		cfg: cfg, program: program, registry: registry,
+		resolver: resolver, dialers: dialers,
+	})
 	committed = true
 
 	// The previous groups stop probing after the swap. A connection that is
 	// still being carried holds its own dialer, so nothing in flight is cut.
+	// The outbounds of the replaced set are retired the same way: a QUIC
+	// outbound would otherwise keep a connection to its server alive for a
+	// configuration that no longer exists.
 	if previous.registry != nil {
 		previous.registry.Close()
+	}
+	if previous.dialers != nil && previous.dialers != dialers {
+		previous.dialers.Disown()
 	}
 	r.level.Set(logLevel(cfg.General.LogLevel))
 
@@ -170,6 +180,27 @@ func restartRequired(previous, next config.General) []string {
 	}
 	if previous.DataDir != next.DataDir {
 		out = append(out, "data-dir")
+	}
+	// A device, its address, MTU and routes are created once at startup. They
+	// are privileged operations with rollback, not something a reload can swap
+	// while packets are in flight.
+	if previous.TUN.Enable != next.TUN.Enable {
+		out = append(out, "tun-enable")
+	}
+	if previous.TUN.Name != next.TUN.Name {
+		out = append(out, "tun-name")
+	}
+	if previous.TUN.Address != next.TUN.Address {
+		out = append(out, "tun-address")
+	}
+	if previous.TUN.MTU != next.TUN.MTU {
+		out = append(out, "tun-mtu")
+	}
+	if !slices.Equal(previous.TUN.Routes, next.TUN.Routes) {
+		out = append(out, "tun-route")
+	}
+	if previous.TUN.UDPTimeout != next.TUN.UDPTimeout {
+		out = append(out, "tun-udp-timeout")
 	}
 	return out
 }

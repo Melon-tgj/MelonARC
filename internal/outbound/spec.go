@@ -12,8 +12,10 @@ import (
 //
 // Args is the tail of the line after the type, verbatim: the first two entries
 // are the server and the port, the rest are protocol options of the form
-// key=value. The configuration layer keeps that tail raw on purpose, because a
-// password may itself contain "=", so interpreting it is this package's job.
+// key=value (or, for the encrypted protocols that follow that convention,
+// positional method and password entries). The configuration layer keeps that
+// tail raw on purpose, because a password may itself contain "=", so
+// interpreting it is this package's job.
 type Spec struct {
 	Name   string
 	Type   string
@@ -32,8 +34,41 @@ const (
 	optPassword = "password"
 )
 
+// Option keys of the encrypted protocols.
+const (
+	optMethod   = "method"
+	optCipher   = "cipher"
+	optPSK      = "psk"
+	optUUID     = "uuid"
+	optAlterID  = "alterid"
+	optSecurity = "security"
+	optVersion  = "version"
+	optFlow     = "flow"
+	optReality  = "reality"
+	optShortID  = "short-id"
+
+	// Option keys of the QUIC protocols.
+	optUp           = "up"
+	optDown         = "down"
+	optObfs         = "obfs"
+	optObfsPassword = "obfs-password"
+)
+
 // authOptionKeys is the option set of the username and password protocols.
 var authOptionKeys = map[string]bool{optUsername: true, optPassword: true}
+
+// optionSet unions the keys a protocol accepts. Every key has exactly one
+// meaning across the package; a key that is not in a protocol's set is an
+// error rather than a silently ignored setting.
+func optionSet(groups ...map[string]bool) map[string]bool {
+	out := make(map[string]bool)
+	for _, group := range groups {
+		for key := range group {
+			out[key] = true
+		}
+	}
+	return out
+}
 
 // New builds the dialer a spec describes.
 //
@@ -41,7 +76,7 @@ var authOptionKeys = map[string]bool{optUsername: true, optPassword: true}
 // configuration may list protocols this build does not implement yet. A
 // malformed option of a type that is implemented is an error, since that is a
 // configuration mistake and ignoring it would silently dial without the
-// authentication the user asked for.
+// authentication or encryption the user asked for.
 func New(spec Spec) (Dialer, error) {
 	typ := strings.ToLower(strings.TrimSpace(spec.Type))
 	var (
@@ -49,10 +84,24 @@ func New(spec Spec) (Dialer, error) {
 		err    error
 	)
 	switch typ {
-	case "socks5":
-		dialer, err = newSOCKS5FromSpec(spec)
+	case "socks5", "socks5-tls":
+		dialer, err = newSOCKS5FromSpec(spec, typ == "socks5-tls")
 	case "http", "https":
 		dialer, err = newHTTPFromSpec(spec, typ == "https")
+	case "ss":
+		dialer, err = newShadowsocksFromSpec(spec)
+	case "vmess":
+		dialer, err = newVMessFromSpec(spec)
+	case "trojan":
+		dialer, err = newTrojanFromSpec(spec)
+	case "snell":
+		dialer, err = newSnellFromSpec(spec)
+	case "vless":
+		dialer, err = newVLESSFromSpec(spec)
+	case "hysteria2":
+		dialer, err = newHysteria2FromSpec(spec)
+	case "tuic":
+		dialer, err = newTUICFromSpec(spec)
 	default:
 		return &Unsupported{Protocol: typ}, nil
 	}
@@ -65,13 +114,26 @@ func New(spec Spec) (Dialer, error) {
 	return dialer, nil
 }
 
-// newSOCKS5FromSpec builds the SOCKS5 dialer of a [Proxy] entry.
-func newSOCKS5FromSpec(spec Spec) (Dialer, error) {
-	opts, err := parseOptions(spec.Args, authOptionKeys)
+// newSOCKS5FromSpec builds the SOCKS5 dialer of a [Proxy] entry. The variant
+// whose type names TLS wraps the control connection with the shared TLS base.
+func newSOCKS5FromSpec(spec Spec, useTLS bool) (Dialer, error) {
+	mode := tlsNone
+	if useTLS {
+		mode = tlsAlways
+	}
+	allowed := optionSet(authOptionKeys)
+	if mode != tlsNone {
+		allowed = optionSet(authOptionKeys, tlsOptionKeys)
+	}
+	opts, err := parseOptions(spec.Args, allowed)
 	if err != nil {
 		return nil, err
 	}
 	user, pass, err := credentials(opts)
+	if err != nil {
+		return nil, err
+	}
+	tlsOpts, err := parseTLSOptions(opts, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -80,16 +142,29 @@ func newSOCKS5FromSpec(spec Spec) (Dialer, error) {
 		Port:     spec.Port,
 		Username: user,
 		Password: pass,
+		TLS:      tlsOpts,
 	})
 }
 
 // newHTTPFromSpec builds the HTTP or HTTPS CONNECT dialer of a [Proxy] entry.
 func newHTTPFromSpec(spec Spec, useTLS bool) (Dialer, error) {
-	opts, err := parseOptions(spec.Args, authOptionKeys)
+	mode := tlsNone
+	if useTLS {
+		mode = tlsAlways
+	}
+	allowed := optionSet(authOptionKeys)
+	if mode != tlsNone {
+		allowed = optionSet(authOptionKeys, tlsOptionKeys)
+	}
+	opts, err := parseOptions(spec.Args, allowed)
 	if err != nil {
 		return nil, err
 	}
 	user, pass, err := credentials(opts)
+	if err != nil {
+		return nil, err
+	}
+	tlsOpts, err := parseTLSOptions(opts, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +174,7 @@ func newHTTPFromSpec(spec Spec, useTLS bool) (Dialer, error) {
 		Username: user,
 		Password: pass,
 		TLS:      useTLS,
+		TLSBase:  tlsOpts,
 	})
 }
 
@@ -128,6 +204,33 @@ func parseOptions(args []string, allowed map[string]bool) (map[string]string, er
 	return opts, nil
 }
 
+// parseArgs is the option parser for protocols that also accept positional
+// arguments (a cipher name and a password written without keys, as in the
+// sample configuration). key=value entries must use a known key; entries
+// without one are returned in order as positional values.
+func parseArgs(args []string, allowed map[string]bool) (opts map[string]string, positional []string, err error) {
+	opts = make(map[string]string, len(args))
+	if len(args) <= optionSkip {
+		return opts, nil, nil
+	}
+	for _, arg := range args[optionSkip:] {
+		key, value, ok := strings.Cut(arg, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		if !ok || key == "" {
+			positional = append(positional, strings.TrimSpace(arg))
+			continue
+		}
+		if !allowed[key] {
+			return nil, nil, fmt.Errorf("%w: unknown option %q", ErrInvalidOption, key)
+		}
+		if _, dup := opts[key]; dup {
+			return nil, nil, fmt.Errorf("%w: option %q is given twice", ErrInvalidOption, key)
+		}
+		opts[key] = strings.TrimSpace(value)
+	}
+	return opts, positional, nil
+}
+
 // credentials reads the optional username and password. Both or neither must be
 // present: half a pair is a mistake, not a silent fallback to no
 // authentication.
@@ -152,6 +255,21 @@ func credentials(opts map[string]string) (user, pass string, err error) {
 		return "", "", fmt.Errorf("%w: username and password are limited to 255 bytes each", ErrInvalidOption)
 	}
 	return user, pass, nil
+}
+
+// positionalCredential reads a protocol secret that may be written either as a
+// key=value option or as the first positional entry after the server and port.
+func positionalCredential(opts map[string]string, positional []string, key string) (string, error) {
+	if value, ok := opts[key]; ok {
+		if value == "" {
+			return "", fmt.Errorf("%w: %s is empty", ErrInvalidOption, key)
+		}
+		return value, nil
+	}
+	if len(positional) > 0 && positional[0] != "" {
+		return positional[0], nil
+	}
+	return "", fmt.Errorf("%w: %s is required", ErrInvalidOption, key)
 }
 
 // basicAuth is a username and password pair, framed the way each protocol
@@ -210,4 +328,25 @@ func (s *Set) Names() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// disownable is the optional interface of a dialer that holds something beyond
+// the connections it carries. A QUIC outbound keeps one connection for every
+// peer it has dialled, and that connection has no owner to close it once the
+// configuration that named the outbound is gone.
+type disownable interface {
+	// Disown stops the dialer from being used again and releases its
+	// resources as soon as nothing is using them. Nothing in flight is cut.
+	Disown()
+}
+
+// Disown releases the resources of every dialer that keeps state between
+// connections. The assembly layer calls it on the set a reload replaced, after
+// the swap, so a replaced outbound stops holding a socket.
+func (s *Set) Disown() {
+	for _, d := range s.dialers {
+		if r, ok := d.(disownable); ok {
+			r.Disown()
+		}
+	}
 }

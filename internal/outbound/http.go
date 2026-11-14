@@ -27,6 +27,9 @@ type HTTPProxyOptions struct {
 	// TLS wraps the connection to the proxy in TLS before the CONNECT request:
 	// this is the HTTPS variant of the outbound.
 	TLS bool
+	// TLSBase is the shared TLS dial configuration (SNI, verification and
+	// ALPN). It is used whenever TLS is enabled.
+	TLSBase TLSOptions
 	// TLSConfig, when set, replaces the TLS settings of that handshake. Tests
 	// use it to trust a local certificate; the configuration layer leaves it
 	// nil and the proxy host is used as the server name.
@@ -41,11 +44,12 @@ type HTTPProxyOptions struct {
 // proxy answers 200. With TLS it first secures the hop to the proxy, which is
 // the HTTPS variant.
 type HTTPProxy struct {
-	server    string
-	auth      *basicAuth
-	useTLS    bool
-	tlsConfig *tls.Config
-	timeout   time.Duration
+	server     string
+	host       string
+	auth       *basicAuth
+	useTLS     bool
+	tlsOptions TLSOptions
+	timeout    time.Duration
 }
 
 // NewHTTPProxy builds an HTTP or HTTPS CONNECT outbound.
@@ -64,12 +68,18 @@ func NewHTTPProxy(opts HTTPProxyOptions) (*HTTPProxy, error) {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	tlsOpts := opts.TLSBase
+	tlsOpts.Enabled = opts.TLS
+	if opts.TLSConfig != nil {
+		tlsOpts.Config = opts.TLSConfig
+	}
 	return &HTTPProxy{
-		server:    net.JoinHostPort(opts.Server, strconv.Itoa(opts.Port)),
-		auth:      auth,
-		useTLS:    opts.TLS,
-		tlsConfig: opts.TLSConfig,
-		timeout:   timeout,
+		server:     net.JoinHostPort(opts.Server, strconv.Itoa(opts.Port)),
+		host:       opts.Server,
+		auth:       auth,
+		useTLS:     opts.TLS,
+		tlsOptions: tlsOpts,
+		timeout:    timeout,
 	}, nil
 }
 
@@ -112,13 +122,9 @@ func (p *HTTPProxy) dialProxy(ctx context.Context) (net.Conn, error) {
 // CONNECT request and hands back the established tunnel.
 func (p *HTTPProxy) tunnel(ctx context.Context, conn net.Conn, target Target) (net.Conn, error) {
 	if p.useTLS {
-		host, _, err := net.SplitHostPort(p.server)
+		secured, err := p.tlsOptions.Wrap(ctx, conn, p.host)
 		if err != nil {
-			return nil, fmt.Errorf("http: server address %q: %v", p.server, err)
-		}
-		secured := tls.Client(conn, p.tlsConfigFor(host))
-		if err := secured.HandshakeContext(ctx); err != nil {
-			return nil, fmt.Errorf("http: tls handshake with %s: %w", p.server, err)
+			return nil, fmt.Errorf("http: %w", err)
 		}
 		conn = secured
 	}
@@ -149,20 +155,6 @@ func (p *HTTPProxy) tunnel(ctx context.Context, conn net.Conn, target Target) (n
 		return &bufferedConn{Conn: conn, reader: reader}, nil
 	}
 	return conn, nil
-}
-
-// tlsConfigFor returns the TLS settings for the hop to the proxy. The proxy host
-// is the server name unless the caller supplied one, which is what makes a
-// certificate issued to an address verify correctly.
-func (p *HTTPProxy) tlsConfigFor(host string) *tls.Config {
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if p.tlsConfig != nil {
-		cfg = p.tlsConfig.Clone()
-	}
-	if cfg.ServerName == "" {
-		cfg.ServerName = host
-	}
-	return cfg
 }
 
 // writeConnect writes the CONNECT request, with the proxy credentials when the

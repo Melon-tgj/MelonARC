@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -88,9 +90,59 @@ type Router interface {
 // down the call chain instead of reading the pointer twice is what keeps a
 // single request on a single configuration.
 type handlerState struct {
+	// id changes on every replacement. A shared datagram association is keyed
+	// by the state it was opened under, so a reload cannot hand a TUN session
+	// an association built with the old outbound set.
+	id       uint64
 	matcher  Matcher
 	router   Router
 	resolver Resolver
+}
+
+// datagramKey identifies a shared UDP association. The path is the policy path
+// that selected the outbound, and source is the client endpoint that owns it:
+// destinations from one source reaching the same leaf share one association,
+// which is both "one association, many destinations" and the reason a reply can
+// be matched back to exactly one client.
+type datagramKey struct {
+	state  *handlerState
+	path   string
+	source string
+}
+
+// DatagramAssociation is one shared outbound datagram association. Several TUN
+// UDP sessions hold a reference to it; Release gives one reference back and the
+// association is closed with the last one.
+type DatagramAssociation struct {
+	Conn       outbound.SharedPacketConn
+	Selection  Selection
+	Generation uint64
+
+	h    *Handler
+	key  datagramKey
+	refs int // guarded by h.poolMu
+}
+
+// Release gives back one reference. The caller must not use Conn afterwards.
+func (a *DatagramAssociation) Release() {
+	if a == nil || a.h == nil {
+		return
+	}
+	h := a.h
+	h.poolMu.Lock()
+	shared := h.pool[a.key]
+	if shared == nil || shared != a {
+		h.poolMu.Unlock()
+		return
+	}
+	a.refs--
+	if a.refs > 0 {
+		h.poolMu.Unlock()
+		return
+	}
+	delete(h.pool, a.key)
+	h.poolMu.Unlock()
+	_ = a.Conn.Close()
 }
 
 // Handler routes one request and opens the connection it asks for. It is safe
@@ -100,6 +152,10 @@ type Handler struct {
 	state   atomic.Pointer[handlerState]
 	metrics *Metrics
 	logger  *slog.Logger
+
+	nextID atomic.Uint64
+	poolMu sync.Mutex
+	pool   map[datagramKey]*DatagramAssociation
 }
 
 // HandlerOptions configures a Handler.
@@ -124,7 +180,11 @@ type HandlerOptions struct {
 
 // NewHandler builds the routing pipeline shared by every inbound listener.
 func NewHandler(opts HandlerOptions) (*Handler, error) {
-	h := &Handler{metrics: opts.Metrics, logger: loggerOrDiscard(opts.Logger)}
+	h := &Handler{
+		metrics: opts.Metrics,
+		logger:  loggerOrDiscard(opts.Logger),
+		pool:    make(map[datagramKey]*DatagramAssociation),
+	}
 	if err := h.Replace(opts); err != nil {
 		return nil, err
 	}
@@ -145,7 +205,24 @@ func (h *Handler) Replace(opts HandlerOptions) error {
 	if opts.Router == nil {
 		return errors.New("inbound: a router is required")
 	}
-	h.state.Store(&handlerState{matcher: opts.Matcher, router: opts.Router, resolver: opts.Resolver})
+	h.state.Store(&handlerState{
+		id:       h.nextID.Add(1),
+		matcher:  opts.Matcher,
+		router:   opts.Router,
+		resolver: opts.Resolver,
+	})
+	// An association with no sessions left is safe to close now. One that is
+	// still in use keeps its own outbound until its last session releases it;
+	// no new association will be opened under this state, because the key
+	// includes the state pointer.
+	h.poolMu.Lock()
+	for key, shared := range h.pool {
+		if shared.refs == 0 {
+			delete(h.pool, key)
+			_ = shared.Conn.Close()
+		}
+	}
+	h.poolMu.Unlock()
 	return nil
 }
 
@@ -186,6 +263,101 @@ func (h *Handler) Packet(ctx context.Context, req Request) (outbound.PacketConn,
 	}
 	return conn, sel, nil
 }
+
+// Datagrams routes a datagram destination and returns the shared association
+// that will carry it.
+//
+// The TUN path sees many destinations with no per-destination header, so it
+// needs one association that can carry them all. An association is pooled by
+// the source endpoint and the policy path that selected the outbound: the
+// destinations of one client reaching the same leaf reuse it, while a different
+// client or a different path gets a separate association. Keeping the source in
+// the key is what makes a reply unambiguous: a shared connection reports who
+// answered, not which client asked, and two clients may ask the same server.
+// The pool key includes the handler state, so a reload never mixes an
+// association built with the old outbound set into a new configuration.
+//
+// Every call takes one reference. The caller releases it with
+// DatagramAssociation.Release when the UDP session that used it ends.
+func (h *Handler) Datagrams(ctx context.Context, req Request, source string) (*DatagramAssociation, error) {
+	st := h.load()
+	sel, dialer, err := h.route(ctx, st, req)
+	if err != nil {
+		h.record(req, sel, StageRoute, err)
+		return nil, err
+	}
+	key := datagramKey{state: st, path: strings.Join(sel.Path, "\x1f"), source: source}
+	h.poolMu.Lock()
+	if shared := h.pool[key]; shared != nil {
+		shared.refs++
+		h.poolMu.Unlock()
+		return shared, nil
+	}
+	h.poolMu.Unlock()
+
+	conn, err := openSharedDatagram(ctx, dialer, req.Target)
+	if err != nil {
+		h.failed(st, req, sel, err)
+		return nil, err
+	}
+	h.poolMu.Lock()
+	if shared := h.pool[key]; shared != nil {
+		shared.refs++
+		h.poolMu.Unlock()
+		_ = conn.Close() // another session won the race to open it
+		return shared, nil
+	}
+	shared := &DatagramAssociation{
+		Conn:       conn,
+		Selection:  sel,
+		Generation: st.id,
+		h:          h,
+		key:        key,
+		refs:       1,
+	}
+	h.pool[key] = shared
+	h.poolMu.Unlock()
+	return shared, nil
+}
+
+// openSharedDatagram uses a dialer's own shared association when it has one and
+// wraps a single-destination PacketConn otherwise. The wrapper is what keeps
+// dialers that only implement DialPacket usable from the TUN path.
+func openSharedDatagram(ctx context.Context, dialer outbound.Dialer, dest outbound.Target) (outbound.SharedPacketConn, error) {
+	if shared, ok := dialer.(outbound.SharedDialer); ok {
+		return shared.DialSharedUDP(ctx)
+	}
+	conn, err := dialer.DialPacket(ctx, dest.String())
+	if err != nil {
+		return nil, err
+	}
+	return &singleDestinationDatagram{conn: conn, dest: dest}, nil
+}
+
+// singleDestinationDatagram presents a one-destination PacketConn in the shared
+// shape. Writing to another destination is refused instead of silently sending
+// the payload to the wrong peer.
+type singleDestinationDatagram struct {
+	conn outbound.PacketConn
+	dest outbound.Target
+}
+
+func (c *singleDestinationDatagram) ReadFrom(p []byte) (int, outbound.Target, error) {
+	n, err := c.conn.Read(p)
+	if err != nil {
+		return 0, outbound.Target{}, err
+	}
+	return n, c.dest, nil
+}
+
+func (c *singleDestinationDatagram) WriteTo(payload []byte, destination outbound.Target) (int, error) {
+	if destination.String() != c.dest.String() {
+		return 0, fmt.Errorf("inbound: datagram association is bound to %s, not %s", c.dest, destination)
+	}
+	return c.conn.Write(payload)
+}
+
+func (c *singleDestinationDatagram) Close() error { return c.conn.Close() }
 
 // Explain classifies a query the way a request would be classified, lookup
 // included, and reports every step. The local API answers with it, so what an

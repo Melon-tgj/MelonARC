@@ -53,6 +53,14 @@ type ConfigView struct {
 	// paths, not secrets; the records inside them are not part of the view.
 	GeoIPDB string `json:"geoip_db,omitempty"`
 	ASNDB   string `json:"asn_db,omitempty"`
+	// TUNEnable is reported even when false, so a client can tell that the
+	// device is off rather than missing the setting entirely. The device
+	// details are omitted when it is off.
+	TUNEnable  bool     `json:"tun_enable"`
+	TUNName    string   `json:"tun_name,omitempty"`
+	TUNAddress string   `json:"tun_address,omitempty"`
+	TUNMTU     int      `json:"tun_mtu,omitempty"`
+	TUNRoutes  []string `json:"tun_routes,omitempty"`
 }
 
 // ProxyView is one outbound as exposed by the API.

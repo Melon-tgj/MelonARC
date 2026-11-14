@@ -82,7 +82,7 @@ func TestNewHTTPVariant(t *testing.T) {
 func TestNewLeavesLaterProtocolsUnsupported(t *testing.T) {
 	dialer, err := New(Spec{
 		Name:   "future",
-		Type:   "vmess",
+		Type:   "wireguard",
 		Server: "proxy.example",
 		Port:   443,
 		// Options of a protocol this build does not implement are not parsed,
@@ -96,8 +96,8 @@ func TestNewLeavesLaterProtocolsUnsupported(t *testing.T) {
 	if !ok {
 		t.Fatalf("New returned %T, want *Unsupported", dialer)
 	}
-	if unsupported.Protocol != "vmess" {
-		t.Fatalf("Protocol = %q, want vmess", unsupported.Protocol)
+	if unsupported.Protocol != "wireguard" {
+		t.Fatalf("Protocol = %q, want wireguard", unsupported.Protocol)
 	}
 }
 

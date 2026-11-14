@@ -1514,3 +1514,534 @@ geoip-db: geoip: database file does not exist: /tmp/demo/absent.mmdb: …
 4. 加密类出站，按开发文档 §2.3 的顺序推进；同时补 SOCKS5 的 TLS 变体与 TLS 选项键。
 5. 数据集的引用计数与延迟关闭，让「换库」不再累积映射。
 6. 桌面 UI：直接消费 `/v1/*`（读）与两个写端点，令牌从数据目录读。
+
+## 阶段 8 — TUN 入站（2026-11-13）
+
+### 完成了什么
+
+按阶段 7「下一步计划」第 1 项接续：`Handler` 接口本身没有改，TUN 作为第三种「目的地来源」
+接进阶段 3 的管线；UDP 复用共享中继做「一关联、多目的地」；直连目的地仍走阶段 7 的解析器。
+
+- **设备与包循环**（`internal/inbound`）：`packet.go` 是纯 IPv4/TCP/UDP 解析与编码（含校验和、
+  ICMP echo 应答）；`device_linux.go` 用 `/dev/net/tun` + `TUNSETIFF(IFF_TUN|IFF_NO_PI)`
+  开设备，rtnetlink 做地址、Link Up/MTU、路由三项最小设置，非阻塞 fd 用短 poll 读以便关停；
+  `tun.go` 是设备无关的 `TUNService`，负责读循环、TCP/UDP/ICMP 分流、DNS 拦截与空闲回收循环。
+- **TCP 桥接**（`tuntcp.go`）：小型用户态 TCP 栈，完成 SYN/SYN-ACK/ACK 握手、累积确认、
+  MSS 选项、PSH 数据、有界指数退避重传、FIN 半关闭、未知流/拨号失败 RST。`tunTCPConn`
+  实现 `net.Conn`，直接复用阶段 3 唯一的 `relay` 半关闭实现，向 `Handler.Stream` 提交
+  `Request{Target, Network}`，规则分流逻辑一行未改。
+- **UDP 会话**（`tunudp.go`）：按源/目标四元组维护会话，512 上限，注入时钟的空闲超时回收，
+  应答按会话还原成 IP/UDP 包写回设备；`outbound/shared.go` 增加 `SharedPacketConn` /
+  `SharedDialer`，SOCKS5 复用阶段 2 的 `UDPRelay`（加了一层不改旧签名的适配），
+  DIRECT 用「每目的地一条已连接套接字」的共享中继并复用 `Direct.Lookup`；
+  `pipeline.go` 的 `Handler.Datagrams` 按（状态代数、策略路径、源端点）池化关联，引用计数释放，
+  `Replace` 换掉旧状态代数时关闭空闲关联。
+- **DNS 与名字地址**（`tundns.go`、`internal/dns/answer.go`）：设备上的 DNS 查询用
+  `ParseQuestion` / `AnswerQuestion` 回答；A 查询分配 `198.18.1.0/24` 的令牌地址并记录
+  「地址 → 名字」，命中令牌地址的 TCP/UDP 包在 `TUNService.destination` 映射回域名，
+  所以域名规则与 DIRECT 的解析器看到的仍是名字。AAAA 给 NODATA、未知名 NXDOMAIN、
+  解析失败 SERVFAIL；令牌 10 分钟不用即回收。
+- **平台边界**：`device_windows.go`（`//go:build windows`）、`device_other.go`
+  （`//go:build !linux && !windows`）与 `device_linux.go` 共用 `tunDevice` 接口和
+  `deviceConfig`。Windows 侧只做驱动 DLL 与导出名的运行时探测，会话未实现时明确报错，
+  不假装可用；其它平台返回「仅 Linux/Windows 有实现」。
+- **配置与装配**：`[General]` 增加 `tun-enable` / `tun-name` / `tun-address` / `tun-mtu` /
+  `tun-route` / `tun-udp-timeout`，默认关；校验沿用现有聚合错误风格（关着却写了 `tun-*`
+  直接报错、名字形状、IPv4 CIDR、MTU 576–65535、路由数上限、超时上限）。
+  `cmd/melonarc-core` 在 socket 入站之后启 TUN，失败则回滚已起的入站；关停先关 TUN 再关
+  其它入站。`ConfigView` 增加只读字段，六个键全部列入 `restart_required`。
+  `-check` 只校验形状，绝不建设备、改路由或写文件。
+- **测试**：IP/TCP/UDP/ICMP 解析与校验和、会话表增减与超时回收、名字地址池复用与清扫、
+  DNS 应答、配置校验、装配与 reload 的单元测试；内存设备上的确定性 TCP/UDP 端到端；
+  `tun_linux_test.go` 是真实 `/dev/net/tun` 的回环集成测试，默认跳过并附普通机器的复现命令。
+
+### 关键决策及理由
+
+1. **TCP 桥接选「自研小型用户态 TCP 栈」，不引入第三方网络栈**。开发文档 §4 允许
+   「gVisor netstack 或同类开源栈」，但引入一个完整的用户态协议栈会带来新的依赖、许可证
+   登记和长期维护面；本阶段只需要承载**本机**客户端经 TUN 进来的流，协议子集可以枚举
+   （IPv4、无乱序重组、无窗口缩放、无拥塞控制、固定 65535 窗口）。自研版本只用标准库，
+   `go.mod` / `go.sum` 零变化。决定性收益是 `tunTCPConn` 实现 `net.Conn`，
+   于是阶段 3 那份唯一的 `relay` 半关闭实现和 `Handler.Stream` 规则管线可以原样复用，
+   不必为 TUN 写第二套转发逻辑。代价是功能边界窄，见遗留问题。
+2. **用「名字地址」而不是真实解析结果回答 TUN 侧 DNS**。若把解析出的真实 IP 交给内核
+   路由进 TUN，进程内再拨这个 IP 会重新落回设备，形成回环；令牌地址只作索引、永不拨号，
+   映射回域名后域名规则、负缓存、`Direct.Lookup` 全部照常工作。令牌段与设备段分开，
+   `tun-route` 必须显式写才会接管，默认不悄悄改全局路由。
+3. **共享 UDP 关联做成 outbound 的能力而不是入站的特例**。`SharedPacketConn` /
+   `SharedDialer` 是可选接口：支持者（SOCKS5 的 `UDPRelay`、DIRECT 的新中继）走一条关联，
+   不支持者由 `singleDestinationDatagram` 降级成每目的地一条 `PacketConn`。池化键带
+   `handlerState` 指针，重载后不会出现「新规则配旧关联」，也不会把故障报给同名新成员。
+4. **Windows 只做构建标签隔离与诚实降级**。本阶段 Linux 才是可运行验收平台；Windows 侧
+   若伪造可用会在真机上静默丢包，因此运行时明确返回「驱动未安装 / 适配器会话未实现」，
+   并把 DLL 名与导出名集中在唯一一个 `windows` 文件里，其余包无平台条件判断。
+5. **配置不新增段、默认关、校验无副作用**。与阶段 7「保持五个段」的决定一致；TUN 与
+   路由是特权操作，老配置升级后不能凭空得到一个设备。设备/路由无法安全热替换，
+   所以六个键全部进 `restart_required`，重载语义仍是「一次不重启的重启」。
+6. **校验和必须由接收端独立验证**。伪头的「0 + 协议号」是一个 big-endian 16 位字，
+   值就是协议号本身，不是 `protocol << 8`。真实设备集成测试第一次跑出握手超时，
+   追下去发现 `transportChecksum` 写成了移位，所有发出的 TCP/UDP 校验和都是错的，
+   内核静默丢包；原有单测用生成函数自己校验自己，错误被抵消掉了。已修正并新增
+   `verifyTransportChecksum`（按线上格式独立重算，正确的包折叠为 0）覆盖 TCP/UDP/带数据三种情况。
+7. **依赖登记**：本阶段**没有新增任何依赖**，`go.mod` / `go.sum` 无变化。生产代码首次使用
+   `golang.org/x/sys/unix`：
+
+   | 组件 | 版本 | 许可证 | 用途 | 与 GPLv3 |
+   |---|---|---|---|---|
+   | `golang.org/x/sys/unix` | v0.50.0（已在 go.mod，spikes 引入） | BSD-3-Clause（Go Authors） | Linux 侧 `/dev/net/tun` ioctl、poll、rtnetlink 常量与结构体 | 兼容 |
+
+   TUN 驱动类依赖单独核查：Windows 侧**没有链接、没有 vendor、没有分发**任何驱动代码或
+   二进制，只在运行时按名字探测系统已安装的 `wintun.dll` 及其导出函数。该驱动源码是
+   GPLv2（与本项目 GPLv3 不能直接合并源码），官方预编译签名 DLL 另按其发行包内的
+   宽松许可分发，条款不同。因此本阶段不构成引入；**将来若随发行包分发该 DLL，必须单独
+   登记当时的版本与随包许可，并复核与 GPLv3 的关系**。Linux 侧是内核自带的 TUN 设备，
+   无第三方驱动。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链为 `~/sdks/go/bin` 的 Go 1.27.4：
+
+```
+go build ./...                                      通过
+go vet ./...                                        通过
+go test ./...                                       757 个用例条目含子测试：746 通过、11 跳过、0 失败
+go test -race ./...                                 全部通过（含 inbound / outbound / dns / config / cmd）
+gofmt -l .                                          无输出
+GOOS=windows go build ./cmd/... ./internal/...       通过
+GOOS=windows go vet   ./cmd/... ./internal/...       通过
+go mod verify                                       all modules verified
+```
+
+11 个跳过：8 个是阶段 2/3/7 记录的「回环 UDP 服务器回包」用例（本沙箱 seccomp 禁止对
+未连接套接字 `sendto`/`sendmsg`），2 个是本阶段新增的 `DirectSharedUDP` 真套接字用例，
+1 个是 `TestTUNLinuxLoopback`（需要 CAP_NET_ADMIN，默认跳过）。原因均与代码无关，
+普通机器上会正常执行。
+
+**特权集成测试在本沙箱内实际跑通**（不是只留了代码）：
+
+```
+go test -c -o /tmp/inbound.test ./internal/inbound
+unshare -Urn env MELONARC_TUN_LOOPBACK=1 /tmp/inbound.test -test.run TestTUNLinuxLoopback -test.v
+--- PASS: TestTUNLinuxLoopback (0.01s)
+```
+
+用的是真实 `/dev/net/tun`、真实内核 TCP 客户端、真实已连接 UDP 套接字：SYN 经内核路由进设备，
+用户态栈握手后经编译规则与 `Handler` 到本地源站，应答以 IP 包写回并被内核交给套接字；
+UDP 数据报经会话表到共享关联，注入的应答也能回到客户端。本沙箱限制 `connect` 到
+`127.0.0.0/8` 之外（返回 ENETUNREACH），所以测试沿用 `spikes/tun` 验证过的办法：
+把 `127.0.0.9/32` 路由到设备、临时摘掉 local 表的 `127.0.0.0/8`、开启 `route_localnet`，
+退出时恢复。**该改动只在私有网络命名空间里做，文档注释已明确要求 `unshare -Urn`**。
+`MELONARC_TUN_DEBUG=1` 可打开包级日志。
+
+**验收偏差（需明确记录）**：字面量 `GOOS=windows go build ./...` 仍未通过，失败只来自
+`spikes/tun/main.go` 与 `spikes/quic/main.go` 两个历史 Unix-only 原型
+（`undefined: unix.Open` / `unix.Connect` 等）。`spikes/` 与 `docs/` 是只读历史材料，
+本阶段一个字未改；产品包的 `GOOS=windows go build ./cmd/... ./internal/...` 与对应 vet
+全部通过，这也与阶段 7 记录的验收命令一致。要让字面命令全绿，唯一做法是在那两个 spike
+文件加 `//go:build linux`，这会触碰禁改目录，需要单独授权。
+
+### 遗留问题
+
+- **Windows 未做实机验证**：只有交叉编译通过。`device_windows.go` 的运行时路径明确返回
+  「驱动未安装 / 适配器会话未实现」——适配器创建与销毁、会话收发包循环、驱动安装与分发
+  都没写，也没有在任何 Windows 真机上跑过。不得写成已验证。
+- **`GOOS=windows go build ./...` 字面命令未全绿**，原因与所需授权见「当前状态」。
+- **用户态 TCP 功能边界**：仅 IPv4；无乱序重组、SACK、窗口缩放、拥塞控制；固定 65535
+  窗口与有界重传；IP 分片一律丢弃。大流量或高丢包链路上没有实测。
+- **DNS 只答 A**：AAAA 给 NODATA；TUN 侧没有 DNS over TCP；名字地址池只有 /24（254 个），
+  大量并发名字会互相顶掉，且映射失效后该地址的包被丢弃。
+- **没有连接数/关联数上限**：UDP 会话上限 512，DIRECT 共享中继是「每目的地一条已连接
+  套接字」，没有独立配额。
+- **路由改动没有兜底**：设备地址与路由由进程直接改，进程被强杀不会自动回滚；没有租约
+  或退出看门狗。`-check` 也不探测驱动/能力是否真的存在。
+- **重载语义**：TUN 六个键全部 `restart_required`，重载会清空会话表与名字地址映射；
+  这一点目前只有 `restart_required` 提示，没有更细的运维说明。
+- **ICMP 只答 echo request**，IPv6 包全部丢弃（设备起来时内核发出的 IPv6 流量可见于
+  debug 日志）；TUN 侧没有 IPv6 目标。
+- 阶段 1–7 的遗留（加密类出站、SOCKS5 的 TLS 变体、TLS 选项键、UDP 分片、入站并发上限、
+  HTTP 入站认证、规则集更新、观测层 SQLite、UI、重载继承选择、`pending_restart`、
+  DoT/DoH 上游与连接池等）仍然成立。
+
+### 下一步计划
+
+1. Windows 实机路线：实现适配器会话与收发包循环、驱动安装/卸载清理，明确 DLL 分发方式并
+   按当时的许可单独登记，然后在真机验证。**这一步做完之前 Windows 只能算「可交叉编译」。**
+2. 用户态 TCP 补 IPv6、乱序重组、背压与窗口缩放；或先做一轮大流量实测，再决定是否换成
+   成熟开源栈（引入时按规则登记名称、版本、许可证、用途）。
+3. 名字地址池扩到更大网段并加 LRU；TUN 侧 DNS 支持 TCP 与可配置的 AAAA 策略。
+4. 路由/设备改动的进程退出兜底（信号 + 看门狗），并把「TUN 配置必须重启」写成运维文档。
+5. 承接阶段 7 的 DoT/DoH 上游与上游连接池、`/v1/dns` 按来源计数；随后推进观测层 SQLite、
+   加密类出站与桌面 UI。
+
+---
+
+## 阶段 9 — TLS 基座与 TCP 类加密出站（2026-11-14）
+
+范围：按开发文档 §2.3 的出站协议清单，接续阶段 8 遗留的「加密类出站、SOCKS5 的 TLS 变体、
+TLS 选项键」。本阶段只做 TCP 类加密出站与共用的 TLS 拨号配置；QUIC 类出站、分享链接与
+订阅导入不在范围内（理由见关键决策 9）。`spikes/` 与 `docs/` 一个字未改。
+
+### 完成了什么
+
+- **统一 TLS 基座**（`internal/outbound/tls.go`、`proxyconn.go`）：所有需要保护这一跳的出站
+  共用 `TLSOptions{Enabled, ServerName, SkipVerify, ALPN, Config}` 与 `For(host)` / `Wrap(ctx, conn, host)`。
+  四个键全部写在 `[Proxy]` 行上：`sni`（证书名/SNI 覆盖）、`skip-cert-verify`（关闭证书校验）、
+  `alpn`（用 `|` 分隔，因为原生配置按逗号切参数）、`tls`（仅协议本身可选 TLS 时用于开关）。
+  `tlsModeFor` 是唯一的模式表：`socks5-tls` / `https` / `trojan` 恒为 TLS，`vmess` 可选，
+  其余类型不接受任何 TLS 键。`dialProxyHop` 统一拨号、超时与 TLS 包装，`completeHandshake`
+  统一取消守卫与握手后清理 deadline。
+- **配置层接入**（`internal/config`）：`knownProxyTypes` 增加 `socks5-tls`；`validateProxies`
+  调用 `outbound.ValidateTLSOptions`，坏值、重复键、明文类型上误写 TLS 键、恒 TLS 类型上
+  误写 `tls=` 都进聚合错误，形状仍是 `[Proxy] line N: ...`。`ValidateTLSOptions` 只读 TLS 键，
+  其它协议参数仍由装配期的 `outbound.New` 解释。
+- **补齐阶段 2 遗留的 SOCKS5 TLS 变体**：`SOCKS5Options.TLS` 让 `openControl` 在 SOCKS5
+  协商之前包裹控制连接（UDP ASSOCIATE 的控制连接同样走这条路）。HTTPS CONNECT 删掉原来
+  直接 `tls.Client` 的路径，改走同一个基座；`TLSConfig` 仅作为测试用的信任根替换口。
+- **Shadowsocks**（`aead.go`、`shadowsocks.go`、`blake3.go`）：三种传统 AEAD
+  （`aes-128-gcm` / `aes-256-gcm` / `chacha20-ietf-poly1305`）与三种 2022 BLAKE3 套件
+  （`2022-blake3-aes-128-gcm` / `2022-blake3-aes-256-gcm` / `2022-blake3-chacha20-poly1305`），
+  TCP 与 UDP 都实现。传统侧用 `EVP_BytesToKey` + `HKDF-SHA1(ss-subkey)` 与长度/载荷双块分片；
+  2022 侧用固定长度 base64 PSK、`blake3DeriveKey("shadowsocks 2022 session subkey", psk||salt)`、
+  带类型/时间戳/回显请求 salt 的请求与应答头（校验时间窗与 salt 绑定）、AES 独立头 +
+  XChaCha20-Poly1305 的 UDP 封装。BLAKE3 是自研的最小实现，用官方测试向量校验，见决策 3。
+- **VMess AEAD**（`vmess.go`）：AuthID（时间戳 + 随机 + CRC32，用 KDF 派生密钥做单块 AES）、
+  嵌套 HMAC-SHA256 KDF、认证长度块 + 连接 nonce + 认证头块、带 FNV1a 校验的请求头
+  （端口在地址前，使用协议自己的 ATYP 编号）、AEAD 应答头、
+  `aes-128-gcm` / `chacha20-poly1305` 双计数 nonce 的分片体。TCP 与 UDP 共用一套头和体，
+  UDP 每个分片带自己的目标地址前缀；TLS 由 `tls=true` 打开。
+- **Trojan**（`trojan.go`）：TLS 恒开，`hex(SHA224(password)) + CRLF + CMD/ATYP/ADDR/PORT + CRLF`，
+  TCP 用 CONNECT，UDP 用 UDP ASSOCIATE 并在同一条 TLS 流上按
+  `ATYP/ADDR/PORT/Length/CRLF/Payload` 分帧。
+- **Snell v4 / v5**（`snell.go`）：Argon2id(`psk`, `salt`, t=3, m=8KiB, p=1) 派生每方向密钥，
+  16 字节方向 salt、7 字节 AEAD 帧头、每帧两次推进的 12 字节小端 nonce、padding 与密文
+  偶数位互换；TCP 用 v4 的 `Connect` / v5 的 `ConnectV2`，UDP 用 `UDP` 命令的逐帧封装。
+  v5 另实现首帧 0x100–0x1FF 填充块与动态记录尺寸（首帧小、逐帧放大、30 秒空闲复位），
+  支持 `aes-128-gcm` 与 `chacha20-ietf-poly1305` 两种套件。
+- **注册与装配**：`outbound.New` 的 switch 扩展到 `socks5-tls` / `https` / `ss` / `vmess` /
+  `trojan` / `snell`；`cmd/melonarc-core` 的 `buildDialers` 一行未改，所有新协议照旧注册进
+  `outbound.Set`，因此可直接作为策略组成员。`vless` / `hysteria2` / `tuic` 仍返回
+  `Unsupported`（两处旧测试据此把「未来协议」的样例换成了 `vless`）。
+- **测试**：为每种协议写了对端测试服务器，端到端往返覆盖
+  Shadowsocks 6 种套件的 TCP echo 与 UDP echo、VMess 的明文/TLS × 两种加密 TCP echo 与 UDP、
+  Trojan 的 TCP echo 与 UDP、Snell v4/v5 × 两种套件的 TCP echo 与 UDP，以及 SOCKS5-TLS、
+  HTTPS 基座的往返。失败路径覆盖错密码 / 错 PSK / 错 UUID / 错加密套件 / 错版本号 /
+  篡改的 2022 应答 salt。BLAKE3 用官方 hash、keyed hash、derive_key 向量校验；VMess 无公开
+  数值向量，改为校验 KDF 确定性与域分离、AuthID 校验和、头封装与篡改检测、请求头解析；
+  Snell 用裸线读取首帧校验 v4/v5 的填充与命令差异。配置层新增 6 个用例校验 TLS 键的
+  分节/行号报错与合法组合。
+
+### 关键决策及理由
+
+1. **TLS 键放在 `[Proxy]` 行，不新增配置段**。开发文档 §2.6 定死五个段，且这些选项是
+   「某一个代理这一跳怎么建」而不是全局开关。用一张 `tlsModeFor` 表同时驱动校验器与构造器，
+   校验期就能拒绝「明文类型写了 `sni`」「恒 TLS 类型写了 `tls=true`」，避免装配期才炸，
+   也避免悄悄退化成明文。`tls=` 只允许 `vmess`，因为其它类型的类型名已经决定了是否用 TLS。
+2. **所有加密出站共用一份 TLS 实现**。`For` 生成 `*tls.Config`（最低 TLS 1.2、默认用代理
+   主机名做 SNI），`Wrap` 用 `HandshakeContext`  ctx 取消。测试中发现的真实缺陷：
+   当测试传入替代信任根的 `Config` 时，早期实现会整个返回它，丢掉 `sni` / `alpn` /
+   `skip-cert-verify`；已改成「`Config` 只提供根证书与证书，共享选项继续叠加在上面」，
+   并由 `TestTrojanTLSBaseSNIAndALPN` 在服务端核对手协商出的 ALPN 与 SNI。
+3. **BLAKE3 自研实现，不引入新模块**。Shadowsocks 2022 必须用 BLAKE3 derive-key，标准库
+   没有该算法；尝试拉取 `github.com/zeebo/blake3` 时模块代理返回 Bad Gateway。自研版本
+   （chunk chaining、父节点、root output、keyed hash、derive-key）用官方发布的测试向量
+   （含 `BLAKE3 2019-12-27 16:29:52 test vectors context`）逐项比对，避免了在本阶段新增
+   依赖与许可登记面，也让「零新依赖」这个结论可核。
+4. **依赖登记**：本阶段**没有新增任何第三方模块**。`go mod tidy` 只把已在 `go.mod` 的
+   `golang.org/x/crypto` 从 indirect 提升为 direct，`go.sum` 无变化：
+
+   | 组件 | 版本 | 许可证 | 用途 | 与 GPLv3 |
+   |---|---|---|---|---|
+   | `golang.org/x/crypto` | v0.54.0（原已在 go.mod，本阶段转为直接依赖） | BSD-3-Clause（Go Authors） | `chacha20poly1305`：传统/2022 ChaCha 套件、VMess 与 Snell 体加密；`argon2`：Snell 每方向密钥派生 | 兼容 |
+
+   `github.com/quic-go/quic-go`、`github.com/oschwald/maxminddb-golang`、`golang.org/x/sys`
+   维持原状。生产代码仍优先只用标准库。
+5. **UDP 按协议自身能力落地**。Shadowsocks 的 UDP 是真数据报：每条关联一条已连接 UDP
+   套接字，密文独立封装。VMess / Trojan / Snell 的 UDP 能力是「over TCP 的分帧」，因此
+   `DialPacket` 返回的是同一条 TCP 流上的 `PacketConn`，每个数据报独占一个分片/帧并自带
+   目标地址；这样既符合协议，也不需要第二条 UDP 套接字。VMess 的 UDP 分片采用与请求头
+   一致的「端口在前、地址在后」格式。
+6. **测试对端复用生产侧的线格式原语**（与阶段 3 复用 `AppendAddress` / `DecodeUDPDatagram`
+   同一条原则）：VMess 的 `vmessOpenHeader` / `vmessParseRequestHeader`、Snell 的
+   `parseSnellUDPRequest` / `snellUDPResponse` 都放在生产文件里并注明「本地测试对端使用」，
+   避免两边各写一份编解码而悄悄漂移。**代价是互操作性证据有限，见「当前状态」。**
+7. **沙箱 UDP 的处理方式如实记录**。本沙箱 seccomp 禁止对未连接套接字 `sendto`/`sendmsg`
+   （EPERM），所以旧的回环 UDP 服务器用例继续按 `datagramSendAllowed` 跳过。为了让本阶段
+   Shadowsocks 的 UDP 往返真的跑起来，新增的测试服务器在收到第一个数据报后把**监听套接字**
+   `connect` 到对端（仅 `!windows` 的测试辅助文件用 `syscall.SockaddrInet4`；Windows 侧
+   辅助文件直接 `t.Skip`）。两端都是已连接套接字，走的是真实内核数据报，不是内存假通道，
+   也不是把跳过包装成通过。此前阶段记录的 11 个环境跳过一个没少、也没有新增跳过。
+8. **Snell v4 / v5 的语义边界**。两者共用同一套帧格式，本阶段把差异落在真实存在的三处：
+   v4 用 `Connect` 且无首帧填充；v5 用可复用的 `ConnectV2`、首帧填充块、动态记录尺寸。
+   v5 的 QUIC/HTTP3 代理模式是**另一个传输族**，留到 QUIC 阶段，未在本阶段假装实现。
+9. **不做分享链接与订阅导入**。开发文档 §2.6 把它们列为 MVP 总体能力，但没有把它们划定到
+   本阶段；按本阶段任务书的约束，只有明确列入本阶段范围才动，因此本阶段一行未写，留到
+   下一步计划的对应阶段。
+10. **`go.mod` 的 indirect 标记必须跟着实际导入走**。直接 import `x/crypto` 后若保留
+    `// indirect`，`go mod tidy -diff` 会报差异；已执行 `GOPROXY=off go mod tidy`，
+    并用 `go mod verify` 复核。这不是新增依赖，但必须写清楚，否则后续阶段会误判依赖来源。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链为 `~/sdks/go/bin` 的 Go 1.27.4：
+
+```
+go build ./...                                      通过
+go vet ./...                                        通过
+go test ./... -count=1                              860 个用例条目：849 通过、11 跳过、0 失败
+go test -race -count=1 ./internal/outbound/ ./internal/config/ \
+                       ./internal/inbound/ ./cmd/melonarc-core/   全部通过
+gofmt -l .                                          无输出
+GOOS=windows go build ./cmd/... ./internal/...      通过
+GOOS=windows go vet   ./cmd/... ./internal/...      通过
+go mod tidy -diff（GOPROXY=off）                     无差异
+go mod verify                                       all modules verified
+```
+
+11 个跳过全部是阶段 2/3/7/8 已有的环境性跳过（10 个回环 UDP 中继用例受未连接
+`sendto` 限制，1 个 `TestTUNLinuxLoopback` 需要 CAP_NET_ADMIN），与阶段 9 代码无关；
+本阶段新增的 Shadowsocks / VMess / Trojan / Snell UDP 用例**全部实际执行通过**，
+没有新增跳过。`GOOS=windows go build ./...` 字面命令仍受 `spikes/tun`、`spikes/quic`
+两个只读 Unix-only 历史原型阻断，与阶段 8 记录一致，产品包用上面的分目录命令验收。
+
+**互操作性证据（必须如实说明）**：本阶段所有端到端往返都是「本项目自己写的客户端 +
+本项目自己写的测试服务端」，共用同一套线格式原语；**没有与任何第三方参考实现做过
+互通验证**，因此不能写成「已验证与参考实现兼容」。VMess、Trojan、Snell 的细节按公开的
+协议定义与公开开源实现的源码核对过，AEAD 的 KDF 常量、头布局、分帧与命令编号都按定义
+实现；BLAKE3 是唯一有**公开发布的数值测试向量**并已逐项比对通过的密码原语。VMess 与
+Snell 没有公开的数值向量，只做了结构性校验（KDF 确定性/域分离、AuthID 校验和与篡改
+检测、头封装往返、裸线帧头与版本差异），这不等价于与参考实现的互通证明。
+
+### 遗留问题
+
+- **未做第三方参考实现互通**：见上。上线前需要至少对每种协议接一次独立实现的服务端，
+  并用真实握手/真实流量复测，尤其是 VMess 的 KDF 链与 Snell 的 padding 交换。
+- **VMess 能力子集**：只实现 `aes-128-gcm` / `chacha20-poly1305` 与
+  `ChunkStream` 选项；`none`、`legacy`、chunk masking、global padding、authenticated length、
+  mux / connection reuse 都没做。`alterid` 仅为配置兼容而接受，AEAD 头里不使用。
+- **Shadowsocks 2022 只做单 PSK**：没有多用户身份（IKB / user token）与服务端主动
+  PSK 轮换；UDP 未做重放窗口与包序号去重（只校验时间戳与会话 id）；TCP 请求头 padding
+  固定 8 字节、未做流量整形。
+- **Trojan 没有「伪装回落」**：密码错误时测试服务端直接断开，真实实现通常会把可疑连接
+  引到预设端点，本阶段未实现；也没有 TLS 会话复用与 WebSocket 传输。
+- **Snell v5 的 QUIC/HTTP3 代理模式未实现**；`ConnectV2` 只实现了单连接语义，没有做
+  跨请求复用连接池；填充只实现首帧的固定区间，没有做比特比例整形。
+- **ALPN 只是被动提供**：`alpn=` 会放进 ClientHello，但没有按协议自动设置，也没有校验
+  服务端协商结果是否符合预期（Trojan 的 SNI/ALPN 用例在服务端核对了，客户端没有）。
+- **UDP 测试的平台差异**：已连接监听套接字这条路径目前只在 `!windows` 的测试辅助里实现，
+  Windows 上这些用例跳过；将来需要在 Windows 上补等价做法或改用内存帧级断言。
+- **观测层未接入**：新出站的握手失败没有进阶段 5 的 `inbound.Metrics` 分类明细，也没有
+  按协议统计；`/v1/policies` 不暴露协议类型或 TLS 设置。
+- 阶段 1–8 的其余遗留（Windows 实机验证、用户态 TCP 边界、DoT/DoH 上游与连接池、
+  规则集更新、观测层 SQLite、桌面 UI、重载继承选择、`pending_restart`、
+  `GOOS=windows go build ./...` 字面命令等）仍然成立。
+
+### 下一步计划
+
+1. **VLESS**：含 REALITY 与 XTLS-Vision flow，作为下一批 TCP 类加密出站的第一项；
+   与阶段 9 共用 `TLSOptions` 基座，并补齐 REALITY 所需的证书/客户端指纹处理。
+2. **QUIC 类出站**：Hysteria2、TUIC v5，连同阶段 8 已引入的 QUIC 传输能力一起做；
+   同时决定 Snell v5 的 QUIC/HTTP3 代理模式是否并入这一阶段。
+3. **互通验证**：为 Shadowsocks（传统 + 2022）、VMess AEAD、Trojan、Snell v4/v5 各接一次
+   独立实现的真实服务端，补齐上节列出的数值向量或握手证据，再据此修正线格式细节。
+4. **分享链接与订阅导入**：`ss://`、`vmess://`、`trojan://`、`vless://`、
+   `hysteria2://`、`tuic://` 的解析与定时更新，按开发文档 §2.6 单独成阶段。
+5. **补能力子集与观测**：VMess 的 masking / authenticated length / mux、Shadowsocks 2022
+   多用户与重放窗口、Trojan 回落与会话复用、Snell v5 连接池；把新握手的失败进
+   `inbound.Metrics` 分类，并让 API 能按协议类型查看出站状态。
+6. Windows 实机与 DoT/DoH 上游、观测层 SQLite、桌面 UI 按阶段 8 的计划继续推进。
+
+## 阶段 10 — VLESS（含 REALITY）与 QUIC 类出站（2026-11-14）
+
+范围：按开发文档 §2.3 的出站协议清单收尾，做 VLESS（TCP 传输，含 TLS 组合与 REALITY）、
+Hysteria2、TUIC v5 三种出站，以及它们需要的 QUIC 传输、HTTP/3 客户端与共用会话管理。
+XTLS-Vision 的 `flow` 语义没有公开的线格式定义，按「不猜测线上字节」的原则**拒绝**而不是
+假装实现（决策 4）。分享链接与订阅导入仍不在本阶段（决策 10）。`spikes/` 与 `docs/` 一个字未改。
+
+### 完成了什么
+
+- **VLESS**（`vless.go`）：请求头是 `版本(1) + UUID(16) + addons 长度(1) + addons + 命令(1) +
+  端口(2) + ATYP + 地址`，端口在地址之前且 ATYP 用协议自己的编号（域名 `2`、IPv4 `1`、
+  IPv6 `3`）；应答头是 `版本 + addons 长度 + addons`。TCP 用命令 `1` 直接复用流，UDP 用
+  命令 `2`，在同一条流上按 2 字节长度前缀分帧，每个数据报自带目标地址。类型要求
+  `tls=true` 或 `reality=` 二者之一，只写地址不给任一者会在装配期报错，避免悄悄退回明文。
+- **REALITY**（`reality.go`）：客户端把一段 16 字节明文（3 字节版本 + 1 字节保留 + 4 字节
+  unix 时间 + 8 字节 short id）用 AES-256-GCM 封进 TLS 1.3 的 session id 字段。密钥是
+  `HKDF-SHA256(X25519 共享密钥, salt = ClientHello random[0:20], info = "REALITY")`，
+  随机数是 `random[20:32]`，附加数据是**把 session id 清零后的 ClientHello**（服务端也不知道
+  明文，只能这样重建 AAD）。服务端用「Ed25519 证书 + 把 Certificate 的 64 字节签名域替换成
+  `HMAC-SHA512(authKey, 服务端公钥)`」证明自己，客户端按同样方式重算并常量时间比较。
+  证书链本身照常校验，因此 `sni` 仍然决定证书名。
+- **自研 TLS 1.3 客户端**（`tls13.go`）：`crypto/tls` 不提供设置 session id 的接口，而 REALITY
+  的认证就藏在那里，所以写了一个只做客户端的 TLS 1.3：单个 X25519 key share、
+  `TLS_AES_128_GCM_SHA256`、标准密钥调度（early/handshake/application traffic secret）与
+  记录层（握手、应用数据、`close_notify`、握手后消息按应用数据记录读取）。
+  它用 `crypto/tls` 的服务端做交叉验证（`TestTLS13AgainstStdlibServer`：握手、密钥调度、
+  「握手后的握手消息走应用数据记录」、多记录写入、`CloseWrite`）。
+- **Hysteria2**（`hysteria2.go`、`h3client.go`）：QUIC 上的 HTTP/3 认证 —— 向
+  `https://hysteria/auth` 发 POST，带 `hysteria-auth`、`hysteria-cc-rx`（客户端下行速率，
+  未配置时为 `0`，让服务端用它自己的默认值）与随机长度的 `hysteria-padding`，应答状态
+  `233` 为通过。TCP 是 `0x401` 请求帧 + 地址长度 + 地址 + padding 长度 + padding，应答帧回
+  状态、消息与 padding；成功后这条流就是隧道。UDP 是数据报：
+  `会话 id(4) + 包号(2) + 分片号(1) + 分片总数(1) + 地址长度(varint) + 地址 + 载荷`，
+  超过 1100 字节按最多 255 片切开，接收侧按会话与包号重组。混淆用 Salamander：
+  8 字节 salt + 载荷与 `BLAKE2b-256(密码||salt)` 逐字节异或。
+- **HTTP/3 客户端与 QPACK 编解码**（`h3client.go`）：手写的最小客户端——控制流 + SETTINGS、
+  一个请求流、DATA/HEADERS 帧读写、`h3` 的变长整数，以及只用 QPACK 静态表的字段行编解码
+  （静态索引行、名字引用行、名字内联行）。不引入 `quic-go/http3`，因为这一阶段只需要
+  一个 POST 和四个响应状态，而那个包会带来一整套服务端能力与额外的依赖面（决策 5）。
+- **TUIC v5**（`tuic.go`）：版本字节 `0x05`。认证走单向流，命令 `0x00` + UUID(16) +
+  32 字节 token；token 由 TLS exporter 派生（label 是 UUID 的规范小写连字符文本，
+  context 是密码），所以**密码本身从不上线**，录下的握手也无法拿去重放。TCP 用命令 `0x01`
+  加地址开一条双向流，写完即隧道（协议没有应答）；UDP 用命令 `0x02` 的数据报：
+  `关联 id(2) + 包号(2) + 分片总数(1) + 分片号(1) + 长度(2) + 地址`，关联 id 由计数器分配
+  （随机 id 在 16 位空间里碰撞概率太高），关闭时发命令 `0x03` 让对端释放。
+- **共用的 QUIC 会话**（`quicsession.go`）：每个出站一条 QUIC 连接，懒建立、引用计数、
+  空闲 60 秒关闭；一个读循环把数据报按协议自己的键分发给对应的关联；`Disown` 只「退租」
+  不切断在途流量，供重载使用（决策 7）。
+- **共用的数据报重组**（`datagramReassembler`）：两种 QUIC 协议的分片都带「包号 + 序号 +
+  总数」，重组逻辑只写一份，放在 `quicsession.go`；映射表有 64 条上限并按最旧淘汰，
+  避免丢一片的数据报把内存吃掉。
+- **注册、TLS 模式表与重载**：`outbound.New` 的 switch 增加 `vless` / `hysteria2` / `tuic`；
+  `tlsModeFor` 把两种 QUIC 类型归入「恒 TLS」，因此 `sni` / `skip-cert-verify` 可用，
+  `tls=` 被拒绝且有分节行号；`outbound.Set` 新增 `Disown()`，`daemonState` 的快照带上
+  拨号器集合，重载在提交点之后对**被替换的那一份**调用 `Disown`，让旧配置的 QUIC 连接
+  在最后一个引用释放时消失，而不是继续对着一台已经不在配置里的服务器保活。
+- **测试**：新增 34 个测试函数（65 个用例条目）。VLESS 有 TCP 回显、TLS 组合、SNI 覆盖、
+  UDP 回显、逐字节的请求头断言、错 UUID 与错版本号；REALITY 有用例端到端往返、明文证书被拒、
+  错公钥、short id 不匹配；TLS 1.3 与标准库服务端交叉验证；Hysteria2 有 TCP 回显、UDP
+  回显（含约 3.6 KB 的分片往返）、错密码、Salamander 往返、选项与速率解析、QPACK 单元用例；
+  TUIC 有 TCP 回显、UDP 回显（含分片）、错 token、选项；另有 `Disown` 的两种语义
+  （空闲即释放、在途不切断）与空闲连接释放用例。
+
+### 关键决策及理由
+
+1. **QUIC 栈选 `quic-go`**。开发文档 §4 已经把它列为 QUIC 族的技术选择；它是 Go 生态里
+   唯一成熟、纯 Go、带数据报与迁移支持且持续维护的实现。自研 QUIC 等于重写拥塞控制、
+   丢包恢复与 TLS 集成，与本阶段目标（做出出站）不成比例。许可证与登记见决策 9。
+2. **只写客户端侧的 TLS 1.3，而不是改 `crypto/tls`**。REALITY 的认证必须落在 ClientHello
+   的 session id 字段上，而 `crypto/tls` 明确不暴露该字段（也无意暴露）。自研范围被刻意
+   压到最小：单套件、单 key share、单条连接语义，不做会话复用、0-RTT、客户端证书、
+   HelloRetryRequest（决策 3 的遗留里如实列出代价）。
+3. **REALITY 的 AAD 必须是「session id 清零后的 ClientHello」**。最初用未清零的字节做附加
+   数据，服务端永远验不过——它拿到的 session id 是密文，重建不出客户端当时用的 AAD。
+   改成两边都先清零再算，并用**副本**清零，避免把密文本身也抹掉（这是实现过程中真实踩到的
+   别名 bug，已修）。
+4. **XTLS-Vision 明确拒绝，不猜**。`flow=xtls-rprx-vision` 的填充与记录层改写没有公开的
+   线格式文档，猜错不会「差一点」，而是直接把字节流写坏。因此 `newVLESSFromSpec` 在配置期
+   就以「需要记录级填充，本构建未实现」报错，未知 flow 同样报错。宁可少一个能力，
+   不要一个会静默破坏数据的实现。
+5. **HTTP/3 手写，不引 `quic-go/http3`**。需要的只是一个带四个自定义头的 POST 和状态码，
+   手写约 300 行；引入完整 HTTP/3 会多一个包、多一套服务端语义，也让「只支持静态表」
+   这个明确的能力边界变模糊。代价是 QPACK 只实现静态表（动态表引用直接报错），
+   而 Hysteria2 的认证应答只用到静态表。
+6. **两种 QUIC 协议共用会话与重组，但各自保留分帧**。连接生命周期、引用计数、
+   数据报分发与分片重组是同一件事，抽成一份；而 Hysteria2 与 TUIC 的帧头、地址编码与
+   命令字完全不同，强行统一会得到一个两边都不像的抽象。因此 `quicsession.go` 只管
+   「一条连接怎么被共享」，协议差异留在各自文件里。
+7. **`Disown` 而不是 `Close` 用于重载**。重载替换配置时若直接 `Close`，会把还在传输的
+   连接切断；若什么都不做，旧 QUIC 连接会对着已经不在配置里的服务器保活到空闲超时。
+   `Disown` 把会话标记为退租、停掉空闲计时器、在没有引用时立即关闭，有引用时等最后
+   一个引用释放——既不留 socket，也不切流量。
+8. **TUIC 的关联 id 用计数器**。16 位空间里随机取 id，在同一连接上开几十条 UDP 流就会
+   撞号，而撞号的后果是两条流互相收到对方的数据报。计数器在连接生命周期内单调递增，
+   关联关闭即释放，不存在回绕风险。
+9. **依赖登记**：本阶段新增一个第三方模块，另一个仅在用途上扩展：
+
+   | 组件 | 版本 | 许可证 | 用途 | 与 GPLv3 |
+   |---|---|---|---|---|
+   | `github.com/quic-go/quic-go` | v0.65.0（本阶段由间接依赖转为直接依赖） | MIT | QUIC 传输：连接、流、数据报、连接状态；QUIC 变长整数 | 兼容 |
+   | `golang.org/x/net` | v0.56.0（quic-go 的间接依赖，先前已在 `go.sum`） | BSD-3-Clause（Go Authors） | `quic-go` 内部依赖；本项目代码不直接 import | 兼容 |
+   | `golang.org/x/crypto` | v0.54.0（阶段 9 已转直接依赖） | BSD-3-Clause（Go Authors） | 本阶段新增用途：`blake2b`——Hysteria2 Salamander 混淆的密钥流 | 兼容 |
+
+   `go mod tidy -diff`（`GOPROXY=off`）无差异，`go mod verify` 全部通过。
+10. **分享链接与订阅导入仍不做**。开发文档 §2.6 把它们列为 MVP 总体能力，但本阶段任务书
+    的范围是三种出站；按「只有明确列入本阶段范围才动」的约束，一行未写，留给下一阶段。
+11. **沙箱里的 QUIC 只能走已连接套接字，如实记录而非掩盖**。本沙箱 seccomp 禁止对未连接
+    套接字 `sendto`/`sendmsg`，而 `quic.DialAddr` 正是用一条未连接套接字向对端发第一程。
+    测试因此通过一个包内钩子 `dialQUICAddr` 换成「先 `connect` 再 `quic.Dial`」的拨号器，
+    两端仍是真实内核数据报、真实 QUIC 握手，不是内存假通道。生产路径保留 `quic.DialAddr`
+    （它能用 GSO/ECN，且一条套接字可服务多个对端）。**代价是默认拨号路径本身没有被测试
+    覆盖**，这条写在「遗留问题」里，不含糊。
+12. **实现过程中修掉的真实缺陷**（都来自测试，不是推测）：QPACK 名字内联行的名称长度前缀
+    是 3 位而值 7 位、名字引用行的索引前缀是 4 位（原先误用 6 位）、TLS 1.3 握手后的
+    握手消息按应用数据记录读取、VLESS 地址是「端口在前」、REALITY 的 AAD 清零与切片别名。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链为 `~/sdks/go/bin` 的 Go 1.27.4：
+
+```
+go build ./...                                      通过
+go vet ./...                                        通过
+go test ./... -count=1                              925 个用例条目：914 通过、11 跳过、0 失败
+go test -race -count=1 ./internal/outbound/ ./internal/config/ \
+                       ./cmd/melonarc-core/          全部通过
+gofmt -l .                                          无输出
+GOOS=windows go build ./cmd/... ./internal/...      通过
+GOOS=windows go vet   ./cmd/... ./internal/...      通过
+go mod tidy -diff（GOPROXY=off）                     无差异
+go mod verify                                       all modules verified
+```
+
+11 个跳过与阶段 2/3/7/8 记录的完全相同（10 个回环 UDP 中继用例受未连接 `sendto` 限制，
+1 个 `TestTUNLinuxLoopback` 需要 CAP_NET_ADMIN），**本阶段没有新增跳过**：三种新协议的
+TCP/UDP 往返全部实际执行通过。`GOOS=windows go build ./...` 字面命令仍被 `spikes/tun`、
+`spikes/quic` 两个只读 Unix-only 原型阻断，产品包用上面的分目录命令验收；Windows 侧的
+测试辅助文件（`quic_test_conn_windows_test.go`）给 QUIC 测试服务端提供普通监听套接字。
+
+`knownProxyTypes` 里的 11 个类型到这里全部有实现，`Unsupported` 只再承担「未知类型」的兜底。
+
+**互操作性证据（必须如实说明）**：三种协议的端到端往返都是「本项目自己写的客户端 +
+本项目自己写的测试对端」，双方共用同一套线格式原语；**没有与任何第三方参考实现做过
+互通验证**，因此不能写成「已验证与参考实现兼容」。可以称得上跨实现验证的只有两处，
+且都在协议之外的下层：TLS 1.3 的握手与密钥调度对着 **Go 标准库的 `crypto/tls` 服务端**
+跑通（`TestTLS13AgainstStdlibServer`），QUIC 本身是 `quic-go` 的完整实现而非自研。
+REALITY 的认证、VLESS 的请求头、Hysteria2 的 HTTP/3 与数据报、TUIC 的命令与分片，
+全部只有「本端与本端」的证据，线格式按公开协议定义与公开开源实现的源码核对过，
+但这不等价于互通证明。
+
+### 遗留问题
+
+- **未做第三方参考实现互通**：见上。三种协议上线前各接一次独立实现的服务端，用真实握手与
+  真实流量复测，重点核对 REALITY 的 AAD 构造与证书签名替换、Hysteria2 的 HTTP/3 应答与
+  分片重组、TUIC 的 exporter label/context 顺序。
+- **XTLS-Vision 未实现**：`flow=xtls-rprx-vision` 在配置期被明确拒绝（决策 4）。要接这个
+  能力，先得有公开的线格式定义，再补记录级填充与 Vision 的 padding 策略。
+- **自研 TLS 1.3 的能力边界**：单密码套件（`TLS_AES_128_GCM_SHA256`）、单 X25519 key share、
+  不支持 HelloRetryRequest（服务端若坚持 P-256 组会握手失败）、不支持会话复用与 0-RTT、
+  不支持客户端证书。对 REALITY 够用，对「伪装成主流客户端」不够——ClientHello 的扩展集合
+  与顺序是自研实现的形状，本身就是可识别特征，没有做浏览器指纹模仿。
+- **REALITY 只做客户端**：没有服务端实现、没有 short id 轮换与多用户、没有回落目标；
+  `spider-x` 之类的探针防护不在范围内。
+- **Hysteria2 的能力子集**：没有实现它的拥塞控制（只上报 `hysteria-cc-rx`，未实现带宽探测
+  与 Brutal）、没有端口跳跃、没有 masquerade 回落、没有 UDP over stream、没有 0-RTT；
+  分片固定按 1100 字节切，不按路径 MTU 自适应；接收侧没有包号去重窗口
+  （重传的重复分片会被当成新分片参与重组）。
+- **TUIC 的能力子集**：没有 0-RTT、没有发送心跳（命令字已定义但客户端不发，靠 QUIC 自身
+  保活）、没有 gzip、没有证书 pinning；拥塞控制用 `quic-go` 默认（CUBIC），没有实现 BBR；
+  UDP 只走不可靠的数据报，QUIC 数据报本身不重传，因此丢包直接体现为丢包。
+- **每个出站只有一条 QUIC 连接**：没有按对端做连接池，也没有处理连接迁移；一条连接上的
+  拥塞控制窗口被所有流共享。
+- **默认 QUIC 拨号路径未被测试覆盖**：见决策 11。这条路径在真实机器上才是常态，
+  需要在一个允许未连接 `sendto` 的环境里补一条端到端用例（或一个可配置的拨号器）。
+- **观测层未接入**：新出站的握手失败没有进阶段 5 的 `inbound.Metrics` 分类明细，
+  也没有按协议统计；`/v1/policies` 不暴露协议类型或 TLS 设置（与阶段 9 相同）。
+- **Snell v5 的 QUIC/HTTP3 代理模式**：阶段 9 记录为待定，本阶段按其协议语义判断它属于
+  「另一种传输」，与 QUIC 出站不是同一件事，仍然未实现。
+- 阶段 1–9 的其余遗留（Windows 实机验证、用户态 TCP 边界、DoT/DoH 上游与连接池、
+  规则集更新、观测层 SQLite、桌面 UI、重载继承选择、`pending_restart`、
+  `GOOS=windows go build ./...` 字面命令等）仍然成立。
+
+### 下一步计划
+
+1. **第三方互通验证**：VLESS（含 REALITY）、Hysteria2、TUIC v5 各接一次独立实现的真实
+   服务端，连同阶段 9 的 Shadowsocks / VMess / Trojan / Snell，一起补上互通证据。
+2. **分享链接与订阅导入**：`ss://`、`vmess://`、`trojan://`、`vless://`、`hysteria2://`、
+   `tuic://` 的解析与定时更新，按开发文档 §2.6 单独成阶段。
+3. **补 XTLS-Vision**：等公开线格式；同时评估是否用一个可插拔的 ClientHello 构造器
+   替掉自研 TLS 1.3 的固定扩展集合，以便做指纹模仿。
+4. **补 QUIC 出站能力**：Hysteria2 的拥塞控制与端口跳跃、TUIC 的 0-RTT 与心跳、
+   按对端的连接池，以及分片的路径 MTU 自适应与去重窗口。
+5. **观测与 API**：把出站握手失败送进 `inbound.Metrics` 的类别化字段，让 API 能按协议
+   类型查看出站状态；这条已经连续两个阶段挂在遗留里。
+6. Windows 实机与 DoT/DoH 上游、观测层 SQLite、桌面 UI 按阶段 8 的计划继续推进。

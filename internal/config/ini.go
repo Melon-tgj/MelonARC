@@ -37,6 +37,20 @@ const (
 // word of its own.
 const listenOff = "off"
 
+// Defaults for the TUN device. Enabling the device installs the route to its
+// own prefix plus the name address range; taking over the whole routing table
+// is a separate, explicit choice made with tun-route.
+const (
+	defaultTUNName       = "melonarc0"
+	defaultTUNAddress    = "198.18.0.1/24"
+	defaultTUNMTU        = 1500
+	defaultTUNUDPTimeout = 30 * time.Second
+	maxTUNRoutes         = 64
+	minTUNMTU            = 576
+	maxTUNMTU            = 65535
+	maxTUNNameLen        = 15 // IFNAMSIZ includes the terminating NUL
+)
+
 // Defaults for policy group timings.
 const (
 	defaultInterval  = 300 * time.Second
@@ -245,10 +259,53 @@ func parseGeneralEntry(cfg *Config, key, value string, line int, seen map[string
 		cfg.General.GeoIPDB = value
 	case "asn-db":
 		cfg.General.ASNDB = value
+	case "tun-enable":
+		on, err := parseToggle(value)
+		if err != nil {
+			return fmt.Errorf("tun-enable: %w", err)
+		}
+		cfg.General.TUN.Enable = on
+	case "tun-name":
+		cfg.General.TUN.Name = strings.TrimSpace(value)
+	case "tun-address":
+		cfg.General.TUN.Address = strings.TrimSpace(value)
+	case "tun-mtu":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("tun-mtu: %q is not a number", value)
+		}
+		if n <= 0 {
+			return fmt.Errorf("tun-mtu: %q must be positive; omit the key to use the default", value)
+		}
+		cfg.General.TUN.MTU = n
+	case "tun-route":
+		cfg.General.TUN.Routes = splitList(value)
+	case "tun-udp-timeout":
+		d, err := parseSeconds(value)
+		if err != nil {
+			return fmt.Errorf("tun-udp-timeout: %v", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("tun-udp-timeout: must be positive; omit the key to use the default")
+		}
+		cfg.General.TUN.UDPTimeout = d
 	default:
 		return fmt.Errorf("unknown setting %q", key)
 	}
 	return nil
+}
+
+// parseToggle reads a boolean setting. Only unambiguous words are accepted: a
+// typo must be a syntax error, not a silently disabled privileged device.
+func parseToggle(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on", "true", "yes", "1":
+		return true, nil
+	case "off", "false", "no", "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%q is neither on nor off", value)
+	}
 }
 
 // listenAddress normalises a listen setting: the word that switches a listener

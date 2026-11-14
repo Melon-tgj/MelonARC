@@ -78,6 +78,7 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 		handler:   handler,
 		metrics:   metrics,
 		resolver:  resolver,
+		dialers:   dialers,
 		version:   "test",
 		startedAt: time.Now(),
 	}

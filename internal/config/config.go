@@ -68,6 +68,22 @@ type General struct {
 	// ASNDB is the MaxMind DB file that answers IP-ASN rules, empty when no
 	// such rule exists.
 	ASNDB string
+	// TUN holds the device settings of the TUN inbound. It is off unless
+	// Enable is true: creating a device and installing routes is privileged
+	// and must never happen because a configuration was merely loaded.
+	TUN TUN
+}
+
+// TUN is one [General] device setting group. A zero value means "off": the
+// parser leaves the fields empty and Validate fills in the defaults only when
+// Enable is true, so a configuration from an earlier stage is unchanged.
+type TUN struct {
+	Enable     bool
+	Name       string
+	Address    string
+	MTU        int
+	Routes     []string
+	UDPTimeout time.Duration
 }
 
 // Proxy is one entry of the [Proxy] section. Everything after the type is kept
@@ -142,7 +158,8 @@ func BuiltinTargets() []string { return []string{TargetDirect, TargetReject} }
 // a typo fails at load time instead of at dial time.
 var knownProxyTypes = map[string]bool{
 	"ss": true, "vmess": true, "vless": true, "trojan": true, "snell": true,
-	"hysteria2": true, "tuic": true, "socks5": true, "http": true, "https": true,
+	"hysteria2": true, "tuic": true, "socks5": true, "socks5-tls": true,
+	"http": true, "https": true,
 }
 
 // logLevels is the accepted set of log levels.

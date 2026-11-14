@@ -131,6 +131,14 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("inbound is not usable:\n%w", err)
 	}
+	// The device is opened after the socket listeners. If it fails, the
+	// listeners that are already serving are closed before the error is
+	// returned, so startup never leaves a half-enabled inbound layer behind.
+	tunSrv, err := startTUN(cfg.General, handler, resolver, metrics, logger)
+	if err != nil {
+		closeInbounds(services, logger)
+		return fmt.Errorf("tun inbound is not usable:\n%w", err)
+	}
 
 	state := &daemonState{
 		cfg:       cfg,
@@ -139,6 +147,7 @@ func run(args []string) error {
 		handler:   handler,
 		metrics:   metrics,
 		resolver:  resolver,
+		dialers:   dialers,
 		version:   version,
 		startedAt: time.Now(),
 	}
@@ -163,6 +172,14 @@ func run(args []string) error {
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
+		// Stop the packet loop first: it is the only inbound that can still
+		// generate new dials after the socket listeners stopped accepting.
+		if tunSrv != nil {
+			if err := tunSrv.Close(shutdown); err != nil {
+				logger.Warn("tun shutdown", "device", tunSrv.Name(), "error", err)
+			}
+			logger.Debug("inbound stopped", "protocol", tunSrv.Protocol())
+		}
 		closeInbounds(services, logger)
 		if apiSrv != nil {
 			if err := apiSrv.Close(shutdown); err != nil {
@@ -287,6 +304,26 @@ func startInbounds(g config.General, handler *inbound.Handler, metrics *inbound.
 		logger.Info("inbound listening", "protocol", srv.Protocol(), "addr", srv.Addr())
 	}
 	return services, nil
+}
+
+// startTUN opens the device when the configuration asks for one. It is off by
+// default, and on the other platforms openDevice reports the missing driver
+// instead of the daemon starting without an inbound it was told to enable.
+func startTUN(g config.General, handler *inbound.Handler, resolver *dns.Resolver, metrics *inbound.Metrics, logger *slog.Logger) (*inbound.TUNService, error) {
+	if !g.TUN.Enable {
+		return nil, nil
+	}
+	return inbound.NewTUN(inbound.TUNOptions{
+		Name:       g.TUN.Name,
+		Address:    g.TUN.Address,
+		MTU:        g.TUN.MTU,
+		Routes:     g.TUN.Routes,
+		UDPTimeout: g.TUN.UDPTimeout,
+		Handler:    handler,
+		Resolver:   resolver,
+		Metrics:    metrics,
+		Logger:     logger,
+	})
 }
 
 // closeInbounds stops every listener, waiting a bounded time for the
@@ -485,6 +522,7 @@ func printSummary(cfg *config.Config, program *rules.Program, dataDir string) {
 	fmt.Printf("geoip: %s, asn: %s\n", pathOrOff(cfg.DataPath(cfg.General.GeoIPDB)), pathOrOff(cfg.DataPath(cfg.General.ASNDB)))
 	fmt.Printf("inbound: http %s, socks5 %s%s\n",
 		listenOrOff(cfg.General.HTTPListen), listenOrOff(cfg.General.SOCKS5Listen), authNote(cfg.General))
+	fmt.Printf("tun: %s\n", tunNote(cfg.General))
 	fmt.Printf("data: %s\n", dataDir)
 	fmt.Printf("token: %s\n", datadir.TokenPath(dataDir))
 }
@@ -525,6 +563,20 @@ func listenOrOff(addr string) string {
 		return "off"
 	}
 	return addr
+}
+
+// tunNote renders the device settings for -check. It prints no credentials and
+// touches no device: the summary describes what a start would activate.
+func tunNote(g config.General) string {
+	if !g.TUN.Enable {
+		return "off"
+	}
+	routes := "device prefix and name address range"
+	if len(g.TUN.Routes) > 0 {
+		routes = strings.Join(g.TUN.Routes, ", ")
+	}
+	return fmt.Sprintf("%s %s mtu %d (routes: %s, udp-timeout %s)",
+		g.TUN.Name, g.TUN.Address, g.TUN.MTU, routes, g.TUN.UDPTimeout)
 }
 
 // authNote says whether the SOCKS5 inbound asks for credentials.
