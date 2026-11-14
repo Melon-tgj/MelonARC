@@ -1,0 +1,339 @@
+package store
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+	"unicode/utf8"
+)
+
+// testStore opens a store in a temporary directory with a fixed clock.
+func testStore(t *testing.T, opts Options) (*Store, string) {
+	t.Helper()
+	if opts.Path == "" {
+		opts.Path = filepath.Join(t.TempDir(), FileName)
+	}
+	if opts.FlushInterval == 0 {
+		// Long enough that only an explicit Flush writes: a background write
+		// would make the assertions depend on timing.
+		opts.FlushInterval = time.Hour
+	}
+	if opts.Now == nil {
+		base := time.Date(2026, 11, 14, 9, 0, 0, 0, time.UTC)
+		var calls int
+		opts.Now = func() time.Time {
+			calls++
+			return base.Add(time.Duration(calls) * time.Second)
+		}
+	}
+	s, err := Open(opts)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	return s, opts.Path
+}
+
+// TestStoreWritesAndReloadsHistory is the round trip: what one run recorded, the
+// next run reads back, from a file only its owner can read.
+func TestStoreWritesAndReloadsHistory(t *testing.T) {
+	s, path := testStore(t, Options{})
+	at := time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC)
+	s.RecordConnection(Connection{
+		At: at, Protocol: "http", Host: "example.com", Port: 443, Network: "tcp",
+		Rule: "DOMAIN-SUFFIX,example.com", Policy: "manual", Outbound: "alpha",
+		Up: 1200, Down: 34000, Duration: 1500 * time.Millisecond,
+	})
+	s.RecordConnection(Connection{
+		At: at.Add(time.Second), Protocol: "socks5", Host: "198.51.100.7", Port: 53,
+		Network: "udp", Policy: "auto", Outbound: "DIRECT", Down: 90,
+	})
+	s.RecordEvent(Event{At: at, Kind: KindReload, Name: "/etc/melonarc.ini", Detail: "3 rules", OK: true})
+	s.RecordEvent(Event{At: at, Kind: KindFailure, Name: "alpha", Detail: "dial_timeout", OK: false})
+	s.RecordSample(Sample{At: at, Up: 4000, Down: 90000})
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("history file mode = %o, want 600", mode)
+		}
+	}
+	if info.Size() == 0 {
+		t.Fatal("the history file is empty")
+	}
+
+	// A second run, as a restart would.
+	reopened, err := Open(Options{Path: path, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer reopened.Close()
+	conns := reopened.Connections(0, time.Time{})
+	if len(conns) != 2 {
+		t.Fatalf("reloaded %d connections, want 2: %+v", len(conns), conns)
+	}
+	want := Connection{
+		At: at, Protocol: "http", Host: "example.com", Port: 443, Network: "tcp",
+		Rule: "DOMAIN-SUFFIX,example.com", Policy: "manual", Outbound: "alpha",
+		Up: 1200, Down: 34000, Duration: 1500 * time.Millisecond,
+	}
+	if conns[0] != want {
+		t.Errorf("first connection = %+v, want %+v", conns[0], want)
+	}
+	if conns[1].Host != "198.51.100.7" || conns[1].Down != 90 {
+		t.Errorf("second connection = %+v", conns[1])
+	}
+	events := reopened.Events(0, "", time.Time{})
+	if len(events) != 2 || events[0].Kind != KindReload || !events[0].OK {
+		t.Fatalf("reloaded events = %+v", events)
+	}
+	if events[1].Kind != KindFailure || events[1].OK {
+		t.Errorf("the failed event lost its outcome: %+v", events[1])
+	}
+	samples := reopened.Samples(0, time.Time{})
+	if len(samples) != 1 || samples[0].Up != 4000 || samples[0].Down != 90000 {
+		t.Fatalf("reloaded samples = %+v", samples)
+	}
+	if status := reopened.Status(); status.Bytes == 0 || status.Connections != 2 || status.Notice != "" {
+		t.Errorf("status = %+v", status)
+	}
+}
+
+// TestStoreBoundsWhatItKeeps checks the retention rule: the oldest record is the
+// one that goes, and the count never exceeds the bound.
+func TestStoreBoundsWhatItKeeps(t *testing.T) {
+	s, _ := testStore(t, Options{Retention: Retention{Connections: 2, Events: 1, Samples: 2}})
+	base := time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		s.RecordConnection(Connection{At: base.Add(time.Duration(i) * time.Second), Host: string(rune('a' + i))})
+		s.RecordEvent(Event{At: base, Kind: KindReload, Name: string(rune('a' + i))})
+		s.RecordSample(Sample{At: base.Add(time.Duration(i) * time.Minute), Up: int64(i)})
+	}
+	conns := s.Connections(0, time.Time{})
+	if len(conns) != 2 {
+		t.Fatalf("kept %d connections, want 2", len(conns))
+	}
+	if conns[0].Host != "d" || conns[1].Host != "e" {
+		t.Errorf("kept %q and %q, want the two newest", conns[0].Host, conns[1].Host)
+	}
+	if events := s.Events(0, "", time.Time{}); len(events) != 1 || events[0].Name != "e" {
+		t.Errorf("events = %+v, want only the newest", events)
+	}
+	if samples := s.Samples(0, time.Time{}); len(samples) != 2 || samples[1].Up != 4 {
+		t.Errorf("samples = %+v", samples)
+	}
+	// A limit narrower than the retention window still selects the newest.
+	if conns := s.Connections(1, time.Time{}); len(conns) != 1 || conns[0].Host != "e" {
+		t.Errorf("Connections(1) = %+v", conns)
+	}
+}
+
+// TestStoreFiltersConnections covers the query filters the API exposes: a kind,
+// a lower bound and a limit, on all three tables.
+func TestStoreFiltersConnections(t *testing.T) {
+	s, _ := testStore(t, Options{})
+	base := time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC)
+	for i := 0; i < 4; i++ {
+		s.RecordConnection(Connection{At: base.Add(time.Duration(i) * time.Minute), Host: "h"})
+	}
+	since := base.Add(2 * time.Minute)
+	got := s.Connections(0, since)
+	if len(got) != 2 {
+		t.Fatalf("since filtered to %d connections, want 2", len(got))
+	}
+	if got[0].At.Before(since) {
+		t.Errorf("a connection older than the cutoff was returned: %v", got[0].At)
+	}
+
+	s.RecordEvent(Event{At: base, Kind: KindFailure})
+	s.RecordEvent(Event{At: base, Kind: KindReload})
+	s.RecordEvent(Event{At: base, Kind: KindFailure})
+	if events := s.Events(0, KindFailure, time.Time{}); len(events) != 2 {
+		t.Errorf("kind filter returned %d events, want 2", len(events))
+	}
+	if events := s.Events(0, "nonsense", time.Time{}); len(events) != 0 {
+		t.Errorf("an unknown kind returned %d events", len(events))
+	}
+
+	// The lower bound applies to the events the same way: a record exactly at
+	// the cutoff is kept, and one minute later nothing is.
+	if events := s.Events(0, "", base); len(events) != 3 {
+		t.Errorf("since at the oldest event returned %d, want all 3", len(events))
+	}
+	if events := s.Events(0, "", base.Add(time.Minute)); len(events) != 0 {
+		t.Errorf("since one minute in returned %d events, want none", len(events))
+	}
+	// The samples carry their own times, so the bound splits them.
+	for i := 0; i < 3; i++ {
+		s.RecordSample(Sample{At: base.Add(time.Duration(i) * time.Minute), Up: int64(i + 1)})
+	}
+	samples := s.Samples(0, base.Add(time.Minute))
+	if len(samples) != 2 {
+		t.Fatalf("since one minute in returned %d samples, want 2", len(samples))
+	}
+	if samples[0].Up != 2 || samples[1].Up != 3 {
+		t.Errorf("samples = %+v, want the ones at or after the cutoff", samples)
+	}
+	// A limit keeps the newest of the window, which is what "the last few"
+	// means to a reader of a series.
+	if tail := s.Samples(1, time.Time{}); len(tail) != 1 || tail[0].Up != 3 {
+		t.Errorf("limit 1 returned %+v, want the newest sample", tail)
+	}
+}
+
+// TestStoreSurvivesAWriteFailure is the property the daemon depends on: a history
+// that cannot be written leaves the records readable and reports the problem, and
+// the caller never sees an error on the recording path.
+func TestStoreSurvivesAWriteFailure(t *testing.T) {
+	// The parent of the database is a regular file, so creating the directory
+	// fails for any user — including a test run as root.
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write the blocking file: %v", err)
+	}
+	s, err := Open(Options{Path: filepath.Join(blocked, FileName), FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	base := time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC)
+	s.RecordConnection(Connection{At: base, Host: "example.com"})
+	if err := s.Flush(); err == nil {
+		t.Fatal("Flush succeeded although the path cannot be created")
+	}
+	status := s.Status()
+	if status.LastError == "" {
+		t.Error("a failed write left no error in the status")
+	}
+	if status.Connections != 1 {
+		t.Errorf("the record was lost with the failed write: %+v", status)
+	}
+	if conns := s.Connections(0, time.Time{}); len(conns) != 1 {
+		t.Errorf("the record is not queryable after a failed write")
+	}
+}
+
+// TestStoreReplacesAFileItCannotRead covers a corrupt or foreign database: the
+// daemon keeps serving with an empty history, says so, and the next flush writes a
+// file this build owns.
+func TestStoreReplacesAFileItCannotRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := os.WriteFile(path, []byte("this is not a database, but it is long enough"), 0o600); err != nil {
+		t.Fatalf("write the corrupt file: %v", err)
+	}
+	s, err := Open(Options{Path: path, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	if status := s.Status(); !strings.Contains(status.Notice, "not usable") {
+		t.Fatalf("a corrupt file was accepted silently: %+v", status)
+	}
+	if conns := s.Connections(0, time.Time{}); len(conns) != 0 {
+		t.Errorf("a corrupt file produced %d connections", len(conns))
+	}
+
+	s.RecordConnection(Connection{At: time.Now(), Host: "example.com"})
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if status := s.Status(); status.Notice != "" {
+		t.Errorf("the notice survived a successful write: %q", status.Notice)
+	}
+	// The replacement is a real database, which the next start reads.
+	reopened, err := Open(Options{Path: path, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open after the replacement: %v", err)
+	}
+	defer reopened.Close()
+	if conns := reopened.Connections(0, time.Time{}); len(conns) != 1 {
+		t.Fatalf("the replacement holds %d connections, want 1", len(conns))
+	}
+	if notice := reopened.Status().Notice; notice != "" {
+		t.Errorf("the replacement was reported as unusable: %q", notice)
+	}
+}
+
+// TestStoreTrimsWhatItCannotStore keeps a remote peer from deciding how large a
+// record is, and keeps every stored string valid UTF-8 so a reader can print it.
+func TestStoreTrimsWhatItCannotStore(t *testing.T) {
+	s, _ := testStore(t, Options{})
+	long := strings.Repeat("a", 400) + strings.Repeat("é", 200)
+	s.RecordConnection(Connection{Host: long, Protocol: strings.Repeat("p", 40), Rule: long, Policy: long})
+	s.RecordEvent(Event{Kind: strings.Repeat("k", 40), Detail: long})
+	conn := s.Connections(0, time.Time{})[0]
+	if len(conn.Host) > maxHostLen {
+		t.Errorf("host is %d bytes, want at most %d", len(conn.Host), maxHostLen)
+	}
+	if !utf8.ValidString(conn.Host) {
+		t.Error("a trimmed value is not valid UTF-8")
+	}
+	if len(conn.Protocol) > maxProtocolLen {
+		t.Errorf("protocol is %d bytes", len(conn.Protocol))
+	}
+	event := s.Events(0, "", time.Time{})[0]
+	if len(event.Detail) > maxDetailLen || !utf8.ValidString(event.Detail) {
+		t.Errorf("detail is %d bytes", len(event.Detail))
+	}
+}
+
+// TestStoreCloseWritesWhatIsLeft checks the shutdown contract: the last records of
+// a run reach the file without an explicit Flush.
+func TestStoreCloseWritesWhatIsLeft(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	s, err := Open(Options{Path: path, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.RecordEvent(Event{At: time.Now(), Kind: KindReload, OK: true})
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Closing twice is safe and keeps the first result.
+	if err := s.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+	reopened, err := Open(Options{Path: path, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer reopened.Close()
+	if events := reopened.Events(0, "", time.Time{}); len(events) != 1 {
+		t.Fatalf("the last event was not written on close: %d events", len(events))
+	}
+}
+
+// TestNilStoreIsUsable guards the call sites that hold an optional store: a nil one
+// records nothing and answers empty, so the daemon needs no nil checks.
+func TestNilStoreIsUsable(t *testing.T) {
+	var s *Store
+	s.RecordConnection(Connection{Host: "example.com"})
+	s.RecordEvent(Event{Kind: KindReload})
+	s.RecordSample(Sample{Up: 1})
+	if err := s.Flush(); err != nil {
+		t.Errorf("nil Flush: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Errorf("nil Close: %v", err)
+	}
+	if got := s.Connections(0, time.Time{}); got != nil {
+		t.Errorf("nil Connections = %v", got)
+	}
+	if got := s.Status(); got != (Status{}) {
+		t.Errorf("nil Status = %+v", got)
+	}
+}

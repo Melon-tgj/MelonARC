@@ -103,7 +103,7 @@ func (h *httpHandler) tunnel(ctx context.Context, client net.Conn, req *http.Req
 		writeHTTPStatus(client, http.StatusBadRequest, "CONNECT needs host:port")
 		return
 	}
-	upstream, sel, err := h.handler.Stream(ctx, Request{Target: target, Network: networkTCP})
+	upstream, sel, err := h.handler.Stream(ctx, Request{Target: target, Network: networkTCP, Protocol: protocolHTTP})
 	if err != nil {
 		h.writeDialError(client, target, sel, err)
 		return
@@ -151,7 +151,7 @@ func (h *httpHandler) forward(ctx context.Context, client net.Conn, req *http.Re
 	// The whole connection belongs to this one exchange.
 	req.Close = true
 
-	upstream, sel, err := h.handler.Stream(ctx, Request{Target: target, Network: networkTCP})
+	upstream, sel, err := h.handler.Stream(ctx, Request{Target: target, Network: networkTCP, Protocol: protocolHTTP})
 	if err != nil {
 		h.writeDialError(client, target, sel, err)
 		return

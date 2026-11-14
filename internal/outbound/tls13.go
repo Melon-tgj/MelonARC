@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"crypto/ecdh"
 	"crypto/hmac"
+	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -19,7 +20,8 @@ import (
 )
 
 // This file is a client-only TLS 1.3 implementation covering exactly what one
-// handshake variant needs: one X25519 key share, one AEAD cipher suite, no
+// handshake variant needs: one key share (the hybrid X25519MLKEM768 group, with
+// plain X25519 as the fallback a server may choose), one AEAD cipher suite, no
 // session resumption, no early data, no client certificates and no HelloRetry
 // Request.
 //
@@ -50,7 +52,11 @@ const (
 	tls13ExtKeyShare          = 51
 	tls13ExtSupportedVersions = 43
 
-	tls13GroupX25519 = 29
+	// tls13GroupX25519 is the classical group; tls13GroupX25519MLKEM768 is the
+	// hybrid post-quantum group whose share is an ML-KEM-768 encapsulation key
+	// followed by an X25519 public key.
+	tls13GroupX25519         = 29
+	tls13GroupX25519MLKEM768 = 4588
 
 	tls13MsgClientHello = 1
 	tls13MsgServerHello = 2
@@ -124,6 +130,74 @@ type tls13Conn struct {
 	closeOnce sync.Once
 }
 
+// tls13KeyExchange holds the private halves of the key share this client
+// offers. The share is the hybrid X25519MLKEM768 group, and it is not optional:
+// a REALITY server rejects a ClientHello whose key share does not carry an
+// ML-KEM encapsulation key, because a handshake recorded today could be
+// decrypted later by a quantum computer. The plain X25519 share is offered
+// second, as a fallback a server may choose. Either way the classical half is
+// what REALITY derives its authentication key from, so it is kept separately.
+type tls13KeyExchange struct {
+	mlkem  *mlkem.DecapsulationKey768
+	x25519 *ecdh.PrivateKey
+}
+
+func newTLS13KeyExchange() (*tls13KeyExchange, error) {
+	mlkemKey, err := mlkem.GenerateKey768()
+	if err != nil {
+		return nil, fmt.Errorf("tls13: generate an ml-kem key: %w", err)
+	}
+	curveKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("tls13: generate a key share: %w", err)
+	}
+	return &tls13KeyExchange{mlkem: mlkemKey, x25519: curveKey}, nil
+}
+
+// share is the client key share in the order the group defines it: the ML-KEM
+// encapsulation key first, then the X25519 public key.
+func (k *tls13KeyExchange) share() []byte {
+	share := make([]byte, 0, mlkem.EncapsulationKeySize768+32)
+	share = append(share, k.mlkem.EncapsulationKey().Bytes()...)
+	return append(share, k.x25519.PublicKey().Bytes()...)
+}
+
+// curveShared is the plain X25519 secret, which REALITY derives its
+// authentication key from even when the handshake itself is hybrid.
+func (k *tls13KeyExchange) curveShared(peer []byte) ([]byte, error) {
+	peerKey, err := ecdh.X25519().NewPublicKey(peer)
+	if err != nil {
+		return nil, fmt.Errorf("tls13: server public key: %w", err)
+	}
+	shared, err := k.x25519.ECDH(peerKey)
+	if err != nil {
+		return nil, fmt.Errorf("tls13: ecdh: %w", err)
+	}
+	return shared, nil
+}
+
+// shared returns the key schedule's ECDHE input for the group the server chose:
+// the ML-KEM secret followed by the X25519 secret for the hybrid group, or the
+// X25519 secret alone.
+func (k *tls13KeyExchange) shared(group uint16, serverShare []byte) ([]byte, error) {
+	if group == tls13GroupX25519 {
+		return k.curveShared(serverShare)
+	}
+	const hybridLen = mlkem.CiphertextSize768 + 32
+	if len(serverShare) != hybridLen {
+		return nil, fmt.Errorf("tls13: server key share is %d bytes, want %d", len(serverShare), hybridLen)
+	}
+	secret, err := k.mlkem.Decapsulate(serverShare[:mlkem.CiphertextSize768])
+	if err != nil {
+		return nil, fmt.Errorf("tls13: decapsulate the server share: %w", err)
+	}
+	curve, err := k.curveShared(serverShare[mlkem.CiphertextSize768:])
+	if err != nil {
+		return nil, err
+	}
+	return append(secret[:len(secret):len(secret)], curve...), nil
+}
+
 // tls13Client runs the handshake on conn and returns the established
 // connection. conn stays owned by the caller on error and becomes owned by the
 // result on success.
@@ -135,9 +209,9 @@ func tls13Client(ctx context.Context, conn net.Conn, cfg tls13ClientConfig) (*tl
 		return nil, err
 	}
 
-	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	key, err := newTLS13KeyExchange()
 	if err != nil {
-		return nil, fmt.Errorf("tls13: generate key share: %w", err)
+		return nil, err
 	}
 	random := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, random); err != nil {
@@ -149,18 +223,14 @@ func tls13Client(ctx context.Context, conn net.Conn, cfg tls13ClientConfig) (*tl
 		if len(cfg.PeerKey) != 32 {
 			return nil, errors.New("tls13: a session id builder needs a 32-byte peer key")
 		}
-		peerKey, err := ecdh.X25519().NewPublicKey(cfg.PeerKey)
-		if err != nil {
-			return nil, fmt.Errorf("tls13: server public key: %w", err)
-		}
-		if shared, err = key.ECDH(peerKey); err != nil {
-			return nil, fmt.Errorf("tls13: ecdh: %w", err)
+		if shared, err = key.curveShared(cfg.PeerKey); err != nil {
+			return nil, err
 		}
 	} else if _, err := io.ReadFull(rand.Reader, sessionID[:]); err != nil {
 		return nil, fmt.Errorf("tls13: generate session id: %w", err)
 	}
 
-	hello := tls13BuildClientHello(cfg, random, sessionID, key.PublicKey().Bytes())
+	hello := tls13BuildClientHello(cfg, random, sessionID, key.share())
 	if cfg.SessionID != nil {
 		sealed := cfg.SessionID(hello, tls13SessionIDOffset, random, shared)
 		copy(hello[tls13SessionIDOffset:tls13SessionIDOffset+tls13SessionIDLen], sealed[:])
@@ -182,17 +252,13 @@ func tls13Client(ctx context.Context, conn net.Conn, cfg tls13ClientConfig) (*tl
 	if serverHello[0] != tls13MsgServerHello {
 		return nil, fmt.Errorf("tls13: first handshake message is type %d, want a server hello", serverHello[0])
 	}
-	serverShare, err := tls13ParseServerHello(serverHello, sessionID)
+	group, serverShare, err := tls13ParseServerHello(serverHello, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	peerKey, err := ecdh.X25519().NewPublicKey(serverShare)
+	shared, err = key.shared(group, serverShare)
 	if err != nil {
-		return nil, fmt.Errorf("tls13: server key share: %w", err)
-	}
-	shared, err = key.ECDH(peerKey)
-	if err != nil {
-		return nil, fmt.Errorf("tls13: ecdh with the server: %w", err)
+		return nil, err
 	}
 	transcript = append(transcript, serverHello...)
 
@@ -309,8 +375,11 @@ func tls13AppendServerName(dst []byte, name string) []byte {
 }
 
 func tls13AppendSupportedGroups(dst []byte) []byte {
-	payload := binary.BigEndian.AppendUint16(nil, 2)
-	payload = binary.BigEndian.AppendUint16(payload, tls13GroupX25519)
+	groups := []uint16{tls13GroupX25519MLKEM768, tls13GroupX25519}
+	payload := binary.BigEndian.AppendUint16(nil, uint16(2*len(groups)))
+	for _, group := range groups {
+		payload = binary.BigEndian.AppendUint16(payload, group)
+	}
 	return tls13AppendExtension(dst, tls13ExtSupportedGroups, payload)
 }
 
@@ -337,7 +406,7 @@ func tls13AppendALPN(dst []byte, protocols []string) []byte {
 }
 
 func tls13AppendKeyShare(dst []byte, share []byte) []byte {
-	entry := binary.BigEndian.AppendUint16(nil, tls13GroupX25519)
+	entry := binary.BigEndian.AppendUint16(nil, tls13GroupX25519MLKEM768)
 	entry = binary.BigEndian.AppendUint16(entry, uint16(len(share)))
 	entry = append(entry, share...)
 	payload := binary.BigEndian.AppendUint16(nil, uint16(len(entry)))
@@ -351,49 +420,50 @@ func tls13AppendSupportedVersions(dst []byte) []byte {
 }
 
 // tls13ParseServerHello returns the server's X25519 key share.
-func tls13ParseServerHello(message []byte, sessionID [tls13SessionIDLen]byte) ([]byte, error) {
+func tls13ParseServerHello(message []byte, sessionID [tls13SessionIDLen]byte) (uint16, []byte, error) {
 	if len(message) < 4 {
-		return nil, errors.New("tls13: truncated server hello")
+		return 0, nil, errors.New("tls13: truncated server hello")
 	}
 	body := message[4:]
 	if len(body) < 2+32+1 {
-		return nil, errors.New("tls13: truncated server hello")
+		return 0, nil, errors.New("tls13: truncated server hello")
 	}
 	if binary.BigEndian.Uint16(body) != tls13LegacyVersion {
-		return nil, errors.New("tls13: server hello has an unexpected legacy version")
+		return 0, nil, errors.New("tls13: server hello has an unexpected legacy version")
 	}
 	if string(body[2:34]) == tls13HelloRetryRequestRandom {
-		return nil, errors.New("tls13: the server sent a hello retry request, which this client does not support")
+		return 0, nil, errors.New("tls13: the server sent a hello retry request, which this client does not support")
 	}
 	rest := body[34:]
 	idLen := int(rest[0])
 	rest = rest[1:]
 	if len(rest) < idLen+3 {
-		return nil, errors.New("tls13: truncated server hello")
+		return 0, nil, errors.New("tls13: truncated server hello")
 	}
 	if idLen != len(sessionID) || !hmac.Equal(rest[:idLen], sessionID[:]) {
-		return nil, errors.New("tls13: the server echoed a different session id")
+		return 0, nil, errors.New("tls13: the server echoed a different session id")
 	}
 	rest = rest[idLen:]
 	if suite := binary.BigEndian.Uint16(rest); suite != tls13CipherAES128 {
-		return nil, fmt.Errorf("tls13: the server chose cipher suite %#04x", suite)
+		return 0, nil, fmt.Errorf("tls13: the server chose cipher suite %#04x", suite)
 	}
 	if rest[2] != 0 {
-		return nil, errors.New("tls13: the server chose a compression method")
+		return 0, nil, errors.New("tls13: the server chose a compression method")
 	}
 	rest = rest[3:]
 	if len(rest) < 2 {
-		return nil, errors.New("tls13: server hello has no extensions")
+		return 0, nil, errors.New("tls13: server hello has no extensions")
 	}
 	extLen := int(binary.BigEndian.Uint16(rest))
 	rest = rest[2:]
 	if len(rest) < extLen {
-		return nil, errors.New("tls13: truncated server hello extensions")
+		return 0, nil, errors.New("tls13: truncated server hello extensions")
 	}
 	extensions := rest[:extLen]
 
 	var (
 		keyShare       []byte
+		chosenGroup    uint16
 		chosenVersion  uint16
 		haveVersionExt bool
 	)
@@ -402,38 +472,49 @@ func tls13ParseServerHello(message []byte, sessionID [tls13SessionIDLen]byte) ([
 		length := int(binary.BigEndian.Uint16(extensions[2:]))
 		extensions = extensions[4:]
 		if len(extensions) < length {
-			return nil, errors.New("tls13: truncated server hello extension")
+			return 0, nil, errors.New("tls13: truncated server hello extension")
 		}
 		payload := extensions[:length]
 		extensions = extensions[length:]
 		switch typ {
 		case tls13ExtKeyShare:
 			if len(payload) < 4 {
-				return nil, errors.New("tls13: truncated key share")
+				return 0, nil, errors.New("tls13: truncated key share")
 			}
-			if group := binary.BigEndian.Uint16(payload); group != tls13GroupX25519 {
-				return nil, fmt.Errorf("tls13: the server chose key share group %d", group)
-			}
+			group := binary.BigEndian.Uint16(payload)
 			keyLen := int(binary.BigEndian.Uint16(payload[2:]))
-			if keyLen != 32 || len(payload) < 4+keyLen {
-				return nil, errors.New("tls13: the server key share is not an x25519 key")
+			if len(payload) < 4+keyLen {
+				return 0, nil, errors.New("tls13: truncated key share")
+			}
+			switch group {
+			case tls13GroupX25519:
+				if keyLen != 32 {
+					return 0, nil, errors.New("tls13: the server key share is not an x25519 key")
+				}
+			case tls13GroupX25519MLKEM768:
+				if keyLen != mlkem.CiphertextSize768+32 {
+					return 0, nil, errors.New("tls13: the server key share is not an X25519MLKEM768 share")
+				}
+			default:
+				return 0, nil, fmt.Errorf("tls13: the server chose key share group %d", group)
 			}
 			keyShare = payload[4 : 4+keyLen]
+			chosenGroup = group
 		case tls13ExtSupportedVersions:
 			if len(payload) != 2 {
-				return nil, errors.New("tls13: truncated supported versions extension")
+				return 0, nil, errors.New("tls13: truncated supported versions extension")
 			}
 			haveVersionExt = true
 			chosenVersion = binary.BigEndian.Uint16(payload)
 		}
 	}
 	if !haveVersionExt || chosenVersion != tls13Version {
-		return nil, errors.New("tls13: the server did not select TLS 1.3")
+		return 0, nil, errors.New("tls13: the server did not select TLS 1.3")
 	}
 	if keyShare == nil {
-		return nil, errors.New("tls13: the server hello carries no key share")
+		return 0, nil, errors.New("tls13: the server hello carries no key share")
 	}
-	return keyShare, nil
+	return chosenGroup, keyShare, nil
 }
 
 // tls13ParseCertificate returns the certificate chain of a Certificate

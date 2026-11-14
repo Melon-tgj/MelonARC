@@ -24,6 +24,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +39,9 @@ import (
 	"github.com/melon-tgj/melonarc/internal/outbound"
 	"github.com/melon-tgj/melonarc/internal/policy"
 	"github.com/melon-tgj/melonarc/internal/rules"
+	"github.com/melon-tgj/melonarc/internal/store"
+	"github.com/melon-tgj/melonarc/internal/subscription"
+	"github.com/melon-tgj/melonarc/internal/sysproxy"
 )
 
 // version is the build version placeholder, overridden at link time later on.
@@ -101,6 +106,48 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The observation history is a side channel: it records what the daemon
+	// carried and never takes part in carrying it. It is opened before anything
+	// can be carried, and a file it cannot write is a warning rather than a
+	// startup failure — a proxy that refuses to run because its history file is
+	// on a full disk is worse than one without a history.
+	//
+	// Closing is deferred here so it runs last, after the listeners have stopped
+	// and their final connection records have been appended.
+	history, err := store.Open(store.Options{
+		Path:   filepath.Join(dataDir, store.FileName),
+		Logger: logger,
+	})
+	if err != nil {
+		return fmt.Errorf("the observation history is not usable:\n%w", err)
+	}
+	defer func() {
+		if err := history.Close(); err != nil {
+			logger.Warn("history shutdown", "error", err)
+		}
+	}()
+	if st := history.Status(); st.Notice != "" {
+		logger.Warn("the previous history was not loaded", "notice", st.Notice)
+	}
+
+	// Subscriptions are fetched here rather than inside config.Load: loading a
+	// file has to stay offline and free of side effects so that -check and the
+	// tests are safe, and this is the first point where the data directory that
+	// keeps the last good body is known.
+	//
+	// A subscription that can be neither fetched nor read from the cache stops
+	// startup. Continuing would leave the rules and groups that point at it
+	// without a target, which is a configuration that looks loaded and cannot
+	// route.
+	subs := subscription.New(subscription.Options{CacheDir: dataDir, Logger: logger})
+	if err := subs.Import(ctx, cfg); err != nil {
+		return fmt.Errorf("subscription is not usable:\n%w", err)
+	}
+	if len(cfg.Subscriptions) > 0 {
+		logger.Info("subscriptions imported", "subscriptions", len(cfg.Subscriptions),
+			"proxies", len(cfg.Proxies))
+	}
+
 	resolver, err := buildResolver(cfg)
 	if err != nil {
 		return fmt.Errorf("name resolution is not usable:\n%w", err)
@@ -109,7 +156,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("outbound is not usable:\n%w", err)
 	}
-	registry, err := buildRegistry(cfg, dialers)
+	registry, err := buildRegistry(cfg, dialers, nil)
 	if err != nil {
 		return fmt.Errorf("policy groups are not usable:\n%w", err)
 	}
@@ -120,8 +167,9 @@ func run(args []string) error {
 
 	// One observation object for the whole inbound layer: the listeners count
 	// what they carry, the pipeline records what it could not carry, and the
-	// API reads both from the same place.
-	metrics := inbound.NewMetrics(inbound.DefaultFailureCapacity)
+	// API reads both from the same place. The history is the observer, so every
+	// record the layer keeps is also written down.
+	metrics := inbound.NewMetrics(inbound.DefaultFailureCapacity, historyObserver{store: history})
 
 	handler, err := buildHandler(program, registry, dialers, resolver, metrics, logger)
 	if err != nil {
@@ -140,6 +188,30 @@ func run(args []string) error {
 		return fmt.Errorf("tun inbound is not usable:\n%w", err)
 	}
 
+	// The desktop proxy is the last thing brought up and the first thing taken
+	// down: it points every application on the machine at a listener that is
+	// already answering, and on shutdown it stops pointing there before the
+	// listener goes away. A failure here is a startup failure with rollback,
+	// like a device that cannot be opened — a machine whose proxy setting was
+	// half written would look configured and break half its traffic.
+	proxy := sysproxy.New(logger)
+	if err := applySystemProxy(ctx, cfg.General, proxy, logger); err != nil {
+		if tunSrv != nil {
+			tunCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			if cerr := tunSrv.Close(tunCtx); cerr != nil {
+				logger.Warn("tun shutdown after a failed start", "error", cerr)
+			}
+			cancel()
+		}
+		closeInbounds(services, logger)
+		return err
+	}
+
+	// The settings in force at startup are the reference a reload is measured
+	// against: anything a reload cannot apply still has this value, which is
+	// what "pending_restart" reports. It is a copy, so a later reload that
+	// builds a new configuration cannot move the reference.
+	baseline := cfg.General
 	state := &daemonState{
 		cfg:       cfg,
 		program:   program,
@@ -150,6 +222,8 @@ func run(args []string) error {
 		dialers:   dialers,
 		version:   version,
 		startedAt: time.Now(),
+		baseline:  &baseline,
+		history:   history,
 	}
 	// The reloader keeps the probe context alive for the groups it starts, and
 	// the state reaches it through the API. Both are wired before the API
@@ -162,8 +236,25 @@ func run(args []string) error {
 		datasets: datasets,
 		level:    level,
 		logger:   logger,
+		subs:     subs,
 		ctx:      ctx,
 	}).reload
+
+	// The refresh loop owns subscription updates from here on. A refresh that
+	// changes the node list goes through the same reload path an API request
+	// uses, so a provider's update lands the same way a hand edit does: one
+	// atomic swap or nothing.
+	go subs.Run(ctx, func() {
+		_, err := state.reload(ctx)
+		if err != nil {
+			logger.Warn("reload after a subscription update was rejected", "error", err)
+		}
+		state.recordRefresh(subscriptionNodes(subs), err)
+	})
+
+	// Traffic is sampled from the counters the connections feed, so the series
+	// and the totals can never disagree about what the daemon carried.
+	go sampleTraffic(ctx, metrics, history, store.SampleInterval, logger)
 
 	// Shutdown runs in the reverse order of startup: stop accepting
 	// connections and close the ones in flight, then close the local API that
@@ -172,7 +263,13 @@ func run(args []string) error {
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		// Stop the packet loop first: it is the only inbound that can still
+		// Stop pointing the machine at the listeners before they stop
+		// answering: an application that opens a connection after this must not
+		// be sent to a port that is closing.
+		if err := proxy.Release(shutdown); err != nil {
+			logger.Warn("system proxy", "error", err)
+		}
+		// Stop the packet loop next: it is the only inbound that can still
 		// generate new dials after the socket listeners stopped accepting.
 		if tunSrv != nil {
 			if err := tunSrv.Close(shutdown); err != nil {
@@ -442,7 +539,11 @@ func buildDialers(cfg *config.Config, resolver *dns.Resolver, logger *slog.Logge
 // buildRegistry turns the declared proxies and groups into a policy registry.
 // Each probing group gets its own prober bound to the group's url=, and that
 // prober reaches a member through the member's own outbound.
-func buildRegistry(cfg *config.Config, dialers *outbound.Set) (*policy.Registry, error) {
+//
+// carry holds the member each manual group was pinned to before the rebuild.
+// A reload passes what the running registry reports, so a subscription refresh
+// no longer silently moves a group the user chose by hand; startup passes nil.
+func buildRegistry(cfg *config.Config, dialers *outbound.Set, carry map[string]string) (*policy.Registry, error) {
 	reg := policy.NewRegistry()
 	for _, name := range config.BuiltinTargets() {
 		if err := reg.AddLeaf(name); err != nil {
@@ -471,8 +572,10 @@ func buildRegistry(cfg *config.Config, dialers *outbound.Set) (*policy.Registry,
 		switch g.Type {
 		case config.GroupSelect:
 			// A manual group routes to the member the user picked and never
-			// probes, so it needs no prober.
-			group, err = policy.NewSelect(g.Name, g.Members, "")
+			// probes, so it needs no prober. The carried pin is used only
+			// when the member still exists: a node a subscription dropped
+			// cannot be selected any more.
+			group, err = policy.NewSelect(g.Name, g.Members, carriedMember(g, carry))
 		case config.GroupURLTest:
 			prober, perr := outbound.NewProber(g.URL, resolve)
 			if perr != nil {
@@ -498,6 +601,97 @@ func buildRegistry(cfg *config.Config, dialers *outbound.Set) (*policy.Registry,
 	return reg, nil
 }
 
+// carriedMember returns the member a rebuilt manual group should start on: the
+// one it was pinned to, if that member is still declared.
+//
+// An empty result means "use the first member", which is what a group that was
+// never pinned does. A pin whose node a subscription removed cannot be honoured
+// and is dropped here; reload reports which groups that happened to.
+func carriedMember(g config.Group, carry map[string]string) string {
+	previous, ok := carry[g.Name]
+	if !ok {
+		return ""
+	}
+	for _, member := range g.Members {
+		if member == previous {
+			return previous
+		}
+	}
+	return ""
+}
+
+// carriedSelections returns the state a rebuild has to preserve. A daemon that
+// is starting has no previous registry, and nil is the answer for it.
+func carriedSelections(reg *policy.Registry) map[string]string {
+	if reg == nil {
+		return nil
+	}
+	return reg.Selections()
+}
+
+// droppedSelections lists the groups whose pinned member the rebuild could not
+// keep, as "group: member" pairs.
+//
+// It is what turns a silently disappearing node into something the operator
+// sees: the group still works, but it is no longer on the member that was
+// chosen, and only a report can say so.
+func droppedSelections(carry map[string]string, reg *policy.Registry) []string {
+	if len(carry) == 0 || reg == nil {
+		return nil
+	}
+	out := make([]string, 0, len(carry))
+	for name, member := range carry {
+		group, ok := reg.Group(name)
+		if !ok {
+			out = append(out, name+": group is gone, "+member+" cannot be selected")
+			continue
+		}
+		if group.Active() != member {
+			out = append(out, name+": "+member+" is not a member any more, using "+group.Active())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// systemProxy is the part of the desktop proxy controller the daemon uses, so
+// the startup path can be driven in a test without a desktop to write to.
+type systemProxy interface {
+	Enable(ctx context.Context, s sysproxy.Settings) error
+	Release(ctx context.Context) error
+}
+
+// sysproxySettings renders the desktop proxy setting a configuration asks for.
+//
+// The listeners are used exactly as they are bound: the inbound only ever
+// listens on loopback, which is also the only address a desktop proxy field can
+// be given without the machine proxying its own network.
+func sysproxySettings(g config.General) sysproxy.Settings {
+	return sysproxy.Settings{
+		HTTP:   g.HTTPListen,
+		SOCKS5: g.SOCKS5Listen,
+		Bypass: g.SystemProxyBypass,
+	}
+}
+
+// applySystemProxy points the desktop proxy at the listeners when the
+// configuration asks for it.
+//
+// It is called after the listeners are bound, so a setting that is written
+// always points at something that answers. The error is returned rather than
+// logged because a daemon that was told to configure the machine and could not
+// must not report itself as running.
+func applySystemProxy(ctx context.Context, g config.General, p systemProxy, logger *slog.Logger) error {
+	if !g.SystemProxy {
+		return nil
+	}
+	if err := p.Enable(ctx, sysproxySettings(g)); err != nil {
+		return fmt.Errorf("system-proxy is on but the desktop setting could not be written:\n%w", err)
+	}
+	logger.Info("desktop proxy points at the listeners", "http", g.HTTPListen, "socks5", g.SOCKS5Listen)
+	return nil
+}
+
 // startGroups starts periodic probing for the groups that need it.
 func startGroups(ctx context.Context, reg *policy.Registry, logger *slog.Logger) {
 	for _, g := range reg.Groups() {
@@ -517,14 +711,24 @@ func printSummary(cfg *config.Config, program *rules.Program, dataDir string) {
 	fmt.Printf("indexes: %d suffixes, %d exact names, %d keywords, %d ipv4 ranges, %d ipv6 ranges, %d port ranges\n",
 		stats.Suffixes, stats.Domains, stats.Keywords, stats.Ranges4, stats.Ranges6, stats.Ports)
 	fmt.Printf("proxies: %d\ngroups: %d\n", len(cfg.Proxies), len(cfg.Groups))
+	if len(cfg.Subscriptions) > 0 {
+		// -check does not fetch, so the nodes behind these names are not in the
+		// proxy count. Saying so is what keeps the two numbers from looking
+		// inconsistent.
+		fmt.Printf("subscriptions: %d (not fetched by -check)\n", len(cfg.Subscriptions))
+	}
 	fmt.Printf("hosts: %d\n", len(cfg.Hosts))
 	fmt.Printf("dns: %s\n", upstreamNote(cfg.General))
 	fmt.Printf("geoip: %s, asn: %s\n", pathOrOff(cfg.DataPath(cfg.General.GeoIPDB)), pathOrOff(cfg.DataPath(cfg.General.ASNDB)))
 	fmt.Printf("inbound: http %s, socks5 %s%s\n",
 		listenOrOff(cfg.General.HTTPListen), listenOrOff(cfg.General.SOCKS5Listen), authNote(cfg.General))
 	fmt.Printf("tun: %s\n", tunNote(cfg.General))
+	fmt.Printf("system-proxy: %s\n", systemProxyNote(cfg.General))
 	fmt.Printf("data: %s\n", dataDir)
 	fmt.Printf("token: %s\n", datadir.TokenPath(dataDir))
+	// -check reports where the history would live without touching it: it is a
+	// read-only operation and a validation run must not create a file.
+	fmt.Printf("history: %s (not touched by -check)\n", filepath.Join(dataDir, store.FileName))
 }
 
 // upstreamNote renders the DNS setting: the servers in the order they are asked,
@@ -577,6 +781,28 @@ func tunNote(g config.General) string {
 	}
 	return fmt.Sprintf("%s %s mtu %d (routes: %s, udp-timeout %s)",
 		g.TUN.Name, g.TUN.Address, g.TUN.MTU, routes, g.TUN.UDPTimeout)
+}
+
+// systemProxyNote renders the desktop proxy setting for -check. It is a
+// description of what a start would write, not a probe: a validation run does
+// not touch the desktop setting, and on a machine without one the failure
+// appears when the daemon starts.
+func systemProxyNote(g config.General) string {
+	if !g.SystemProxy {
+		return "off"
+	}
+	listeners := make([]string, 0, 2)
+	if g.HTTPListen != "" {
+		listeners = append(listeners, "http "+g.HTTPListen)
+	}
+	if g.SOCKS5Listen != "" {
+		listeners = append(listeners, "socks5 "+g.SOCKS5Listen)
+	}
+	note := "on (" + strings.Join(listeners, ", ") + ")"
+	if len(g.SystemProxyBypass) > 0 {
+		note += ", bypass " + strings.Join(g.SystemProxyBypass, ", ")
+	}
+	return note
 }
 
 // authNote says whether the SOCKS5 inbound asks for credentials.

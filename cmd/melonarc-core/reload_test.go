@@ -19,6 +19,8 @@ import (
 	"github.com/melon-tgj/melonarc/internal/config"
 	"github.com/melon-tgj/melonarc/internal/datadir"
 	"github.com/melon-tgj/melonarc/internal/inbound"
+	"github.com/melon-tgj/melonarc/internal/store"
+	"github.com/melon-tgj/melonarc/internal/subscription"
 )
 
 // testCore is a daemon assembled the way main assembles it, with a configuration
@@ -42,6 +44,29 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 	if err != nil {
 		t.Fatalf("load %s: %v", cfgPath, err)
 	}
+	dataDir, err := datadir.Resolve(cfg.BaseDir, cfg.General.DataDir)
+	if err != nil {
+		t.Fatalf("resolve the data directory: %v", err)
+	}
+	// The observation history is opened where main opens it, so the tests see
+	// the same records a daemon would keep. Its cleanup is registered first so
+	// it runs last, after the listeners have stopped appending to it.
+	history, err := store.Open(store.Options{Path: filepath.Join(dataDir, store.FileName)})
+	if err != nil {
+		t.Fatalf("open the history: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := history.Close(); err != nil {
+			t.Errorf("close the history: %v", err)
+		}
+	})
+	// Subscriptions are imported before anything is built from the
+	// configuration, exactly as main does: the nodes they contribute are part
+	// of the proxy list the groups and rules refer to.
+	subs := subscription.New(subscription.Options{CacheDir: dataDir, Logger: testLogger()})
+	if err := subs.Import(context.Background(), cfg); err != nil {
+		t.Fatalf("import subscriptions: %v", err)
+	}
 	program := compileTestRules(t, cfg)
 	resolver, err := buildResolver(cfg)
 	if err != nil {
@@ -51,17 +76,13 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 	if err != nil {
 		t.Fatalf("buildDialers: %v", err)
 	}
-	registry, err := buildRegistry(cfg, dialers)
+	registry, err := buildRegistry(cfg, dialers, nil)
 	if err != nil {
 		t.Fatalf("buildRegistry: %v", err)
 	}
-	dataDir, err := datadir.Resolve(cfg.BaseDir, cfg.General.DataDir)
-	if err != nil {
-		t.Fatalf("resolve the data directory: %v", err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	metrics := inbound.NewMetrics(0)
+	metrics := inbound.NewMetrics(0, historyObserver{store: history})
 	handler, err := buildHandler(program, registry, dialers, resolver, metrics, testLogger())
 	if err != nil {
 		t.Fatalf("buildHandler: %v", err)
@@ -71,6 +92,7 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 		t.Fatalf("startInbounds: %v", err)
 	}
 
+	baseline := cfg.General
 	state := &daemonState{
 		cfg:       cfg,
 		program:   program,
@@ -81,6 +103,8 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 		dialers:   dialers,
 		version:   "test",
 		startedAt: time.Now(),
+		baseline:  &baseline,
+		history:   history,
 	}
 	level := new(slog.LevelVar)
 	level.Set(logLevel("error"))
@@ -91,6 +115,7 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 		metrics: metrics,
 		level:   level,
 		logger:  testLogger(),
+		subs:    subs,
 		ctx:     ctx,
 	}).reload
 	startGroups(ctx, registry, testLogger())
@@ -151,37 +176,50 @@ func (c *testCore) writeConfig(t *testing.T, text string) {
 // the selected outbound wrote into the tunnel.
 func tunnelThrough(t *testing.T, proxyAddr, target string) string {
 	t.Helper()
+	conn, reader := connectTunnel(t, proxyAddr, target)
+	defer conn.Close()
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read the tunnel: %v", err)
+	}
+	return string(body)
+}
+
+// connectTunnel opens an HTTP CONNECT tunnel through the inbound and returns the
+// connection with the response headers already consumed, so a caller can use the
+// stream in either direction.
+func connectTunnel(t *testing.T, proxyAddr, target string) (net.Conn, *bufio.Reader) {
+	t.Helper()
 	conn, err := net.Dial("tcp", proxyAddr)
 	if err != nil {
 		t.Fatalf("dial %s: %v", proxyAddr, err)
 	}
-	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if _, err := fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target); err != nil {
+		conn.Close()
 		t.Fatalf("write CONNECT: %v", err)
 	}
 	reader := bufio.NewReader(conn)
 	status, err := reader.ReadString('\n')
 	if err != nil {
+		conn.Close()
 		t.Fatalf("read status line: %v", err)
 	}
 	if !strings.Contains(status, "200") {
+		conn.Close()
 		t.Fatalf("CONNECT answered %q", strings.TrimSpace(status))
 	}
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
+			conn.Close()
 			t.Fatalf("read response headers: %v", err)
 		}
 		if line == "\r\n" || line == "\n" {
 			break
 		}
 	}
-	body, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read the tunnel: %v", err)
-	}
-	return string(body)
+	return conn, reader
 }
 
 // startLabelledProxy serves SOCKS5 CONNECT requests by answering the handshake
@@ -343,8 +381,9 @@ func TestCLISwitchesTheGroupAndReloadsTheConfiguration(t *testing.T) {
 		t.Errorf("after a refused reload the groups are %+v", policies.Policies)
 	}
 
-	// A fixed configuration takes effect: the group is rebuilt, so it starts on
-	// its first member again.
+	// A fixed configuration takes effect, and the member the user picked
+	// survives it: the group is rebuilt, but a manual selection belongs to the
+	// user rather than to the file, so it is carried across by name.
 	core.writeConfig(t, good)
 	code, stdout, stderr = core.runCLI(t, "reload")
 	if code != 0 {
@@ -358,8 +397,8 @@ func TestCLISwitchesTheGroupAndReloadsTheConfiguration(t *testing.T) {
 	if strings.Contains(stdout, "restart required") {
 		t.Errorf("reload asked for a restart without a reason:\n%s", stdout)
 	}
-	if got := tunnelThrough(t, core.proxyAddr, "example.test:443"); got != "alpha" {
-		t.Fatalf("after the reload the connection was carried by %q, want alpha", got)
+	if got := tunnelThrough(t, core.proxyAddr, "example.test:443"); got != "beta" {
+		t.Fatalf("after the reload the connection was carried by %q, want the pinned beta", got)
 	}
 
 	// A listener address cannot change in a running process; the answer says so
@@ -374,8 +413,13 @@ func TestCLISwitchesTheGroupAndReloadsTheConfiguration(t *testing.T) {
 	if !strings.Contains(stdout, "restart required for: http-listen") {
 		t.Errorf("reload printed %q, want it to name the setting that needs a restart", stdout)
 	}
-	if got := tunnelThrough(t, core.proxyAddr, "example.test:443"); got != "alpha" {
+	if got := tunnelThrough(t, core.proxyAddr, "example.test:443"); got != "beta" {
 		t.Fatalf("the listener stopped serving its original address: %q", got)
+	}
+	// The same reload reports the setting that is now waiting for a restart,
+	// and the configuration view keeps saying so after the answer is gone.
+	if pending := apiGet[api.ConfigView](t, core.api, "/v1/config").PendingRestart; len(pending) != 1 || pending[0] != "http-listen" {
+		t.Errorf("pending_restart = %v, want [http-listen]", pending)
 	}
 
 	// Every attempt is in the audit record, in order.

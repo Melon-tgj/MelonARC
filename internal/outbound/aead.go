@@ -163,11 +163,19 @@ func newChunkStream(conn net.Conn, aead cipher.AEAD, maxPayload int) *chunkStrea
 	return &chunkStream{conn: conn, aead: aead, maxPayload: maxPayload}
 }
 
-// writeChunk seals one plaintext chunk and advances the write nonce.
-func (s *chunkStream) writeChunk(plaintext []byte) error {
+// appendChunk seals one chunk onto buf and advances the write nonce. Callers
+// that must hand the peer a complete header in one write use it to build the
+// buffer: a server that reads the header with a single Read fails on a header
+// split across segments.
+func (s *chunkStream) appendChunk(buf, plaintext []byte) []byte {
 	sealed := s.aead.Seal(nil, s.wNonce[:], plaintext, nil)
 	incrementNonce(s.wNonce[:])
-	_, err := s.conn.Write(sealed)
+	return append(buf, sealed...)
+}
+
+// writeChunk seals one plaintext chunk and advances the write nonce.
+func (s *chunkStream) writeChunk(plaintext []byte) error {
+	_, err := s.conn.Write(s.appendChunk(nil, plaintext))
 	if err != nil {
 		return fmt.Errorf("write chunk: %w", err)
 	}
@@ -180,6 +188,16 @@ func (s *chunkStream) readChunk(plainLen int) ([]byte, error) {
 	buf := make([]byte, plainLen+s.aead.Overhead())
 	if _, err := io.ReadFull(s.conn, buf); err != nil {
 		return nil, fmt.Errorf("read chunk: %w", err)
+	}
+	return s.openChunk(buf)
+}
+
+// openChunk opens a chunk whose ciphertext is already in hand, which is how a
+// payload whose length a preceding header announced is read: its size is known,
+// so no length frame precedes it.
+func (s *chunkStream) openChunk(buf []byte) ([]byte, error) {
+	if len(buf) < s.aead.Overhead() {
+		return nil, errors.New("chunk is shorter than its authentication tag")
 	}
 	plain, err := s.aead.Open(buf[:0], s.rNonce[:], buf, nil)
 	incrementNonce(s.rNonce[:])

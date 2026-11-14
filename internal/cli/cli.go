@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -47,6 +48,8 @@ commands:
   reload                       re-read the configuration file and apply it
   explain <host[:port]>        show how the rules classify a destination
   audit [limit]                list the write operations the core carried out
+  history [what] [limit]       read what the core kept: what is "summary",
+                               "connections", "events" or "traffic"
   version                      print the client version
   help                         print this text
 
@@ -59,6 +62,8 @@ flags:
   -data-dir <path>       data directory of the core, where the token file is
                          (default the platform configuration directory)
   -network <tcp|udp>     transport used by explain (default tcp)
+  -since <duration>      how far back history looks, for example 1h or 30m
+                         (default everything the core keeps)
   -timeout <duration>    how long to wait for the core (default 15s)
   -json                  print the raw answer of the core
 
@@ -66,6 +71,7 @@ flags come before the command:
   melonarc-cli -json status
   melonarc-cli select manual proxy-b
   melonarc-cli explain example.com:443
+  melonarc-cli -since 2h history connections 50
 `
 
 // options is the parsed command line.
@@ -75,6 +81,7 @@ type options struct {
 	tokenFile string
 	dataDir   string
 	network   string
+	since     time.Duration
 	timeout   time.Duration
 	json      bool
 
@@ -93,6 +100,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.tokenFile, "token-file", "", "path of the token file")
 	fs.StringVar(&o.dataDir, "data-dir", "", "data directory of the core")
 	fs.StringVar(&o.network, "network", "tcp", "transport used by explain")
+	fs.DurationVar(&o.since, "since", 0, "how far back history looks")
 	fs.DurationVar(&o.timeout, "timeout", 15*time.Second, "how long to wait for the core")
 	fs.BoolVar(&o.json, "json", false, "print the raw answer of the core")
 	if err := fs.Parse(args); err != nil {
@@ -100,6 +108,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	if o.timeout <= 0 {
 		fmt.Fprintln(stderr, "melonarc-cli: -timeout must be positive")
+		return exitUsage
+	}
+	if o.since < 0 {
+		fmt.Fprintln(stderr, "melonarc-cli: -since must not be negative")
 		return exitUsage
 	}
 	rest := fs.Args()
@@ -131,6 +143,8 @@ func (o *options) dispatch(name string, args []string) int {
 		return o.explain(args)
 	case "audit":
 		return o.audit(args)
+	case "history":
+		return o.history(args)
 	}
 	fmt.Fprintf(o.stderr, "unknown command %q\n\n%s", name, usage)
 	return exitUsage
@@ -325,6 +339,14 @@ func (o *options) reload(args []string) int {
 	if len(view.RestartRequired) > 0 {
 		fmt.Fprintf(o.stdout, "restart required for: %s\n", strings.Join(view.RestartRequired, ", "))
 	}
+	// The cumulative set only needs a line of its own when this reload did not
+	// already name all of it: otherwise it repeats the line above.
+	if len(view.PendingRestart) > 0 && !slices.Equal(view.PendingRestart, view.RestartRequired) {
+		fmt.Fprintf(o.stdout, "still waiting for a restart: %s\n", strings.Join(view.PendingRestart, ", "))
+	}
+	for _, dropped := range view.SelectionDropped {
+		fmt.Fprintf(o.stdout, "selection not restored: %s\n", dropped)
+	}
 	return exitOK
 }
 
@@ -415,8 +437,195 @@ func (o *options) audit(args []string) int {
 	return o.flush(w)
 }
 
-// splitTarget turns "host:port", "[addr]:port", "host" or an address into a host
-// and a port. A destination without a port reports port 0, which the API accepts
+// historyWhat lists the parts of the history a command can ask for.
+const historyWhat = "summary, connections, events or traffic"
+
+// history reads what the core kept about the past.
+//
+// The summary describes the file itself — how much it holds, how large it is and
+// whether the last write succeeded — while the other three are windows of it.
+// All of them share the limit argument, and -since narrows them to a period
+// rather than a count.
+func (o *options) history(args []string) int {
+	what, rest := "summary", args
+	if len(rest) > 0 {
+		switch rest[0] {
+		case "summary", "connections", "events", "traffic":
+			what, rest = rest[0], rest[1:]
+		}
+	}
+	if len(rest) > 1 {
+		return o.usageError("history takes at most one limit: melonarc-cli history [" + historyWhat + "] [limit]")
+	}
+	query := url.Values{}
+	if len(rest) == 1 {
+		n, err := strconv.Atoi(rest[0])
+		if err != nil || n < 0 {
+			return o.usageError(fmt.Sprintf("%q is not a non-negative number", rest[0]))
+		}
+		query.Set("limit", strconv.Itoa(n))
+	}
+	// The summary describes the store, not a window of it, so a period would
+	// mean nothing there.
+	if o.since > 0 {
+		if what == "summary" {
+			return o.usageError("-since narrows connections, events or traffic; the summary describes the whole file")
+		}
+		query.Set("since", o.since.String())
+	}
+	c, code := o.client()
+	if c == nil {
+		return code
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
+	defer cancel()
+
+	switch what {
+	case "connections":
+		return o.historyConnections(ctx, c, query)
+	case "events":
+		return o.historyEvents(ctx, c, query)
+	case "traffic":
+		return o.historyTraffic(ctx, c, query)
+	default:
+		return o.historySummary(ctx, c)
+	}
+}
+
+// historySummary prints what the store holds.
+func (o *options) historySummary(ctx context.Context, c *client) int {
+	var view api.HistoryView
+	if err := c.get(ctx, "/v1/history", &view); err != nil {
+		return o.fail(err)
+	}
+	if o.json {
+		return o.printJSON(view)
+	}
+	if !view.Enabled {
+		fmt.Fprintln(o.stdout, "this core keeps no history")
+		return exitOK
+	}
+	w := o.table()
+	fmt.Fprintf(w, "file\t%s\n", view.Path)
+	fmt.Fprintf(w, "size\t%s\n", humanBytes(view.Bytes))
+	fmt.Fprintf(w, "connections\t%d of %d\n", view.Connections, view.Capacity.Connections)
+	fmt.Fprintf(w, "events\t%d of %d\n", view.Events, view.Capacity.Events)
+	fmt.Fprintf(w, "samples\t%d of %d\n", view.Samples, view.Capacity.Samples)
+	fmt.Fprintf(w, "writes\t%d, last %s\n", view.Flushes, orDash(view.LastFlush))
+	if code := o.flush(w); code != exitOK {
+		return code
+	}
+	fmt.Fprintf(o.stdout, "carried since start: %s up, %s down\n",
+		humanBytes(view.Up), humanBytes(view.Down))
+	// A write failure and an unreadable previous file are the two states a
+	// reader would otherwise mistake for "the history is simply empty".
+	if view.LastError != "" {
+		fmt.Fprintf(o.stdout, "last write failed: %s\n", oneLine(view.LastError))
+	}
+	if view.Notice != "" {
+		fmt.Fprintf(o.stdout, "note: %s\n", oneLine(view.Notice))
+	}
+	return exitOK
+}
+
+// historyConnections prints the carried connections.
+func (o *options) historyConnections(ctx context.Context, c *client, query url.Values) int {
+	var view api.ConnectionListView
+	if err := c.get(ctx, "/v1/history/connections"+querySuffix(query), &view); err != nil {
+		return o.fail(err)
+	}
+	if o.json {
+		return o.printJSON(view)
+	}
+	if len(view.Connections) == 0 {
+		fmt.Fprintln(o.stdout, "no connection has been recorded in that window")
+		return exitOK
+	}
+	w := o.table()
+	fmt.Fprintln(w, "TIME\tPROTO\tTARGET\tNET\tPOLICY\tOUTBOUND\tUP\tDOWN\tDURATION")
+	for _, conn := range view.Connections {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			conn.Time, conn.Protocol, conn.Target, conn.Network, orDash(conn.Policy),
+			orDash(conn.Outbound), humanBytes(conn.Up), humanBytes(conn.Down),
+			time.Duration(conn.DurationMS*float64(time.Millisecond)).Round(time.Millisecond))
+	}
+	return o.flush(w)
+}
+
+// historyEvents prints the events.
+func (o *options) historyEvents(ctx context.Context, c *client, query url.Values) int {
+	var view api.EventListView
+	if err := c.get(ctx, "/v1/history/events"+querySuffix(query), &view); err != nil {
+		return o.fail(err)
+	}
+	if o.json {
+		return o.printJSON(view)
+	}
+	if len(view.Events) == 0 {
+		fmt.Fprintln(o.stdout, "no event has been recorded in that window")
+		return exitOK
+	}
+	w := o.table()
+	fmt.Fprintln(w, "TIME\tKIND\tOK\tNAME\tDETAIL")
+	for _, event := range view.Events {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			event.Time, event.Kind, yesNo(event.OK), orDash(event.Name), oneLine(event.Detail))
+	}
+	return o.flush(w)
+}
+
+// historyTraffic prints the traffic samples, one row per interval.
+func (o *options) historyTraffic(ctx context.Context, c *client, query url.Values) int {
+	var view api.TrafficListView
+	if err := c.get(ctx, "/v1/history/traffic"+querySuffix(query), &view); err != nil {
+		return o.fail(err)
+	}
+	if o.json {
+		return o.printJSON(view)
+	}
+	if len(view.Samples) == 0 {
+		fmt.Fprintln(o.stdout, "no traffic sample has been recorded in that window")
+		return exitOK
+	}
+	w := o.table()
+	fmt.Fprintln(w, "TIME\tUP\tDOWN")
+	for _, sample := range view.Samples {
+		fmt.Fprintf(w, "%s\t%s\t%s\n", sample.Time, humanBytes(sample.Up), humanBytes(sample.Down))
+	}
+	if code := o.flush(w); code != exitOK {
+		return code
+	}
+	fmt.Fprintf(o.stdout, "total: %s up, %s down over %d intervals\n",
+		humanBytes(view.Up), humanBytes(view.Down), view.Count)
+	return exitOK
+}
+
+// querySuffix renders a query for a URL, empty when nothing is set.
+func querySuffix(values url.Values) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return "?" + values.Encode()
+}
+
+// humanBytes renders a byte count in the units a person reads. It is bounded to
+// one decimal so a table column stays aligned.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return strconv.FormatInt(n, 10) + "B"
+	}
+	value := float64(n)
+	for _, suffix := range []string{"K", "M", "G", "T"} {
+		value /= unit
+		if value < unit {
+			return strconv.FormatFloat(value, 'f', 1, 64) + suffix + "B"
+		}
+	}
+	return strconv.FormatFloat(value, 'f', 1, 64) + "PB"
+}
+
+// splitTarget turns "host:port", "[addr]:port", "host" or an address into a host// and a port. A destination without a port reports port 0, which the API accepts
 // as "no port constraint".
 func splitTarget(raw string) (string, int, error) {
 	value := strings.TrimSpace(raw)

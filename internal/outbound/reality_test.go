@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -12,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -238,6 +240,11 @@ func readTestClientHello(conn net.Conn) (record, payload []byte, err error) {
 // parseTestClientHello pulls the fields the handshake check needs out of a
 // ClientHello. It is the test peer's own parser on purpose: the client side
 // builds these bytes, and a shared builder would hide a layout mistake.
+// parseTestClientHello returns the fields a REALITY peer needs: the client
+// random, the session id and the X25519 half of the key share. The share itself
+// may be the hybrid X25519MLKEM768 group, whose last 32 bytes are the X25519
+// public key; the peer hands the whole ClientHello to crypto/tls, which answers
+// the hybrid group properly, so only the X25519 part is extracted here.
 func parseTestClientHello(hello []byte) (random, sessionID, keyShare []byte, err error) {
 	if len(hello) < 39 || hello[0] != tls13MsgClientHello {
 		return nil, nil, nil, errors.New("reality test: not a client hello")
@@ -288,14 +295,22 @@ func parseTestClientHello(hello []byte) (random, sessionID, keyShare []byte, err
 		if len(body) < 2+listLen || listLen < 4 {
 			return nil, nil, nil, errors.New("reality test: truncated key share list")
 		}
-		if group := binary.BigEndian.Uint16(body[2:]); group != tls13GroupX25519 {
-			return nil, nil, nil, errors.New("reality test: the key share is not x25519")
-		}
+		group := binary.BigEndian.Uint16(body[2:])
 		keyLen := int(binary.BigEndian.Uint16(body[4:]))
 		if len(body) < 6+keyLen {
 			return nil, nil, nil, errors.New("reality test: truncated key share")
 		}
-		keyShare = body[6 : 6+keyLen]
+		switch group {
+		case tls13GroupX25519:
+			keyShare = body[6 : 6+keyLen]
+		case tls13GroupX25519MLKEM768:
+			if keyLen != mlkem.EncapsulationKeySize768+32 {
+				return nil, nil, nil, errors.New("reality test: the hybrid key share has the wrong length")
+			}
+			keyShare = body[6+mlkem.EncapsulationKeySize768 : 6+keyLen]
+		default:
+			return nil, nil, nil, fmt.Errorf("reality test: the key share uses group %d", group)
+		}
 	}
 	if keyShare == nil {
 		return nil, nil, nil, errors.New("reality test: the client hello has no key share")

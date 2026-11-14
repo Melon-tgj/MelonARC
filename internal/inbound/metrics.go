@@ -3,6 +3,9 @@ package inbound
 import (
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/melon-tgj/melonarc/internal/outbound"
 )
 
 // DefaultFailureCapacity is how many recent failures the inbound layer keeps for
@@ -69,8 +72,57 @@ type Snapshot struct {
 	FailureCount    int
 }
 
+// ConnectionRecord is one connection the inbound layer carried, reported when it
+// ends.
+//
+// It is an observation and nothing else: the pipeline never reads it, and a
+// record that cannot be kept is not a request that failed. The destination is
+// kept as the client asked for it, so a name stays a name — that is what a rule
+// matched, and an address would not say why the connection took the path it did.
+type ConnectionRecord struct {
+	// Protocol is the listener that accepted the connection: "http", "socks5"
+	// or "tun".
+	Protocol string
+	// Target is the destination the client asked for.
+	Target outbound.Target
+	// Network is "tcp" or "udp".
+	Network string
+	// Rule is the rule that classified the destination, empty when the routing
+	// failed before a rule matched.
+	Rule string
+	// Policy and Outbound are the target the rule named and the leaf that
+	// finally carried the connection.
+	Policy   string
+	Outbound string
+	// Started and Duration describe when the connection was opened and how long
+	// it was served.
+	Started  time.Time
+	Duration time.Duration
+	// Up and Down are the bytes the connection carried, as counted on the
+	// upstream side.
+	Up, Down int64
+}
+
+// Observer receives the events the inbound layer produces. It is the seam the
+// persistent history plugs into: the layer keeps its own bounded records and
+// tells an observer about them, so a store that cannot write never becomes part
+// of the data path.
+//
+// The methods are called from the goroutine that serves a connection, so an
+// implementation must not block: appending to a bounded in-memory table is the
+// expected amount of work.
+type Observer interface {
+	// Connection is called once per connection that was carried, after it
+	// ended.
+	Connection(ConnectionRecord)
+	// Failure is called once per request that was not carried, after the record
+	// was added to the ring.
+	Failure(Failure)
+}
+
 // Metrics is the runtime observation of the inbound layer: connection counters
-// per listener plus the recent failure record the local API serves.
+// per listener, the bytes the connections carried, and the recent failure record
+// the local API serves.
 //
 // A nil *Metrics is valid and records nothing, so a listener built without one
 // behaves exactly as it did before this type existed; every method tolerates the
@@ -83,16 +135,27 @@ type Metrics struct {
 	failures atomic.Uint64
 	rejected atomic.Uint64
 
-	ring *failureRing
+	// up and down are the bytes every connection carried since startup. They
+	// only ever grow, which is what lets a sampler take a difference without
+	// missing a record that arrives between two reads.
+	up   atomic.Int64
+	down atomic.Int64
+
+	ring     *failureRing
+	observer Observer
 }
 
-// NewMetrics returns a Metrics that keeps at most capacity recent failures.
-// Capacity zero or less means DefaultFailureCapacity.
-func NewMetrics(capacity int) *Metrics {
+// NewMetrics returns a Metrics that keeps at most capacity recent failures. An
+// observer is optional; the first one wins, because one history is one history.
+func NewMetrics(capacity int, observers ...Observer) *Metrics {
 	if capacity <= 0 {
 		capacity = DefaultFailureCapacity
 	}
-	return &Metrics{ring: newFailureRing(capacity)}
+	m := &Metrics{ring: newFailureRing(capacity)}
+	if len(observers) > 0 {
+		m.observer = observers[0]
+	}
+	return m
 }
 
 // counters returns the counter set of a protocol, or nil for a protocol this
@@ -188,6 +251,33 @@ func (m *Metrics) Record(f Failure) {
 		m.failures.Add(1)
 	}
 	m.ring.add(f)
+	if m.observer != nil {
+		m.observer.Failure(f)
+	}
+}
+
+// observeConnection notes what one connection carried and reports it.
+//
+// The counters move even without an observer: the totals are what a traffic
+// sample is taken from, and a daemon configured without a history still reports
+// how much it moved.
+func (m *Metrics) observeConnection(rec ConnectionRecord) {
+	if m == nil {
+		return
+	}
+	m.up.Add(rec.Up)
+	m.down.Add(rec.Down)
+	if m.observer != nil {
+		m.observer.Connection(rec)
+	}
+}
+
+// Traffic returns the bytes every connection carried since startup.
+func (m *Metrics) Traffic() (up, down int64) {
+	if m == nil {
+		return 0, 0
+	}
+	return m.up.Load(), m.down.Load()
 }
 
 // Recent returns the retained failures, oldest first, at most limit of the

@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -118,6 +119,32 @@ func setConnDeadline(conn net.Conn, ctx context.Context, fallback time.Duration)
 func guardConn(ctx context.Context, conn net.Conn) (release func() bool) {
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	return func() bool { return stop() }
+}
+
+// lazyResponseConn defers a protocol's response header to the first read.
+//
+// Several protocols answer with a header of their own (VMess with a key and an
+// IV, VLESS with a version and an addons block, Shadowsocks 2022 with a salt)
+// followed by the payload that header describes. Real servers write both
+// together, and only when they have something to send: a client that waited for
+// the header inside DialContext would deadlock against any target that answers
+// only what it is asked, which is nearly all of them — the caller cannot send
+// its request until dial returns, and the server will not answer an unsent
+// request. Their own test peers write the header eagerly, which is why the
+// local tests passed while a reference server hung.
+type lazyResponseConn struct {
+	net.Conn
+	open   func() error
+	once   sync.Once
+	opened error
+}
+
+func (c *lazyResponseConn) Read(p []byte) (int, error) {
+	c.once.Do(func() { c.opened = c.open() })
+	if c.opened != nil {
+		return 0, c.opened
+	}
+	return c.Conn.Read(p)
 }
 
 // validateServer checks the proxy endpoint shared by the tunnelling protocols.

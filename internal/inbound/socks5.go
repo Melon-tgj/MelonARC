@@ -217,7 +217,7 @@ func (h *socks5Handler) authenticate(conn net.Conn) error {
 
 // connect opens the stream and relays it.
 func (h *socks5Handler) connect(ctx context.Context, client net.Conn, target outbound.Target) {
-	upstream, sel, err := h.handler.Stream(ctx, Request{Target: target, Network: networkTCP})
+	upstream, sel, err := h.handler.Stream(ctx, Request{Target: target, Network: networkTCP, Protocol: protocolSOCKS5})
 	if err != nil {
 		_ = writeReply(client, replyForError(err), unspecified)
 		if sel.Rule != nil {

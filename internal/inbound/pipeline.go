@@ -32,6 +32,10 @@ type Request struct {
 	Target outbound.Target
 	// Network is "tcp" or "udp".
 	Network string
+	// Protocol labels the listener that accepted the request. It takes no part
+	// in routing; it is carried so the connection record says which inbound a
+	// connection came in on.
+	Protocol string
 }
 
 // Selection is the outcome of routing a request.
@@ -232,7 +236,9 @@ func (h *Handler) load() *handlerState { return h.state.Load() }
 // Stream opens the stream a request describes.
 //
 // The selection is returned even when the dial fails, so a caller can report
-// which rule and which policy were involved.
+// which rule and which policy were involved. A connection that opens is returned
+// wrapped: the wrapper counts what it carries and reports the connection when it
+// closes, which is the only point where the byte counts are final.
 func (h *Handler) Stream(ctx context.Context, req Request) (net.Conn, Selection, error) {
 	st := h.load()
 	sel, dialer, err := h.route(ctx, st, req)
@@ -245,7 +251,11 @@ func (h *Handler) Stream(ctx context.Context, req Request) (net.Conn, Selection,
 		h.failed(st, req, sel, err)
 		return nil, sel, err
 	}
-	return conn, sel, nil
+	return &trackedConn{
+		Conn:    conn,
+		metrics: h.metrics,
+		record:  h.connectionRecord(req, sel),
+	}, sel, nil
 }
 
 // Packet opens the datagram association a request describes.
@@ -261,7 +271,122 @@ func (h *Handler) Packet(ctx context.Context, req Request) (outbound.PacketConn,
 		h.failed(st, req, sel, err)
 		return nil, sel, err
 	}
-	return conn, sel, nil
+	return &trackedPacketConn{
+		PacketConn: conn,
+		metrics:    h.metrics,
+		record:     h.connectionRecord(req, sel),
+	}, sel, nil
+}
+
+// connectionRecord is the observation of one connection, taken before it starts
+// carrying bytes.
+func (h *Handler) connectionRecord(req Request, sel Selection) ConnectionRecord {
+	rec := ConnectionRecord{
+		Protocol: req.Protocol,
+		Target:   req.Target,
+		Network:  req.Network,
+		Policy:   sel.Target,
+		Started:  time.Now(),
+	}
+	if sel.Rule != nil {
+		rec.Rule = sel.Rule.String()
+	}
+	if len(sel.Path) > 0 {
+		rec.Outbound = sel.Path[len(sel.Path)-1]
+	}
+	return rec
+}
+
+// trackedConn counts the bytes of one stream and reports it once, when it closes.
+//
+// Counting on the upstream side happens to cover both directions: the relay
+// writes the client's bytes into this connection and reads the answer back out of
+// it. CloseWrite is forwarded so that wrapping does not take the half close the
+// relay relies on away, and a connection that cannot express one is closed just
+// as relay would have done.
+type trackedConn struct {
+	net.Conn
+	metrics *Metrics
+	record  ConnectionRecord
+
+	up   atomic.Int64
+	down atomic.Int64
+	once sync.Once
+}
+
+// Read counts the bytes coming back from the destination.
+func (c *trackedConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.down.Add(int64(n))
+	return n, err
+}
+
+// Write counts the bytes going to the destination.
+func (c *trackedConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.up.Add(int64(n))
+	return n, err
+}
+
+// CloseWrite ends the write direction and leaves reads open.
+func (c *trackedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Close()
+}
+
+// Close reports the connection once and closes the one underneath.
+func (c *trackedConn) Close() error {
+	c.report()
+	return c.Conn.Close()
+}
+
+// report hands the record to the observer. It runs once however many times the
+// connection is closed, which a relay that aborts both directions can do.
+func (c *trackedConn) report() {
+	c.once.Do(func() {
+		rec := c.record
+		rec.Up = c.up.Load()
+		rec.Down = c.down.Load()
+		rec.Duration = time.Since(rec.Started)
+		c.metrics.observeConnection(rec)
+	})
+}
+
+// trackedPacketConn is the datagram counterpart of trackedConn: one association
+// with one destination, reported when it ends.
+type trackedPacketConn struct {
+	outbound.PacketConn
+	metrics *Metrics
+	record  ConnectionRecord
+
+	up   atomic.Int64
+	down atomic.Int64
+	once sync.Once
+}
+
+func (c *trackedPacketConn) Read(p []byte) (int, error) {
+	n, err := c.PacketConn.Read(p)
+	c.down.Add(int64(n))
+	return n, err
+}
+
+func (c *trackedPacketConn) Write(p []byte) (int, error) {
+	n, err := c.PacketConn.Write(p)
+	c.up.Add(int64(n))
+	return n, err
+}
+
+func (c *trackedPacketConn) Close() error {
+	c.once.Do(func() {
+		rec := c.record
+		rec.Up = c.up.Load()
+		rec.Down = c.down.Load()
+		rec.Duration = time.Since(rec.Started)
+		c.metrics.observeConnection(rec)
+	})
+	return c.PacketConn.Close()
 }
 
 // Datagrams routes a datagram destination and returns the shared association

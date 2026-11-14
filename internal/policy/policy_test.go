@@ -365,3 +365,50 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 	t.Fatal("condition was not met before the deadline")
 }
+
+// TestRegistrySelectionsReportsManualGroupsOnly checks the state a reload has to
+// carry: what the user picked in every manual group, and nothing from the groups
+// that decide for themselves.
+func TestRegistrySelectionsReportsManualGroupsOnly(t *testing.T) {
+	reg := NewRegistry()
+	for _, name := range []string{"a", "b", "c"} {
+		if err := reg.AddLeaf(name); err != nil {
+			t.Fatalf("AddLeaf: %v", err)
+		}
+	}
+	manual, err := NewSelect("manual", []string{"a", "b"}, "")
+	if err != nil {
+		t.Fatalf("NewSelect: %v", err)
+	}
+	if err := manual.Select("b"); err != nil {
+		t.Fatalf("Select: %v", err)
+	}
+	if err := reg.AddGroup(manual); err != nil {
+		t.Fatalf("AddGroup: %v", err)
+	}
+	auto, err := NewURLTest("auto", []string{"a", "c"}, &fakeProber{}, time.Minute, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewURLTest: %v", err)
+	}
+	if err := reg.AddGroup(auto); err != nil {
+		t.Fatalf("AddGroup: %v", err)
+	}
+
+	selections := reg.Selections()
+	if len(selections) != 1 {
+		t.Fatalf("selections = %v, want only the manual group", selections)
+	}
+	if selections["manual"] != "b" {
+		t.Errorf("manual = %q, want the pinned member b", selections["manual"])
+	}
+	if _, ok := selections["auto"]; ok {
+		t.Error("a url-test group was reported; its member is a probe result, not a choice")
+	}
+
+	// An empty registry, and a nil one, answer with an empty map rather than a
+	// panic: a reload reads this from the registry it is replacing, which the
+	// very first reload may not have.
+	if got := NewRegistry().Selections(); len(got) != 0 {
+		t.Errorf("empty registry reported %v", got)
+	}
+}

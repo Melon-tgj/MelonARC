@@ -12,6 +12,7 @@ import (
 	"github.com/melon-tgj/melonarc/internal/config"
 	"github.com/melon-tgj/melonarc/internal/geoip"
 	"github.com/melon-tgj/melonarc/internal/inbound"
+	"github.com/melon-tgj/melonarc/internal/subscription"
 )
 
 // reloader rebuilds every routing artefact from the configuration file and
@@ -31,8 +32,12 @@ type reloader struct {
 	// reload reuses a handle whose file did not change and opens a new one when
 	// it did; the old handles stay open for the lifetime of the process.
 	datasets *geoip.Cache
-	level    *slog.LevelVar
-	logger   *slog.Logger
+	// subs fetches the subscriptions a configuration declares. It holds the
+	// last good result of each one, so a reload inside an interval does not
+	// touch the network.
+	subs   *subscription.Manager
+	level  *slog.LevelVar
+	logger *slog.Logger
 	// ctx lives as long as the daemon and carries the probe loops of the
 	// groups a reload starts.
 	ctx context.Context
@@ -52,7 +57,7 @@ type reloader struct {
 // interruptible: once the new artefacts exist, stopping halfway would leave the
 // daemon with neither the old nor the new configuration. The caller waits, and
 // the API bounds the wait with its own timeout.
-func (r *reloader) reload(context.Context) (api.ReloadView, error) {
+func (r *reloader) reload(ctx context.Context) (api.ReloadView, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -62,6 +67,14 @@ func (r *reloader) reload(context.Context) (api.ReloadView, error) {
 	cfg, err := config.Load(r.path)
 	if err != nil {
 		return api.ReloadView{}, r.rejected(err)
+	}
+	// A reload replaces the nodes a subscription contributed as well: the file,
+	// the fetched nodes and the groups over them are one configuration, and
+	// swapping only part of it would leave the old nodes reachable.
+	if r.subs != nil {
+		if err := r.subs.Import(ctx, cfg); err != nil {
+			return api.ReloadView{}, r.rejected(err)
+		}
 	}
 	program, err := compileRules(cfg, r.datasets, r.logger)
 	if err != nil {
@@ -75,7 +88,12 @@ func (r *reloader) reload(context.Context) (api.ReloadView, error) {
 	if err != nil {
 		return api.ReloadView{}, r.rejected(err)
 	}
-	registry, err := buildRegistry(cfg, dialers)
+	// A reload rebuilds the registry, so the member each manual group was
+	// pinned to has to travel from the old registry to the new one by name.
+	// Without this a subscription refresh — which lands here every six hours —
+	// would move every hand-picked group back to its first member.
+	carry := carriedSelections(previous.registry)
+	registry, err := buildRegistry(cfg, dialers, carry)
 	if err != nil {
 		return api.ReloadView{}, r.rejected(err)
 	}
@@ -125,14 +143,16 @@ func (r *reloader) reload(context.Context) (api.ReloadView, error) {
 	r.level.Set(logLevel(cfg.General.LogLevel))
 
 	view := api.ReloadView{
-		OK:              true,
-		Path:            cfg.Path,
-		RuleCount:       program.Len(),
-		ProxyCount:      len(cfg.Proxies),
-		GroupCount:      len(cfg.Groups),
-		HostCount:       len(cfg.Hosts),
-		RestartRequired: restartRequired(previous.cfg.General, cfg.General),
-		ElapsedMS:       float64(time.Since(start)) / float64(time.Millisecond),
+		OK:               true,
+		Path:             cfg.Path,
+		RuleCount:        program.Len(),
+		ProxyCount:       len(cfg.Proxies),
+		GroupCount:       len(cfg.Groups),
+		HostCount:        len(cfg.Hosts),
+		RestartRequired:  restartRequired(previous.cfg.General, cfg.General),
+		PendingRestart:   r.state.pendingRestart(cfg.General),
+		SelectionDropped: droppedSelections(carry, registry),
+		ElapsedMS:        float64(time.Since(start)) / float64(time.Millisecond),
 	}
 	r.logger.Info("configuration reloaded",
 		"path", cfg.Path, "rules", view.RuleCount, "proxies", view.ProxyCount,
@@ -142,6 +162,13 @@ func (r *reloader) reload(context.Context) (api.ReloadView, error) {
 	for _, setting := range view.RestartRequired {
 		r.logger.Warn("a reloaded setting needs a restart to take effect", "setting", setting)
 	}
+	for _, dropped := range view.SelectionDropped {
+		r.logger.Warn("a pinned policy member did not survive the reload", "detail", dropped)
+	}
+	// The history records the reload itself, not only its outcome: a reader
+	// asking why a pin moved or a rule changed needs the moment it happened.
+	r.state.recordReload(cfg.Path, true, fmt.Sprintf("rules %d, proxies %d, groups %d, hosts %d",
+		view.RuleCount, view.ProxyCount, view.GroupCount, view.HostCount))
 	return view, nil
 }
 
@@ -152,6 +179,10 @@ func (r *reloader) reload(context.Context) (api.ReloadView, error) {
 // rejected reload, and a client that only prints error.message then still says
 // it.
 func (r *reloader) rejected(err error) error {
+	// A refused reload is history too: the configuration file changed and the
+	// daemon does not agree with it, which is exactly the state a later reader
+	// has to be able to tell from "the file was never reloaded".
+	r.state.recordReload(r.path, false, err.Error())
 	return api.Unprocessable("reload_rejected",
 		fmt.Sprintf("%v\nthe previous configuration is still in force", err))
 }
@@ -201,6 +232,13 @@ func restartRequired(previous, next config.General) []string {
 	}
 	if previous.TUN.UDPTimeout != next.TUN.UDPTimeout {
 		out = append(out, "tun-udp-timeout")
+	}
+	// The desktop proxy is a startup setting. Writing it from a reload would
+	// change where every application on the machine sends its traffic as a side
+	// effect of editing a rule list, and the addresses it points at cannot
+	// change without rebinding the listeners anyway.
+	if previous.SystemProxy != next.SystemProxy || !slices.Equal(previous.SystemProxyBypass, next.SystemProxyBypass) {
+		out = append(out, "system-proxy")
 	}
 	return out
 }

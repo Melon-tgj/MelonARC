@@ -270,21 +270,17 @@ func (v *VMess) openSession(conn net.Conn, target Target, command byte, datagram
 	if _, err := conn.Write(sealed); err != nil {
 		return nil, fmt.Errorf("vmess: write request header: %w", err)
 	}
-	if err := vmessReadResponseHeader(conn, session); err != nil {
-		return nil, err
-	}
 	writeAEAD, err := session.bodyAEAD(session.requestKey[:])
 	if err != nil {
 		return nil, fmt.Errorf("vmess: %w", err)
 	}
-	readAEAD, err := session.bodyAEAD(session.responseKey[:])
-	if err != nil {
-		return nil, fmt.Errorf("vmess: %w", err)
-	}
+	// The response header and the key it announces arrive with the first
+	// payload, so Read opens them rather than this function; see
+	// vmessChunkConn.start.
 	return &vmessChunkConn{
-		conn: conn, remote: target,
-		writeAEAD: writeAEAD, readAEAD: readAEAD,
-		writeIV: session.requestIV, readIV: session.responseIV,
+		conn: conn, remote: target, session: session,
+		writeAEAD: writeAEAD,
+		writeIV:   session.requestIV,
 		datagrams: datagrams,
 	}, nil
 }
@@ -611,6 +607,7 @@ func vmessReadResponseHeader(r io.Reader, s *vmessSession) error {
 type vmessChunkConn struct {
 	conn      net.Conn
 	remote    net.Addr
+	session   *vmessSession
 	writeAEAD cipher.AEAD
 	readAEAD  cipher.AEAD
 	writeIV   [16]byte
@@ -619,9 +616,42 @@ type vmessChunkConn struct {
 	rCount    uint16
 	datagrams bool
 
+	// started records whether the response header has been consumed. The
+	// server writes it with its first payload, so it is read on the first
+	// Read: waiting for it here would deadlock against a target that answers
+	// only what it is asked.
+	started  bool
+	startErr error
+
 	wmu     sync.Mutex
 	rmu     sync.Mutex
 	readBuf []byte
+}
+
+// start consumes the response header once and installs the body key it
+// announces. The caller holds rmu.
+func (c *vmessChunkConn) start() error {
+	if c.session == nil {
+		// The local test peer builds both directions up front, so there is no
+		// header left to read.
+		return nil
+	}
+	if c.started {
+		return c.startErr
+	}
+	c.started = true
+	if err := vmessReadResponseHeader(c.conn, c.session); err != nil {
+		c.startErr = err
+		return err
+	}
+	aead, err := c.session.bodyAEAD(c.session.responseKey[:])
+	if err != nil {
+		c.startErr = fmt.Errorf("vmess: %w", err)
+		return c.startErr
+	}
+	c.readAEAD = aead
+	c.readIV = c.session.responseIV
+	return nil
 }
 
 func vmessChunkNonce(iv [16]byte, count uint16) []byte {
@@ -631,14 +661,19 @@ func vmessChunkNonce(iv [16]byte, count uint16) []byte {
 	return nonce
 }
 
+// writeChunk frames one body chunk. The two-byte length counts the ciphertext,
+// tag included, not the payload: a peer reads exactly that many bytes and then
+// opens them. Sending the plaintext length makes the peer cut the tag off the
+// previous chunk and read the next one short, which is what a reference server
+// reported as an authentication failure.
 func (c *vmessChunkConn) writeChunk(payload []byte) error {
 	if len(payload) > vmessMaxChunk {
 		return fmt.Errorf("vmess: chunk of %d bytes exceeds %d", len(payload), vmessMaxChunk)
 	}
-	var length [2]byte
-	binary.BigEndian.PutUint16(length[:], uint16(len(payload)))
 	sealed := c.writeAEAD.Seal(nil, vmessChunkNonce(c.writeIV, c.wCount), payload, nil)
 	c.wCount++
+	var length [2]byte
+	binary.BigEndian.PutUint16(length[:], uint16(len(sealed)))
 	frame := append(length[:], sealed...)
 	_, err := c.conn.Write(frame)
 	if err != nil {
@@ -653,10 +688,10 @@ func (c *vmessChunkConn) readChunk() ([]byte, error) {
 		return nil, fmt.Errorf("vmess: read chunk length: %w", err)
 	}
 	size := int(binary.BigEndian.Uint16(length[:]))
-	if size > vmessMaxChunk {
-		return nil, fmt.Errorf("vmess: chunk length %d exceeds %d", size, vmessMaxChunk)
+	if size < c.readAEAD.Overhead() || size > vmessMaxChunk+c.readAEAD.Overhead() {
+		return nil, fmt.Errorf("vmess: chunk length %d is outside 1-%d", size, vmessMaxChunk)
 	}
-	sealed := make([]byte, size+c.readAEAD.Overhead())
+	sealed := make([]byte, size)
 	if _, err := io.ReadFull(c.conn, sealed); err != nil {
 		return nil, fmt.Errorf("vmess: read chunk: %w", err)
 	}
@@ -694,6 +729,9 @@ func (c *vmessChunkConn) Write(p []byte) (int, error) {
 func (c *vmessChunkConn) Read(p []byte) (int, error) {
 	c.rmu.Lock()
 	defer c.rmu.Unlock()
+	if err := c.start(); err != nil {
+		return 0, err
+	}
 	if c.datagrams {
 		payload, err := c.readChunk()
 		if err != nil {

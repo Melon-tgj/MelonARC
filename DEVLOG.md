@@ -18,6 +18,11 @@
 | 5 | 入站运维可见性：连接/关联计数、成员健康明细、最近失败记录、解析器统计进 API | 完成 |
 | 6 | API 写端点（策略组切换、配置重载、审计记录）、令牌文件分发、CLI 落地 | 完成 |
 | 7 | 明文 DNS 上游、按应答 TTL 的缓存、mmdb 数据源 | 完成 |
+| 8 | TUN 入站：平台设备边界、用户态 TCP 栈、按目的地池化的 UDP 关联 | 完成 |
+| 9 | TLS 基座与 TCP 类加密出站：Shadowsocks（含 2022）、VMess、Trojan、Snell | 完成 |
+| 10 | VLESS（含 REALITY）、自研 TLS 1.3、Hysteria2、TUIC v5 | 完成 |
+| 11 | 第三方参考实现互通验证、分享链接解析、订阅导入与定时更新 | 完成 |
+| 12 | 收尾件：SQLite 观测层、系统代理接入、重载继承选择 | 完成 |
 
 ---
 
@@ -2045,3 +2050,425 @@ REALITY 的认证、VLESS 的请求头、Hysteria2 的 HTTP/3 与数据报、TUI
 5. **观测与 API**：把出站握手失败送进 `inbound.Metrics` 的类别化字段，让 API 能按协议
    类型查看出站状态；这条已经连续两个阶段挂在遗留里。
 6. Windows 实机与 DoT/DoH 上游、观测层 SQLite、桌面 UI 按阶段 8 的计划继续推进。
+
+## 阶段 11 — 第三方互通验证、分享链接与订阅导入（2026-11-14）
+
+范围：四件事。一是把阶段 9/10 的八种出站逐协议接到**第三方参考实现**上，给出真实互通证据；
+二是分享链接解析（`internal/share`）；三是订阅导入与定时更新（`internal/config` 的
+`[Subscription]` 段 + `internal/subscription`）；四是修掉阶段 10 那条抖动用例。开发文档
+§2.6 的两种能力到这里补齐，出站协议清单在阶段 10 已经闭合，本阶段**不新增协议**。
+`spikes/` 与 `docs/` 一个字未改。
+
+### 完成了什么
+
+- **互通验证的装置**（`interop_test.go`）：所有互通用例都受一个环境变量守卫——
+  `MELONARC_INTEROP_DIR` 指向本机存放参考实现可执行文件的目录，未设置时整组跳过。用例用
+  `exec.Command` 起真实服务端、等它的监听端口就绪，然后由本项目的客户端拨真实端口、跑真实
+  回显流量；服务端 stdout/stderr 全程留档，失败时随测试日志一起打印。仓库里只有我们自己的
+  测试代码与配置生成代码，**没有一个第三方二进制**（决策 2）。
+- **逐协议互通用例**：Shadowsocks 旧版 AEAD 与三种 2022 套件（`interop_ss_test.go`）、
+  VMess / Trojan / VLESS（含 REALITY）（`interop_stream_test.go`）、Snell v4 与 v5
+  （`interop_snell_test.go`）、Hysteria2 与 TUIC v5（`interop_quic_test.go`）。另有四条
+  反向用例：错密码的 Shadowsocks、错 PSK 的 Snell、错 UUID 的 VMess、错 UUID 的 VLESS，
+  断言的是「服务端不隧道」而不是「我们报错」。
+- **分享链接解析**（`internal/share`）：`ss://`（SIP002 的 `ss://base64(method:pass)@host:port`、
+  旧式整体 base64、以及 `ss://method:pass@host:port` 三种写法）、`vmess://`（base64 的
+  JSON）、`trojan://`、`vless://`、`hysteria2://`（含 `hy2://` 别名）、`tuic://`。产出物直接
+  是 `config.Proxy`，与手写 `[Proxy]` 行走同一条构建路径，所以导入的节点与手写的节点不可能
+  长得不一样。错误携带链接类型与原因（`share.Error{Scheme, Reason}`），**不携带链接本身**
+  （决策 6）；`ParseAll` 逐条报告而不是停在第一条。
+- **`[Subscription]` 段**（`config/ini.go`、`config/subscription.go`）：`name = url [interval=6h]`，
+  区间下限 5 分钟、默认 6 小时。声明一个订阅**同时声明一个同名 `select` 组**，成员在导入时
+  填入；因此规则与其它组可以在解析期就指向它，`-check` 不必联网（决策 8）。节点名统一为
+  `subscription/<sanitized>`，重名按 `-2`、`-3` 递增，长度受 `maxNameLen` 约束。
+- **订阅管理器**（`internal/subscription`）：`Import` 并发抓取所有订阅（`join` 合并错误），
+  解码（base64 或明文）后逐行 `share.Parse`，再交给 `cfg.MergeSubscriptions`；`Run` 按
+  interval 判断到期（30 秒一跳的检查节拍），更新成功后回调让守护进程走一次重载；`Snapshot`
+  与 `Status` 给运维看。抓取上限 4 MiB、默认 HTTP 超时 20 秒。
+- **失败语义**：一次失败的刷新不夺走已有节点（上一次的结果继续生效），并按 15 秒起、×2、
+  上限 15 分钟退避；最后一次成功的响应体落盘（`<data-dir>/subscriptions/<name>.txt`，0600，
+  临时文件 + rename），所以重启时网络不通也仍能产出规则所指向的节点。一个订阅若一条可用
+  链接都产不出来，是**错误**（`ErrEmpty`），不是空组。
+- **守护进程接入**：启动时先 `subs.Import`（失败即启动失败，不留半套状态），再装配；
+  `reloader` 持有一个 `*subscription.Manager`，`reload` 在 `config.Load` 之后重新导入，
+  失败在提交点之前返回，旧状态继续服务；后台 `go subs.Run(ctx, onChange)` 在更新成功后触发
+  同一条重载路径。`-check` 打印 `subscriptions: N (not fetched by -check)`，不建目录、
+  不写文件。
+- **REALITY 可用性的前置修复**（`tls13.go`）：自研 TLS 1.3 客户端原先只提供 `x25519`
+  （组 29）一个 key share，参考服务端直接把它当「过期/奇怪的 ClientHello」丢弃——它要求
+  **X25519MLKEM768（组 4588）必须在前**。现在客户端提供混合 share
+  （`ML-KEM-768` 封装公钥 1184 字节 + X25519 公钥 32 字节），并把 `x25519` 作为**第二个**
+  share 供服务端退选；REALITY 的认证密钥始终从**经典那一半**导出，所以 `curveShared` 与
+  `shared` 分成两条路径。这条是互通的**前提**，不是优化（决策 4）。
+- **抖动用例修复**（`quicsession_test.go`）：`TestQUICSessionDisownReleasesAnIdleConnection`
+  的 5 秒硬期限在 `-race` 下偶发超时。根因不是「期限太紧」：客户端关得太快时，测试对端的
+  `Accept` 才返回，随后**没有任何连接对象**去观察 `Context().Done()`，测试就只能白等自己的
+  期限。改成等对端发出 `accepted` 信号之后再 `Disown`，期限放宽到与实现无关的 20 秒。
+  `-race` 连跑 20 次全通过（修复前 10 次里能复现 3 次）。
+
+### 关键决策及理由
+
+1. **互通的做法是「真服务端 + 真流量」，不是「对源码」**。每个协议从它的官方发布渠道取
+   可执行文件，并核对发布方公布的哈希（Xray 用 `xray.zip.dgst` 里的 SHA2-256，
+   shadowsocks-rust 用 `ss.tar.xz.sha256`，hysteria 用仓库的 `hashes.txt`，tuic-server 用
+   `.sha256sum`，Snell 用发布页给出的 zip）。二进制只放在 `/tmp` 下，只在测试进程里以
+   本机服务端身份运行。这样做的理由是：阶段 9/10 的「本端对端」证据只能证明自洽，
+   而线格式的错误恰恰是自洽的天敌。
+2. **参考实现不进仓库、不进产品、不随包分发**。装置按**协议**取可执行文件：
+   `$MELONARC_INTEROP_DIR/<协议>/server`，找不到就跳过。这个分层是有意的——测试要的是
+   「某个会说这个协议的服务端」，具体是哪个实现是**机器的属性、不是代码的属性**；同一个
+   二进制会说多个协议时，在几个槽位上各放一个链接即可。这样仓库的测试代码里连一个实现名
+   都不出现，命名红线不必靠自觉。参考实现的名称只出现在**本文件的互通记录**里；产品代码、
+   注释、用户文档、提交信息里一个都没有。
+3. **不能验证的，不写成通过**。本沙箱的 seccomp 禁止对未连接套接字 `sendto`/`sendmsg`，
+   QUIC 服务端的第一程与所有 UDP 出口都命中这条规则。因此 Hysteria2 与 TUIC v5 **没有**
+   互通证据：用例写好了、守卫写好了、跳过原因写在跳过信息里，等一个允许未连接 `sendto`
+   的环境来跑。所有 UDP 子用例（SS / VMess / Trojan / VLESS / Snell）同样如此。
+   Snell 这条还多了一份旁证：参考服务端自己被拒绝时在日志里打出
+   `UDP socket send error: operation not permitted`。
+4. **互通挖出的四个真实缺陷**（这是本阶段最有价值的产出，全部先由测试暴露再修）：
+   - **REALITY 根本不接受纯 X25519 的 ClientHello**。这是最先挡住互通的一条：服务端在读完
+     ClientHello 后逐个找 key share，找不到 `X25519MLKEM768` 就直接放弃认证、把连接当回落
+     流量转给模仿站点，于是客户端拿到的是**真实站点的证书**（自研 TLS 1.3 因此报
+     「证书公钥是 *ecdsa.PublicKey，期望 ed25519」——这条报错其实是正确拒绝）。把
+     `tls13.go` 改成混合 share 之后握手成立。参考实现里那行判断的注释写得很直白：
+     `reject outdated/strange Client Hello that doesn't have X25519MLKEM768 before optional X25519`。
+     这一步是「能不能连上」的问题，不是能力增强，所以放在决策里而不是优化清单里。
+   - **Snell 的应答是惰性发的**。参考服务端要等客户端发出**第一段数据**才回那个应答字节，
+     而原先的实现把应答当成握手的一部分同步读，于是 v4/v5 全部被拒——服务端日志显示它其实
+     已经解密了 CONNECT 并拨通了目标，是我们这一侧先把连接关掉了。改成「首次 `Read` 时再读
+     应答」（`awaitResponseLocked`），与 SS-2022 / VMess / VLESS 的惰性读法一致；改完两个
+     版本都通。
+   - **Snell 首帧要把 salt 与 padding 一起带走，v4 也一样**。原先 salt 单独先写、padding
+     只在 v5 的首帧加，参考服务端认不出首帧。改成 salt 并入首帧、两个版本都做首帧填充，
+     并把 `nextPayloadLimit` 的增长曲线同样应用到 v4。
+   - **REALITY 的那 5 秒不是我们的握手慢**。参考服务端在收到客户端 Finished 之后，还要先
+     把它回落目标（模仿站点）的「握手后记录长度」剖绘出来，而它**以 5 秒为步长轮询**这个
+     剖绘结果；结果没就绪就不置 `isHandshakeComplete`，隧道也就不会开始转发。于是首个认证
+     连接要等 1~2 个 5 秒，之后的连接立刻可用。用客户端侧的 socket 轨迹可以把它钉死：
+     `write 1377`（ClientHello）→ `read 1860`（服务端 flight）→ `write 58`（Finished）→
+     `write 48`（请求记录）全在 5 毫秒内上线，然后服务端沉默 10 秒。因此这是参考服务端的
+     启动期行为，不是本项目的性能问题，只在用例里写注释说明，不做「优化」。
+5. **分享链接：要么全懂，要么报错**。不支持的传输（ws/grpc/h2/kcp）、SS 插件、未知的 TLS
+   变体、缺失的凭据一律在解析期拒绝并给出类型与原因。理由是静默丢字段的后果会推迟到拨号期
+   才显现，而且看起来像「服务器有问题」。同理，`vless://` 必须给 `tls=` 或 `reality=`
+   之一（与阶段 10 配置期的规则一致），REALITY 必须给 `pbk=`。
+6. **错误信息不回显链接**。链接里带密码，而这些字符串会进日志和本地 API。`share.Error`
+   只存类型与原因，测试里专门断言错误文本不含凭据（`TestParseRejectsWithTheTypeAndReason`）。
+7. **订阅做成「一个声明的组」，而不是一堆动态节点名**。供应商随时改名，规则指向单个节点会
+   腐烂；指向订阅本身跨更新有效。节点名带 `subscription/` 前缀，一是让 API 与日志里看得出
+   它从哪来，二是让两个供应商的同名节点不撞车。
+8. **`-check` 必须离线**。订阅的组在解析期声明，所以 `-check` 不抓取也能校验规则与组的
+   引用是否成立；它只打印订阅数量，不建目录、不写文件。这与阶段 6 定下的 `-check` 语义一致。
+9. **订阅的刷新走既有的重载路径，不另开一条**。刷新成功后调用与 `POST /v1/config/reload`
+   同一条 `reload`：整份重建、一次替换、失败在提交点前返回。多一条独立的「只换节点」路径
+   等于多一套状态机，而重载已经把「监听不重绑」的语义定死了（阶段 6 决策）。
+10. **失败保留上一次成功结果 + 磁盘缓存 + 退避**。订阅是外部依赖，刷新失败是常态而不是
+    异常：夺走节点会让正在工作的配置突然断流，而缓存让「重启 + 网络不通」不至于连启动都
+    过不去。
+11. **依赖登记：本阶段没有新增第三方模块**。`internal/share` 与 `internal/subscription`
+    只用标准库（`net/url`、`encoding/base64`、`encoding/json`、`net/http`）；`go.mod` 与
+    `go.sum` 无变化，`go mod tidy -diff`（`GOPROXY=off`）无差异。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链为 `~/sdks/go/bin` 的 Go 1.27.4：
+
+```
+go build ./...                                      通过
+go vet ./...                                        通过
+go test ./... -count=1                              999 个用例条目：978 通过、21 跳过、0 失败
+go test ./... -race -count=1                        全部通过
+gofmt -l .                                          无输出
+GOOS=windows go build ./cmd/... ./internal/...      通过
+go mod tidy -diff（GOPROXY=off）                     无差异
+go mod verify                                       all modules verified
+```
+
+用例条目相比阶段 10 的 925 条增加 74 条：10 条是互通占位（未设置 `MELONARC_INTEROP_DIR`
+时以「参考实现二进制未下载」跳过，这是**设计使然**，不是环境缺陷），另外 64 条是新通过的
+用例。新用例分布在 9 个新测试文件、33 个测试函数里：`internal/share`（3 个函数 / 37 条，
+其中 12 条链接构造、22 条拒绝）、`internal/subscription`（11 条）、`internal/config` 的订阅
+段（7 条）、`cmd/melonarc-core` 的装配端到端（2 条），以及 `internal/outbound` 的 5 个互通
+文件（10 个函数，设置环境变量后展开成 34 条）。跳过总数因此从 11 条变为 21 条，多出来的
+正是那 10 条互通占位。
+
+设置 `MELONARC_INTEROP_DIR` 后再跑互通子集：
+
+```
+MELONARC_INTEROP_DIR=… go test ./internal/outbound/ -run TestInterop -count=1 -v
+                                                    34 个用例条目：23 通过、11 跳过、0 失败
+```
+
+11 条跳过 = Hysteria2 与 TUIC v5 两条整例 + 9 条 UDP 子用例，原因统一是未连接 `sendto`
+被拒。**逐协议互通结果**（参考实现名称仅出现在此表内）：
+
+| 协议 | 参考实现 | 结果 |
+|---|---|---|
+| Shadowsocks 旧版 AEAD（`aes-256-gcm`） | shadowsocks-rust 1.25.0 (`ssserver`) | TCP **通过**；UDP 跳过 |
+| Shadowsocks 2022（`blake3-aes-128-gcm` / `blake3-aes-256-gcm` / `blake3-chacha20-poly1305`） | 同上 | TCP **通过** ×3；UDP 跳过 |
+| VMess（AEAD，TCP 传输） | Xray-core 26.11.9 | TCP **通过**；UDP 跳过 |
+| Trojan | Xray-core 26.11.9 | TCP **通过**；UDP 跳过 |
+| VLESS + TLS | Xray-core 26.11.9 | TCP **通过**；UDP 跳过 |
+| VLESS + REALITY | Xray-core 26.11.9（另起一个 TLS 站点当回落目标） | TCP **通过**（16 KiB 往返） |
+| Snell v4 / v5 | snell-server 5.0.0（同一可执行文件按 `version=4` / `version=5` 分别运行） | TCP **通过** ×2；UDP 跳过 |
+| Hysteria2 | hysteria v2.13.0 | **无法验证**：QUIC 首程 `sendto` 被拒（EPERM） |
+| TUIC v5 | tuic-server 1.0.0 | **无法验证**：同上 |
+
+四条反向用例（错密码的 Shadowsocks、错 PSK 的 Snell、错 UUID 的 VMess、错 UUID 的 VLESS）
+都实际执行并通过：参考服务端在凭据不匹配时不建立隧道。
+
+槽位与实现的对应关系（本机布局，根目录由 `MELONARC_INTEROP_DIR` 给出）：
+`shadowsocks/server` 指向 shadowsocks-rust 的 `ssserver`；`vmess/server`、`trojan/server`、
+`vless/server` 三处指向同一份 Xray-core 可执行文件；`snell/server` 指向 `snell-server`；
+`hysteria2/server` 指向 `hysteria`；`tuic/server` 指向 `tuic-server`。
+
+`knownProxyTypes` 的 11 个类型全部有实现（阶段 10 已闭合）；本阶段给其中 5 个类型（Shadowsocks、
+VMess、Trojan、VLESS、Snell）的 8 种形态补上了第三方互通证据，剩下 2 个类型（Hysteria2、
+TUIC v5）连同所有 UDP 行为如实留白。
+
+### 遗留问题
+
+- **Hysteria2 与 TUIC v5 没有互通证据**：见决策 3。要在允许未连接 `sendto` 的环境里补跑
+  `TestInteropHysteria2` / `TestInteropTUIC`，重点核对 REALITY 之后的第二层——Hysteria2 的
+  HTTP/3 认证应答与分片重组、TUIC 的 exporter label/context 顺序与关联 id 语义。
+- **所有 UDP 互通都未验证**：不是只有 QUIC。SS / VMess / Trojan / VLESS / Snell 的 UDP 子
+  用例都因同一原因跳过；其中 SS 走真 UDP 套接字，另外四种是 over-TCP 分帧、本可以用
+  「服务端连到一个已连接的 UDP 对端」绕开，但那需要改参考服务端的部署方式，不划算。
+- **REALITY 的首连成本**：参考服务端对每个 `(回落目标, SNI, ALPN)` 组合只剖绘一次，首个
+  认证连接要等 1~2 个 5 秒轮询。真实部署里这同样是首连成本，本项目无从缓解（除非服务端早已
+  剖绘过）。凡是拿本项目的 REALITY 出站做「首包延迟」测量，都必须把这段排除在外。
+- **订阅的能力子集**：只支持「链接列表」形态（明文或整体 base64）。没有 `subscription-userinfo`
+  的流量/到期信息、没有 ETag / If-Modified-Since 条件请求、没有按订阅做节点过滤或重命名规则、
+  没有把拉取本身走代理（拉取是直连）。也没有「只更新不重载」的轻量路径。
+- **自研 TLS 1.3 的能力边界（本阶段更新）**：仍是单密码套件
+  （`TLS_AES_128_GCM_SHA256`）、不支持 HelloRetryRequest、会话复用、0-RTT 与客户端证书；
+  但 key share 已从「单 X25519」变成「X25519MLKEM768 + X25519 退选」。代价与收益都要记：
+  ClientHello 从约 300 字节涨到 1377 字节，PQ 成为硬要求（没有它连 REALITY 都连不上），
+  而 `crypto/mlkem` 是标准库（Go 1.24 起），没有引入第三方模块。
+- **分享链接的能力子集**：不支持 `plugin=`（SS 插件）、ws / grpc / h2 / kcp 传输、
+  `flow=xtls-rprx-vision`、Trojan 的 `type=ws`。一律报错而不是忽略，但这也意味着从供应商
+  拿到的链接里只要带插件或 ws，就会被拒——这是当前最可能影响实际可用性的缺口。
+- **订阅的鉴权与隐私**：订阅 URL 可能带 token，目前只做形状校验，日志里打印的是订阅名而
+  不是 URL；缓存文件名用订阅名，不含 URL 片段。没有做「URL 里的凭据」这类静态检查。
+- **互通用例不进 CI 的常规路径**：没有参考实现时它们只是跳过，因此「互通是否还成立」不会被
+  日常 `go test ./...` 发现。要让它成为常规门禁，得有一个允许未连接 `sendto` 且预置二进制的
+  环境。
+- 阶段 1–10 的遗留照旧（Windows 实机验证、用户态 TCP 边界、DoT/DoH 上游与连接池、规则集
+  更新、观测层 SQLite、桌面 UI、重载继承选择、`pending_restart`、出站握手失败未进
+  `inbound.Metrics` 的按协议统计等）。
+
+### 下一步计划
+
+功能面按开发文档收口，接下来是**收尾而非扩张**，顺序如下：
+
+1. **SQLite 观测层**：把连接、失败、解析、策略探测与订阅刷新落成一张可按时间查询的表，
+   API 增加历史查询端点。这条在阶段 5 与阶段 10 连续挂账，且订阅刷新又给它添了一类事件。
+2. **系统代理接入**：`[General]` 增加系统代理开关（Linux 走环境变量与 GNOME 设置、
+   macOS 走 `networksetup`、Windows 走注册表），把「本地监听已经在跑」变成「应用不用配置
+   就能用」。这是产品可用性的最后一块短板。
+3. **重载继承选择**：`POST /v1/config/reload` 增加「保留当前策略组选择」的选项。现在重载会把
+   选择重置为第一个成员，用户手动选过的节点会在每次订阅刷新后被悄悄换掉——订阅一旦定时
+   更新，这个问题就从「偶发」变成「每 6 小时一次」，优先级因此上调。
+4. **GUI 骨架**：先做只读面板（入站统计、失败、DNS、策略组与订阅状态、审计），再考虑
+   写操作。API 已经把只读面收敛得比较干净，接起来不需要新端点。
+5. 与上面并行的补课项：Windows 实机验证、DoT/DoH 上游、规则集在线更新、XTLS-Vision
+   （等公开线格式）、Hysteria2 的拥塞控制与端口跳跃、TUIC 的 0-RTT 与心跳。
+
+---
+
+## 阶段 12 — 收尾件：SQLite 观测层、系统代理接入、重载继承选择（2026-11-14）
+
+范围：阶段 11「下一步计划」的前三条，按给定优先级做完（重载继承选择实际最先落地，因为它是
+订阅定时的直接后果）。三件事各自独立，共同点是都**不加新协议、不动分层**：
+`internal/store` 是新的叶子包，`internal/sysproxy` 也是，两者都不被任何既有包 import；
+`spikes/` 与 `docs/` 一个字未改。
+
+### 完成了什么
+
+**1. `internal/store` — 观测层落盘（自研 SQLite 文件格式）**
+
+- 三张有界表：`connections`（时间、监听协议、目标、网络、命中规则、策略、叶子出站、
+  上下行字节、时长）、`events`（时间、类别、名称、详情、成败）、`samples`（时间、上下行增量）。
+  保留上限 `2000 / 500 / 1440`，满则丢最旧；一条记录的所有列都受字节上界约束（最长的是
+  host 255），因此一行一定落在单个叶子页里。
+- **写整个文件**：`Store.Flush` 把内存表渲染成一份完整 image，`CreateTemp`（同目录）→
+  `chmod 0600` → `Sync` → `Rename`。读者只会看到旧文件或新文件，看不到半个数据库；失败时
+  旧文件不动、记录仍在内存里，`Status.LastError` 记原因、日志只打一次（同一个错误不会按
+  刷新节拍刷屏）。刷新节拍 30 秒，`Close` 时再刷一次。
+- **读回来**：`Open` 读已有文件并解析回三张表。文件不存在不是错误（第一次运行）；文件存在
+  但读不懂也不是错误——观测历史不该拦住守护进程启动——原因写进 `Status.Notice`，直到被
+  下一次写入替换。
+- 写入路径全部 nil 安全：`(*Store)(nil)` 上任何方法都可调用，所以「没有观测层」和「有观测层
+  但还没写入」在调用点上没有分支。
+
+**2. 观测数据的采集点（`inbound.Observer`）**
+
+- `inbound.Metrics` 增加一个可选观察者接口（`Connection(ConnectionRecord)` /
+  `Failure(Failure)`），入站层照旧只维护自己的定长环，**把记录同时告诉观察者**。观察者实现
+  是 `cmd/melonarc-core/history.go` 里的 `historyObserver`，只做字段映射与一次 append。
+  存储写不出去不影响任何请求：这是「观测是旁路」的落点（决策 2）。
+- 字节计数在 `pipeline.go` 新增的 `trackedConn` / `trackedPacketConn` 上：包住出站返回的
+  连接，按方向累加，`CloseWrite` 透传给底层（半关闭只有 `relay.go` 一份实现，这里不许
+  复制），`sync.Once` 保证一条连接只报一次。`Request` 增加 `Protocol` 字段，标注记录来自
+  哪个监听（http / socks5 / tun）。
+- `Metrics.Traffic()` 返回累计上下行，采样器取两次读数之差；计数器只增不减，所以跨越采样
+  边界的连接不会被漏掉或重复计。
+
+**3. 历史查询面**
+
+- API 四个只读端点：`/v1/history`（摘要：文件、大小、三张表的用量与容量、写入次数、最近
+  写入时间、最近错误、notice、进程累计字节）、`/v1/history/connections`、
+  `/v1/history/events`、`/v1/history/traffic`。三者共用 `limit`、`since`；events 另有
+  `kind`。空集合返回 `[]` 而不是 `null`。
+- `since` 接受两种写法：RFC3339 时刻，或 `1h` 这样的时长（「往前看多久」）。时长在
+  handler 里换算成时刻，所以 `Provider` 不需要时钟。
+- events 的四个类别 `failure` / `reload` / `subscription` / `policy`：拨号失败与策略拒绝
+  记成事件而不是连接（那次请求没被承载），REJECT 也算「未承载」，类别留在 detail 里，
+  读者能区分「规则拦的」与「代理挂了」；重载成功与**失败**都记（`ok` 字段），订阅刷新
+  记节点数与结果，手动切换记 `group: 旧 -> 新`。
+- CLI 新增 `history [summary|connections|events|traffic] [limit]` 与 `-since <duration>`。
+  summary 描述文件本身，窗口命令打印表格；`-since` 配 summary 是用法错误（那是「整个文件」，
+  不是某个窗口），不做静默忽略。字节数按一个人读得懂的写法打印。
+
+**4. 系统代理接入（`internal/sysproxy`）**
+
+- `[General]` 新增两键：`system-proxy = on|off`（默认 off）、`system-proxy-bypass = a, b`
+  （回环三项永远在内，不写也在）。校验拦三种错：开了但没有监听、写了 bypass 但开关没开、
+  bypass 项里带 `;`（Windows 的分隔符，一项会被拆成两项）。
+- 三个后端，逻辑与平台选择分离（后端本身无 build tag，只有 `platform()` 按 GOOS 选）：
+  Linux 走 `gsettings`（parent 的 `mode`，http/https/socks 子 schema 的 host 与 port，
+  `ignore-hosts`），Windows 走 `reg.exe`（`HKCU\...\Internet Settings` 的 `ProxyEnable` /
+  `ProxyServer` / `ProxyOverride`），其它系统返回 `ErrUnsupported`。这样两套后端在任何系统上
+  都能被测试覆盖，而交叉编译只需要选对一个 `platform()`（决策 4）。
+- **不留半应用**：写之前先把要动的键读出来（快照），任何一步失败就按快照写回，错误里同时
+  带原始失败与「已恢复」。读不出来就**不写**——不知道旧值就没有回滚能力（决策 5）。
+  Windows 的顺序是「先写地址、最后写 `ProxyEnable=1`」，清除时只写 `ProxyEnable=0`：
+  代理永远指向已经写好的地址。
+- 守护进程：监听与 TUN 起来之后才写系统代理（写下去一定指向已经在答的端口），失败即启动
+  失败并按 TUN 的同一条路径回滚；关停时**第一个**清系统代理（先停止把机器指向即将关闭的
+  端口），再停 TUN、入站、API。`system-proxy` 进 `restart_required`（决策 3）。
+  `-check` 只打印将要写什么，不碰桌面设置。
+
+**5. 重载继承选择（本阶段优先级最高的一项）**
+
+- `policy.Registry.Selections()`：返回每个 `select` 组当前指向的成员，按组名索引；自决组
+  不在其中。
+- `buildRegistry` 增加 `carry map[string]string` 参数：重载时把旧 registry 的选择带进新
+  组，`carriedMember` 只在该成员仍然存在时采用；成员被订阅删掉就退回第一个成员。
+- `droppedSelections` 把「没能保住的 pin」渲染成 `group: 原因` 列表，进 `ReloadView.
+  selection_dropped`，CLI 逐条打印 `selection not restored: ...`——一个悄悄消失的节点必须
+  有地方说话。
+- `pending_restart`：`daemonState` 记住启动时那份 `[General]` 作为基线，重载时与当前文件
+  比较，得到**累计**的「还在等重启」集合；`/v1/config` 一直报告它，不会因为下一次重载而
+  丢失。改回启动时的值就会从集合里消失（比较的是值与基线，不是尝试历史）。
+- 回归用例 `TestSubscriptionRefreshKeepsThePinnedMember`：假订阅服务器 + 可控时钟，先 pin
+  `airport/NodeB`，刷新到 `NodeB,NodeC` 后断言组仍在 `NodeB`（`Active()` 与
+  `Resolve().Leaf` 两条路径都看），再把 NodeB 删掉，断言 `selection_dropped` 有一条且组落到
+  `NodeC`。
+
+### 关键决策及理由
+
+1. **不加第三方 SQLite 驱动，自己写文件格式**。本机模块代理与 github/gitlab 都不可达，
+   `go get` 拿不到任何模块；而且这台机器的交叉编译是硬要求（Windows 单文件二进制），
+   cgo 驱动直接排除。权衡后选了「只实现用得到的那一小块 SQLite 格式」：100 字节文件头、
+   4096 字节页、table b-tree（叶子页 `0x0d`、内部页 `0x05`）、记录头里的 serial type 与
+   varint。代价是约 600 行格式代码，收益是**零依赖、零 cgo、GPLv3 干净、Windows 交叉编译
+   无感**，而且产物是任何 SQLite 工具都能打开的标准文件（不是私有格式）。
+   **不新增任何模块**，`go.mod` 与阶段 11 完全一致（决策 2 一并覆盖）。
+   验证方式是独立的：`sqlite3` 命令行（3.50.4）作为**测试预言机**，检查行数、极值、单行
+   回读、`sqlite_schema`、空表、`PRAGMA integrity_check` 与 `user_version`；它只在测试里
+   通过 PATH 调用，**不链接、不随产品分发、不进仓库**，缺失时该用例跳过。
+2. **观测是旁路，写不出去不算故障**。`Observer` 的方法在承载请求的 goroutine 上调用，
+   因此实现只做有界内存表的 append；落盘在后台按节拍进行。文件写不出去时记录留在内存、
+   下一次刷新再试，`/v1/history` 的 `last_error` 与 `notice` 把状态说清楚。反过来做（写失败
+   即请求失败）会让一块满盘的磁盘变成一次断网。
+3. **系统代理是启动设置，不是可重载设置**。重载的语义是「换掉路由」，而系统代理的副作用
+   落在整台机器上：编辑一条规则就改变所有应用的去向，不符合「重载 = 一次不重启的重启」。
+   另外它指向的地址本身就要重绑监听才能变。因此 `system-proxy` 与 `system-proxy-bypass`
+   进 `restart_required`，并通过 `pending_restart` 持续可见（这条复用阶段 12 第 5 项）。
+4. **后端逻辑与平台选择分离**。两套后端（gsettings / reg.exe）都只依赖「跑一个命令」这个
+   能力，所以它们不需要 build tag，能在 Linux 上把 Windows 后端也测一遍（把 `reg.exe` 的
+   输出当输入喂进去）。真正平台相关的只有 `platform()` 一个函数、三行。这让「不留半应用」
+   这种关键性质在两套后端上都有真实用例，而不是「Windows 上没测」。
+5. **读不到旧值就不写**。回滚能力等于快照能力：一个读不出来的设置写下去就是不可撤销的。
+   gsettings 后端因此在第一步 `get` 失败时直接返回错误（哪怕只是某个 schema 缺失）；
+   Windows 后端相反，`reg query` 报「值不存在」是合法状态（从没配过代理的机器就是这样），
+   记成「不存在」，回滚时删掉而不是写回。
+6. **失败即启动失败，而不是打一行 warning 继续跑**。`system-proxy = on` 是一个明确的意图，
+   悄悄不生效的后果是「用户以为整机在走代理，实际没有」——正是这个包最想避免的那种
+   「看起来配好了」的状态。所以写失败时按 TUN 的同一条路径回滚并返回错误。代价是
+   没有桌面设置工具的服务器上开了这一项就起不来，需要显式关掉；`-check` 与错误文本都把
+   这一点说清楚。
+7. **`since` 是时长或时刻，不是「一个页码」**。历史查询的自然问句是「最近一小时」，
+   所以 API 直接收 `1h`，在 handler 里换算成时刻；`Provider` 保持无时钟。
+8. **空集合永远序列化成 `[]`**。客户端不该为了「什么都没发生过」写一个 null 判断。
+9. **采样写 0 而不是跳过空区间**。0 是关于那个区间的**事实**；有洞的序列没法画，也没法和
+   总量对齐。代价是空转机器也会有一张 1440 行的表，正好就是容量上限的用途。
+
+### 当前状态
+
+- 验收五连全绿（Go 1.27，Linux/x86_64）：
+  - `go build ./...`、`go vet ./...`、`gofmt -l .`（无输出）
+  - `go test ./...`：**1085 条目 / 1064 通过 / 21 跳过 / 0 失败**（阶段 11 是 999/978/21/0，
+    本阶段净增 86 条）。21 跳过与阶段 11 完全同一批：未连接 `sendto` 被 seccomp 拒绝的
+    UDP 用例 + 缺参考实现的互通用例。
+  - `go test -race ./...`：全绿（阶段 11 留下的抖动已修，本阶段新用例没有新增不确定性）。
+  - `GOOS=windows go build ./cmd/... ./internal/...` 与 `GOOS=windows go vet ./cmd/...
+    ./internal/...`：通过（`./...` 仍会被 `spikes/` 下 Unix-only 原型阻断，这是既有约定）。
+  - `GOOS=darwin go build ./internal/sysproxy`：通过（`unsupported` 后端）。
+- 覆盖率（本阶段直接相关的包）：`internal/store` 85.4%、`internal/sysproxy` 80.7%、
+  `internal/api` 94.4%、`internal/cli` 75.8%。
+- 观测层的体积与代价（按保留上限塞满后实测）：整份 image **400 KiB**（100 页），
+  一次全量重写 **约 22 ms**（其中 fsync 占大头），读回约 5 ms。30 秒一次意味着约 0.07% 的
+  占空比；这是「不用日志文件、换取文件永远自洽」的价钱，如实记录。
+- 新增文件：`internal/store/{doc,store,sqlite}.go`、`internal/sysproxy/
+  {sysproxy,gsettings,registry,platform_linux,platform_windows,platform_other}.go`、
+  `cmd/melonarc-core/{history,history_test,sysproxy_test}.go`、`internal/api/history.go` 等；
+  `go.mod` 未变。
+
+### 遗留问题
+
+- **观测层是「窗口」不是「档案」**：`2000 / 500 / 1440` 是写死的上限，没有配置项，也没有
+  按天分表、导出、清理策略。整份重写意味着刷新期间会短暂占用两倍磁盘（旧文件 + 新临时
+  文件），在极小的磁盘上仍可能失败（失败会被记录并重试，不影响转发）。
+- **`samples` 的最后一小段不落盘**：关停时不写不完整区间（短区间画成整区间就是一次不存在的
+  下跌），因此守护进程停止前后那不到一分钟的字节只进总量、不进序列。
+- **进程被 SIGKILL 时最多丢失 30 秒记录**（下一次刷新之前的内容只在内存里）。
+- **系统代理的「别人开过怎么办」**：只清除自己开的那一份（`applied` 标志），如果用户在守护
+  进程运行期间又手动改过系统代理，关停时不会被还原成第三方值——只按「关掉」处理。
+  桌面设置被别的程序同时改写也没有互斥保护。
+- **SIGKILL 后系统代理留在开启状态**：机器会指向一个没人听的端口，直到下次启动或被手动关掉。
+  没有「守护进程崩溃后自动回滚」的机制（需要外部看护，不属于本阶段）。
+- **Linux 只覆盖 GNOME 系（gsettings）**：KDE 的 `kwriteconfig5/6`、环境变量方式（`http_proxy`
+  只在登录会话里生效）、以及 Wayland/X11 的差异都没做。没有 gsettings 的机器开这一项会
+  启动失败并给出明确原因。
+- **Windows 后端只写注册表，不广播 `WM_SETTINGCHANGE` / 不调 `InternetSetOption`**：已经
+  运行的浏览器可能要到重启才认新设置。这块要用 `syscall` 调 wininet，本阶段没做；也没有
+  Windows 实机验证（与阶段 8/9 的欠账同一批）。
+- **`connections` 只记 tcp/udp 承载成功的连接**：被拒绝、拨号失败的在 `events` 里，两张表
+  的「一次请求」无法直接 join（没有关联 id）。
+- **重载继承只保 `select` 组的 pin**：`url-test` / `fallback` 的历史（探测结果、当前成员）
+  在重载时清零，这是既有语义，本阶段没改。
+- **CLI 的 `history` 没有分页**：`limit` 是从最新往回截断，没有游标，也没有「按目标/策略
+  筛选」。
+- **README 的 Status 段仍停在阶段 3 的口径**（说 TUN 与加密出站未实现），已过期；
+  本阶段不改文档口径，留待与 GUI 一起更新。
+- 阶段 1–11 的遗留照旧（Windows 实机验证、用户态 TCP 边界、DoT/DoH 上游、规则集在线更新、
+  Hysteria2/TUIC 互通证据、订阅能力子集、GUI 等）。
+
+### 下一步计划
+
+功能面到此收口，**下一步是 GUI**（开发文档 §2.7 与阶段 11 计划的第 4 条）：
+
+1. **GUI 骨架：先静态样例**。按既定流程做一份**静态前端样例**（入站统计、失败记录、
+   DNS 统计、策略组与订阅状态、审计、历史三个窗口的折线/表格），给出可访问的 URL 让用户
+   确认版式与信息密度，**用户点头之后**再做 Tauri 外壳。不许跳过样例直接上 Tauri。
+   本阶段已经把只读面收敛成 14 个端点（`/healthz`、`/v1/status`、`/v1/config`、`/v1/rules`、
+   `/v1/rules/explain`、`/v1/policies`、`/v1/inbound`、`/v1/failures`、`/v1/dns`、`/v1/audit`、
+   `/v1/history`、`/v1/history/connections`、`/v1/history/events`、`/v1/history/traffic`），
+   样例只需要这些，不需要新端点。
+2. 与 GUI 并行：Windows 实机验证（TUN、系统代理、令牌文件、交叉编译产物）、
+   `WM_SETTINGCHANGE` 广播、README 口径更新。
+3. 之后才是补课项：DoT/DoH 上游、规则集在线更新、XTLS-Vision、Hysteria2 拥塞控制与端口
+   跳跃、TUIC 0-RTT 与心跳、`url-test` 重载后的探测历史保留。

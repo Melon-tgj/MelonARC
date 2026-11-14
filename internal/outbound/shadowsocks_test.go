@@ -86,7 +86,20 @@ func serveTestShadowsocksTCP(conn net.Conn, info cipherInfo, master []byte) {
 		if _, err := request.readFrame(); err != nil { // target address
 			return
 		}
-		_, _ = io.Copy(request, request)
+		// The answer is keyed by a salt of its own: the server direction never
+		// shares the request's subkey.
+		serverSalt, err := randomBytes(info.saltLen)
+		if err != nil {
+			return
+		}
+		if _, err := conn.Write(serverSalt); err != nil {
+			return
+		}
+		responseAEAD, err := info.sessionKey(master, serverSalt)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(newChunkStream(conn, responseAEAD, info.maxPayload), request)
 		return
 	}
 	fixed, err := request.readChunk(11)
@@ -104,6 +117,14 @@ func serveTestShadowsocksTCP(conn net.Conn, info cipherInfo, master []byte) {
 	if err != nil {
 		return
 	}
+	// The first payload travels inside the header chunk: the header carries how
+	// long it is, so no length frame precedes it. A reference server answers
+	// this way, and only once it has something to say, which is why the client
+	// must not wait for the header inside DialContext.
+	first, err := request.readFrame()
+	if err != nil {
+		return
+	}
 	if _, err := conn.Write(serverSalt); err != nil {
 		return
 	}
@@ -116,8 +137,11 @@ func serveTestShadowsocksTCP(conn net.Conn, info cipherInfo, master []byte) {
 	header = append(header, 1)
 	header = binary.BigEndian.AppendUint64(header, uint64(time.Now().Unix()))
 	header = append(header, salt...)
-	header = binary.BigEndian.AppendUint16(header, 0)
+	header = binary.BigEndian.AppendUint16(header, uint16(len(first)))
 	if err := response.writeChunk(header); err != nil {
+		return
+	}
+	if err := response.writeChunk(first); err != nil {
 		return
 	}
 	for {
@@ -433,7 +457,15 @@ func TestShadowsocks2022RejectsTamperedResponseSalt(t *testing.T) {
 	d := mustShadowsocks(t, address, method, secret)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := d.DialContext(ctx, startTCPEcho(t)); err == nil {
+	conn, err := d.DialContext(ctx, startTCPEcho(t))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	// The response header is only read when the first payload arrives, so the
+	// mismatch surfaces on the read rather than at dial time.
+	buf := make([]byte, 8)
+	if _, err := conn.Read(buf); err == nil {
 		t.Fatal("a response header naming a different request salt was accepted")
 	}
 }

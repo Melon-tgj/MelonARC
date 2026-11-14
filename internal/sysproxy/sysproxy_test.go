@@ -1,0 +1,412 @@
+package sysproxy
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+)
+
+// fakeTool is a settings tool that records what it was asked to do and answers
+// from a table. A call can be made to fail, which is how the rollback path is
+// exercised without a desktop.
+type fakeTool struct {
+	// answers is the standard output per "name arg1 arg2 …" command line.
+	answers map[string]string
+	// failAt makes the nth mutating call fail, counted from 1. Zero fails
+	// nothing.
+	failAt int
+	// calls is every command line, in order.
+	calls []string
+}
+
+// run is the runner the backends take.
+func (f *fakeTool) run(_ context.Context, name string, args ...string) (string, error) {
+	line := name + " " + strings.Join(args, " ")
+	f.calls = append(f.calls, line)
+	if f.failAt > 0 && isMutation(args) {
+		f.failAt--
+		if f.failAt == 0 {
+			return "", errors.New("the settings tool refused")
+		}
+	}
+	if answer, ok := f.answers[line]; ok {
+		return answer, nil
+	}
+	// A write prints nothing when it works, so a mutating call that is not in
+	// the table succeeds silently.
+	if isMutation(args) {
+		return "", nil
+	}
+	return "", errors.New("no answer for " + line)
+}
+
+// isMutation reports whether a call changes a setting rather than reading one.
+func isMutation(args []string) bool {
+	for _, arg := range args {
+		if arg == "set" || arg == "add" || arg == "delete" {
+			return true
+		}
+	}
+	return false
+}
+
+// countMutations counts the calls that change something.
+func countMutations(calls []string) int {
+	n := 0
+	for _, call := range calls {
+		if isMutation(strings.Fields(call)[1:]) {
+			n++
+		}
+	}
+	return n
+}
+
+// gsettingsAnswers is the state a desktop reports before anything is written.
+func gsettingsAnswers() map[string]string {
+	return map[string]string{
+		"gsettings get org.gnome.system.proxy mode":                     "'none'\n",
+		"gsettings get org.gnome.system.proxy.http host":                "''\n",
+		"gsettings get org.gnome.system.proxy.http port":                "0\n",
+		"gsettings get org.gnome.system.proxy.https host":               "''\n",
+		"gsettings get org.gnome.system.proxy.https port":               "0\n",
+		"gsettings get org.gnome.system.proxy.socks host":               "''\n",
+		"gsettings get org.gnome.system.proxy.socks port":               "0\n",
+		"gsettings get org.gnome.system.proxy ignore-hosts":             "['localhost', '127.0.0.1', '::1']\n",
+		"gsettings get org.gnome.system.proxy.http use-authentication":  "false\n",
+		"gsettings get org.gnome.system.proxy.https use-authentication": "false\n",
+	}
+}
+
+func TestGSettingsApplyWritesEveryField(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers()}
+	backend := newGSettings(tool.run)
+
+	err := backend.Apply(context.Background(), Settings{
+		HTTP:   "127.0.0.1:7890",
+		SOCKS5: "127.0.0.1:7891",
+		Bypass: []string{"*.internal"},
+	})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	want := []string{
+		"gsettings set org.gnome.system.proxy mode 'manual'",
+		"gsettings set org.gnome.system.proxy.http host '127.0.0.1'",
+		"gsettings set org.gnome.system.proxy.http port 7890",
+		"gsettings set org.gnome.system.proxy.https host '127.0.0.1'",
+		"gsettings set org.gnome.system.proxy.https port 7890",
+		"gsettings set org.gnome.system.proxy.socks host '127.0.0.1'",
+		"gsettings set org.gnome.system.proxy.socks port 7891",
+		"gsettings set org.gnome.system.proxy ignore-hosts ['localhost', '127.0.0.1', '::1', '*.internal']",
+	}
+	for _, line := range want {
+		if !containsCall(tool.calls, line) {
+			t.Errorf("the setting was not written: %q\ncalls:\n%s", line, strings.Join(tool.calls, "\n"))
+		}
+	}
+	// The https proxy is the HTTP listener, because that is the one that
+	// answers CONNECT.
+	if !containsCall(tool.calls, "gsettings set org.gnome.system.proxy.https port 7890") {
+		t.Error("the https proxy does not point at the HTTP inbound")
+	}
+}
+
+// TestGSettingsApplyClearsAProxyThatIsNotConfigured checks the case of a daemon
+// with only one listener: the other kind of proxy is switched off rather than
+// left pointing at whatever an earlier run put there.
+func TestGSettingsApplyClearsAProxyThatIsNotConfigured(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers()}
+	if err := newGSettings(tool.run).Apply(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	for _, line := range []string{
+		"gsettings set org.gnome.system.proxy.socks host ''",
+		"gsettings set org.gnome.system.proxy.socks port 0",
+	} {
+		if !containsCall(tool.calls, line) {
+			t.Errorf("the socks proxy was left as it was: %q is missing", line)
+		}
+	}
+}
+
+// TestGSettingsApplyRollsBack is the property the whole package exists for: a
+// write that fails in the middle leaves the desktop exactly as it was.
+func TestGSettingsApplyRollsBack(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers(), failAt: 4}
+	backend := newGSettings(tool.run)
+
+	err := backend.Apply(context.Background(), Settings{HTTP: "127.0.0.1:7890", SOCKS5: "127.0.0.1:7891"})
+	if err == nil {
+		t.Fatal("Apply succeeded although a write failed")
+	}
+	if !strings.Contains(err.Error(), "previous settings were restored") {
+		t.Errorf("the error does not say the setting was put back: %v", err)
+	}
+	// The three writes before the failure are undone, so the desktop is back on
+	// the values it reported.
+	for _, line := range []string{
+		"gsettings set org.gnome.system.proxy mode 'none'",
+		"gsettings set org.gnome.system.proxy.http host ''",
+		"gsettings set org.gnome.system.proxy.http port 0",
+	} {
+		if !containsCall(tool.calls, line) {
+			t.Errorf("the value was not restored: %q\ncalls:\n%s", line, strings.Join(tool.calls, "\n"))
+		}
+	}
+}
+
+// TestGSettingsApplyReportsAnUnreadableSetting checks that a desktop which does
+// not answer at all produces an error naming the tool, not a panic.
+func TestGSettingsApplyReportsAnUnreadableSetting(t *testing.T) {
+	tool := &fakeTool{answers: map[string]string{}}
+	err := newGSettings(tool.run).Apply(context.Background(), Settings{HTTP: "127.0.0.1:7890"})
+	if err == nil {
+		t.Fatal("Apply succeeded without answers")
+	}
+	if !strings.Contains(err.Error(), "gsettings") {
+		t.Errorf("the error does not name the tool: %v", err)
+	}
+}
+
+func TestGSettingsClearTurnsTheModeOff(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers()}
+	if err := newGSettings(tool.run).Clear(context.Background()); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if !containsCall(tool.calls, "gsettings set org.gnome.system.proxy mode 'none'") {
+		t.Errorf("Clear did not switch the mode off:\n%s", strings.Join(tool.calls, "\n"))
+	}
+	// Nothing else is touched: the addresses stay, so a later Apply does not
+	// have to guess what the desktop used to say.
+	if n := countMutations(tool.calls); n != 1 {
+		t.Errorf("Clear wrote %d settings, want 1:\n%s", n, strings.Join(tool.calls, "\n"))
+	}
+}
+
+func TestGSettingsEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want bool
+	}{
+		{mode: "'none'\n", want: false},
+		{mode: "'manual'\n", want: true},
+		{mode: "'auto'\n", want: true},
+	} {
+		answers := gsettingsAnswers()
+		answers["gsettings get org.gnome.system.proxy mode"] = tc.mode
+		got, err := newGSettings((&fakeTool{answers: answers}).run).Enabled(context.Background())
+		if err != nil {
+			t.Fatalf("Enabled: %v", err)
+		}
+		if got != tc.want {
+			t.Errorf("mode %q reported enabled=%v", strings.TrimSpace(tc.mode), got)
+		}
+	}
+}
+
+// TestRegistryApplyWritesTheAddressList checks the shape Windows reads: one
+// entry per protocol, and the enable flag written last.
+func TestRegistryApplyWritesTheAddressList(t *testing.T) {
+	tool := &fakeTool{answers: map[string]string{}}
+	if err := newRegistry(tool.run).Apply(context.Background(), Settings{
+		HTTP:   "127.0.0.1:7890",
+		SOCKS5: "127.0.0.1:7891",
+	}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	server := findWrite(tool.calls, "ProxyServer")
+	if !strings.Contains(server, "http=127.0.0.1:7890") ||
+		!strings.Contains(server, "https=127.0.0.1:7890") ||
+		!strings.Contains(server, "socks=127.0.0.1:7891") {
+		t.Errorf("ProxyServer = %q", server)
+	}
+	override := findWrite(tool.calls, "ProxyOverride")
+	for _, want := range []string{"localhost", "127.0.0.1", "::1"} {
+		if !strings.Contains(override, want) {
+			t.Errorf("ProxyOverride = %q, want it to contain %q", override, want)
+		}
+	}
+	// The enable flag comes last, so nothing is ever proxied to a half written
+	// address.
+	last := tool.calls[len(tool.calls)-1]
+	if !strings.Contains(last, "ProxyEnable") || !strings.Contains(last, "/d 1") {
+		t.Errorf("the last write was %q, want the enable flag", last)
+	}
+}
+
+// TestRegistryClearDisablesFirst checks that clearing only turns the proxy off:
+// a stale address with the proxy disabled is harmless, the other order is not.
+func TestRegistryClearDisablesFirst(t *testing.T) {
+	tool := &fakeTool{answers: map[string]string{}}
+	if err := newRegistry(tool.run).Clear(context.Background()); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if len(tool.calls) != 1 || !strings.Contains(tool.calls[0], "ProxyEnable") || !strings.Contains(tool.calls[0], "/d 0") {
+		t.Errorf("Clear wrote %v, want one write that disables the proxy", tool.calls)
+	}
+}
+
+// TestRegistryApplyRollsBack checks that a failure while writing restores the
+// values that were there, including deleting the ones that did not exist.
+func TestRegistryApplyRollsBack(t *testing.T) {
+	answers := map[string]string{
+		"reg query " + internetSettingsKey + " /v ProxyEnable":   "HKEY_CURRENT_USER\\...\n    ProxyEnable    REG_DWORD    0x0\n",
+		"reg query " + internetSettingsKey + " /v ProxyServer":   "HKEY_CURRENT_USER\\...\n    ProxyServer    REG_SZ    proxy.corp:8080\n",
+		"reg query " + internetSettingsKey + " /v ProxyOverride": "HKEY_CURRENT_USER\\...\n    ProxyOverride    REG_SZ    corp.local\n",
+	}
+	tool := &fakeTool{answers: answers, failAt: 2}
+	err := newRegistry(tool.run).Apply(context.Background(), Settings{HTTP: "127.0.0.1:7890"})
+	if err == nil {
+		t.Fatal("Apply succeeded although a write failed")
+	}
+	if !strings.Contains(err.Error(), "restored") {
+		t.Errorf("the error does not say the setting was put back: %v", err)
+	}
+	if !containsCall(tool.calls, "reg add "+internetSettingsKey+" /v ProxyServer /t REG_SZ /d proxy.corp:8080 /f") {
+		t.Errorf("the previous ProxyServer was not restored:\n%s", strings.Join(tool.calls, "\n"))
+	}
+}
+
+// TestRegistryEnabled reads the flag the desktop keeps.
+func TestRegistryEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		answer string
+		want   bool
+	}{
+		{answer: "HKEY_CURRENT_USER\\...\n    ProxyEnable    REG_DWORD    0x1\n", want: true},
+		{answer: "HKEY_CURRENT_USER\\...\n    ProxyEnable    REG_DWORD    0x0\n", want: false},
+	} {
+		tool := &fakeTool{answers: map[string]string{
+			"reg query " + internetSettingsKey + " /v ProxyEnable": tc.answer,
+		}}
+		got, err := newRegistry(tool.run).Enabled(context.Background())
+		if err != nil {
+			t.Fatalf("Enabled: %v", err)
+		}
+		if got != tc.want {
+			t.Errorf("answer %q reported enabled=%v", strings.TrimSpace(tc.answer), got)
+		}
+	}
+
+	// A value that is not there is the state of a machine that never had a
+	// proxy, not a failure.
+	tool := &fakeTool{answers: map[string]string{}}
+	got, err := newRegistry(tool.run).Enabled(context.Background())
+	if err != nil || got {
+		t.Errorf("a missing ProxyEnable reported %v, %v", got, err)
+	}
+}
+
+// TestControllerReportsTheReason checks the wrapping: the message has to name
+// the setting and the reason, because the user cannot see either otherwise.
+func TestControllerReportsTheReason(t *testing.T) {
+	c := WithBackend(newGSettings((&fakeTool{answers: gsettingsAnswers(), failAt: 1}).run), nil)
+	err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"})
+	if err == nil {
+		t.Fatal("Enable succeeded although the write failed")
+	}
+	if !strings.Contains(err.Error(), "gsettings") {
+		t.Errorf("the error does not name the backend: %v", err)
+	}
+	if c.Applied() {
+		t.Error("the controller reports a setting it could not write")
+	}
+}
+
+// TestControllerReleaseOnlyClearsItsOwnSetting keeps a stopped daemon from
+// switching off a proxy it never turned on.
+func TestControllerReleaseOnlyClearsItsOwnSetting(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers()}
+	c := WithBackend(newGSettings(tool.run), nil)
+
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if len(tool.calls) != 0 {
+		t.Errorf("Release wrote %v without having applied anything", tool.calls)
+	}
+
+	if err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if !containsCall(tool.calls, "gsettings set org.gnome.system.proxy mode 'none'") {
+		t.Error("Release did not clear the setting it applied")
+	}
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("a second Release: %v", err)
+	}
+}
+
+func TestSettingsValidate(t *testing.T) {
+	tests := []struct {
+		name string
+		s    Settings
+		want string
+	}{
+		{name: "nothing to point at", s: Settings{}, want: "no inbound listener"},
+		{name: "no port", s: Settings{HTTP: "127.0.0.1"}, want: "not a host:port"},
+		{name: "a port that is not a number", s: Settings{HTTP: "127.0.0.1:proxy"}, want: "invalid port"},
+		{name: "a port out of range", s: Settings{HTTP: "127.0.0.1:70000"}, want: "invalid port"},
+		{name: "no host", s: Settings{HTTP: ":7890"}, want: "no host"},
+		{name: "http only", s: Settings{HTTP: "127.0.0.1:7890"}},
+		{name: "socks only", s: Settings{SOCKS5: "127.0.0.1:7891"}},
+		{name: "an address literal", s: Settings{HTTP: "[::1]:7890"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.s.Validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Validate: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestBypassListKeepsTheDefaultsAndTheOrder checks the list that is written: the
+// loopback names are always there, a configured entry comes after them and a
+// duplicate is dropped.
+func TestBypassListKeepsTheDefaultsAndTheOrder(t *testing.T) {
+	got := Settings{Bypass: []string{" *.internal ", "127.0.0.1", "intranet", ""}}.BypassList()
+	want := []string{"localhost", "127.0.0.1", "::1", "*.internal", "intranet"}
+	if len(got) != len(want) {
+		t.Fatalf("bypass = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("bypass = %v, want %v", got, want)
+		}
+	}
+}
+
+// containsCall reports whether the tool ran this command line.
+func containsCall(calls []string, want string) bool {
+	for _, call := range calls {
+		if call == want {
+			return true
+		}
+	}
+	return false
+}
+
+// findWrite returns the first write that mentions value, which is how the tests
+// look at what was stored rather than at what was read.
+func findWrite(calls []string, value string) string {
+	for _, call := range calls {
+		if strings.Contains(call, " add ") && strings.Contains(call, value) {
+			return call
+		}
+	}
+	return ""
+}

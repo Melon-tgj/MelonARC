@@ -213,6 +213,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/failures", s.only(http.MethodGet, s.handleFailures))
 	mux.HandleFunc("/v1/dns", s.only(http.MethodGet, s.handleDNS))
 	mux.HandleFunc("/v1/audit", s.only(http.MethodGet, s.handleAudit))
+	// The history endpoints read what the observation layer kept. They are
+	// read-only like the ones above: a record is written by the daemon as it
+	// carries traffic, never by a client.
+	mux.HandleFunc("/v1/history", s.only(http.MethodGet, s.handleHistory))
+	mux.HandleFunc("/v1/history/connections", s.only(http.MethodGet, s.handleHistoryConnections))
+	mux.HandleFunc("/v1/history/events", s.only(http.MethodGet, s.handleHistoryEvents))
+	mux.HandleFunc("/v1/history/traffic", s.only(http.MethodGet, s.handleHistoryTraffic))
 	// The write endpoints keep the same authentication and the same error
 	// shape. They are the only two places that change a running daemon.
 	mux.HandleFunc("/v1/policies/select", s.only(http.MethodPost, s.handleSelect))

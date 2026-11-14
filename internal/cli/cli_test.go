@@ -279,6 +279,38 @@ func TestReloadReportsWhatApplied(t *testing.T) {
 	}
 }
 
+// TestReloadReportsWhatStillWaitsForARestart covers the cumulative answer: a
+// reload that changes nothing may still have settings pending from an earlier
+// one, and that is exactly what a client cannot see from restart_required alone.
+func TestReloadReportsWhatStillWaitsForARestart(t *testing.T) {
+	core := startCore(t, testToken, map[string]http.HandlerFunc{
+		"/v1/config/reload": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.ReloadView{
+				OK: true, Path: "/etc/melonarc.ini", RuleCount: 12, ProxyCount: 3,
+				GroupCount: 2, HostCount: 1,
+				PendingRestart:   []string{"http-listen", "socks5-listen"},
+				SelectionDropped: []string{"manual: airport/gone is not a member any more, using airport/new"},
+			})
+		},
+	})
+
+	code, stdout, stderr := runCLI("-api", core.URL, "-token", testToken, "reload")
+	if code != exitOK {
+		t.Fatalf("exit code = %d (stderr %q)", code, stderr)
+	}
+	for _, want := range []string{
+		"still waiting for a restart: http-listen, socks5-listen",
+		"selection not restored: manual: airport/gone",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout = %q, want it to mention %q", stdout, want)
+		}
+	}
+	if strings.Contains(stdout, "restart required for:") {
+		t.Errorf("stdout = %q, want no per-reload line when nothing changed now", stdout)
+	}
+}
+
 // TestReloadRejectionIsPrintedVerbatim keeps the daemon's explanation intact: the
 // problems and the sentence saying nothing changed are the useful part.
 func TestReloadRejectionIsPrintedVerbatim(t *testing.T) {
@@ -448,6 +480,195 @@ func TestAPIBaseNormalisation(t *testing.T) {
 	for _, bad := range []string{"ftp://core", "http://", "://x"} {
 		if _, err := apiBase(bad); err == nil {
 			t.Errorf("apiBase accepted %q", bad)
+		}
+	}
+}
+
+// TestHistorySummaryPrintsTheStore drives "history" without a part: it describes
+// the file, and it says so when the file is not being written.
+func TestHistorySummaryPrintsTheStore(t *testing.T) {
+	core := startCore(t, testToken, map[string]http.HandlerFunc{
+		"/v1/history": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.HistoryView{
+				Enabled:     true,
+				Path:        "/var/lib/melonarc/history.sqlite3",
+				Bytes:       4096,
+				Connections: 3,
+				Events:      2,
+				Samples:     17,
+				Capacity:    api.HistoryCapacityView{Connections: 2000, Events: 500, Samples: 1440},
+				Flushes:     4,
+				LastFlush:   "2026-01-02T15:04:05Z",
+				LastError:   "no space left on device",
+				Up:          1200,
+				Down:        3400,
+			})
+		},
+	})
+	code, stdout, stderr := runCLI("-api", core.URL, "-token", testToken, "history")
+	if code != exitOK {
+		t.Fatalf("exit code = %d: %s", code, stderr)
+	}
+	for _, want := range []string{
+		"/var/lib/melonarc/history.sqlite3",
+		"4.0KB",
+		"3 of 2000",
+		"2 of 500",
+		"17 of 1440",
+		"1.2KB up",
+		"3.3KB down",
+		"no space left on device",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the summary does not mention %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestHistorySummarySaysThereIsNone checks the answer of a core that keeps no
+// history: it says so instead of printing zeroes that look like an empty file.
+func TestHistorySummarySaysThereIsNone(t *testing.T) {
+	core := startCore(t, testToken, map[string]http.HandlerFunc{
+		"/v1/history": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.HistoryView{Enabled: false})
+		},
+	})
+	code, stdout, stderr := runCLI("-api", core.URL, "-token", testToken, "history")
+	if code != exitOK {
+		t.Fatalf("exit code = %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "keeps no history") {
+		t.Errorf("stdout = %q", stdout)
+	}
+}
+
+// TestHistoryConnectionsPrintsTheWindow checks the table and the query it is read
+// with: the limit and the period both reach the core.
+func TestHistoryConnectionsPrintsTheWindow(t *testing.T) {
+	var query string
+	core := startCore(t, testToken, map[string]http.HandlerFunc{
+		"/v1/history/connections": func(w http.ResponseWriter, r *http.Request) {
+			query = r.URL.RawQuery
+			writeJSON(w, api.ConnectionListView{Count: 1, Connections: []api.ConnectionView{{
+				Time:       "2026-01-02T15:04:05Z",
+				Protocol:   "http",
+				Target:     "example.com:443",
+				Network:    "tcp",
+				Policy:     "manual",
+				Outbound:   "alpha",
+				Up:         512,
+				Down:       2048,
+				DurationMS: 1500,
+			}}})
+		},
+	})
+	code, stdout, stderr := runCLI("-api", core.URL, "-token", testToken, "-since", "2h", "history", "connections", "50")
+	if code != exitOK {
+		t.Fatalf("exit code = %d: %s", code, stderr)
+	}
+	if !strings.Contains(query, "limit=50") || !strings.Contains(query, "since=2h0m0s") {
+		t.Errorf("the core was asked with %q, want the limit and the period", query)
+	}
+	for _, want := range []string{"TIME", "example.com:443", "manual", "alpha", "1.5s"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the table does not mention %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestHistoryEventsAndTraffic checks the two remaining windows, including the
+// line that sums the traffic of the period.
+func TestHistoryEventsAndTraffic(t *testing.T) {
+	core := startCore(t, testToken, map[string]http.HandlerFunc{
+		"/v1/history/events": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.EventListView{Count: 2, Events: []api.EventView{
+				{Time: "2026-01-02T15:04:05Z", Kind: "reload", Name: "/etc/melonarc.ini", Detail: "rules 1", OK: true},
+				{Time: "2026-01-02T15:05:05Z", Kind: "reload", OK: false, Detail: "the file is broken"},
+			}})
+		},
+		"/v1/history/traffic": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.TrafficListView{Count: 2, Up: 1024, Down: 3072, Samples: []api.TrafficView{
+				{Time: "2026-01-02T15:04:00Z", Up: 1024, Down: 2048},
+				{Time: "2026-01-02T15:05:00Z", Down: 1024},
+			}})
+		},
+	})
+	code, stdout, stderr := runCLI("-api", core.URL, "-token", testToken, "history", "events")
+	if code != exitOK {
+		t.Fatalf("events exited %d: %s", code, stderr)
+	}
+	for _, want := range []string{"KIND", "reload", "yes", "no", "the file is broken"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the event table does not mention %q:\n%s", want, stdout)
+		}
+	}
+
+	code, stdout, stderr = runCLI("-api", core.URL, "-token", testToken, "history", "traffic")
+	if code != exitOK {
+		t.Fatalf("traffic exited %d: %s", code, stderr)
+	}
+	for _, want := range []string{"1.0KB", "2.0KB", "3.0KB", "2 intervals"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the traffic table does not mention %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestHistoryRejectsAWindowItCannotApply keeps a flag from being accepted for a
+// command that would ignore it.
+func TestHistoryRejectsAWindowItCannotApply(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "since with the summary", args: []string{"-since", "1h", "history"}, want: "the summary describes the whole file"},
+		{name: "a limit that is not a number", args: []string{"history", "connections", "many"}, want: "not a non-negative number"},
+		{name: "two limits", args: []string{"history", "connections", "1", "2"}, want: "at most one limit"},
+		{name: "a negative since", args: []string{"-since", "-1h", "history", "events"}, want: "-since must not be negative"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, _, stderr := runCLI(tc.args...)
+			if code != exitUsage {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", code, exitUsage, stderr)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("stderr = %q, want it to mention %q", stderr, tc.want)
+			}
+		})
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	tests := []struct {
+		in   int64
+		want string
+	}{
+		{in: 0, want: "0B"},
+		{in: 999, want: "999B"},
+		{in: 1024, want: "1.0KB"},
+		{in: 1536, want: "1.5KB"},
+		{in: 1 << 20, want: "1.0MB"},
+		{in: 3 << 30, want: "3.0GB"},
+	}
+	for _, tc := range tests {
+		if got := humanBytes(tc.in); got != tc.want {
+			t.Errorf("humanBytes(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestUsageDocumentsHistory keeps the flag a command reads from being invisible
+// in the help text.
+func TestUsageDocumentsHistory(t *testing.T) {
+	code, stdout, _ := runCLI("help")
+	if code != exitOK {
+		t.Fatalf("exit code = %d", code)
+	}
+	for _, want := range []string{"history [what] [limit]", "-since <duration>", "-data-dir"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the usage text does not mention %q", want)
 		}
 	}
 }

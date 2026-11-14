@@ -372,7 +372,7 @@ func (c *tunTCPConn) serve() {
 	metrics := c.stack.svc.metrics
 	c.logger.Debug("tun tcp routing", "destination", c.target.String())
 	upstream, _, err := c.stack.svc.handler.Stream(c.stack.svc.ctx,
-		Request{Target: c.target, Network: networkTCP})
+		Request{Target: c.target, Network: networkTCP, Protocol: protocolTUN})
 	if err != nil {
 		c.logger.Debug("tun tcp destination could not be routed", "destination", c.target.String(), "error", err)
 		c.reset()

@@ -140,13 +140,22 @@ func (s *Shadowsocks) openStream(conn net.Conn, target Target) (net.Conn, error)
 	writer := newChunkStream(conn, aead, s.info.maxPayload)
 	address := AppendAddress(nil, target)
 	if !s.info.version22 {
-		if _, err := conn.Write(salt); err != nil {
-			return nil, fmt.Errorf("ss: write salt: %w", err)
+		// One write for the salt and the whole request header: a server reads
+		// the request with a single Read and rejects what looks truncated.
+		head := make([]byte, 0, len(salt)+len(address)+2*aead.Overhead()+2)
+		head = append(head, salt...)
+		var length [2]byte
+		binary.BigEndian.PutUint16(length[:], uint16(len(address)))
+		head = writer.appendChunk(head, length[:])
+		head = writer.appendChunk(head, address)
+		if _, err := conn.Write(head); err != nil {
+			return nil, fmt.Errorf("ss: write request header: %w", err)
 		}
-		if err := writer.writeFrame(address); err != nil {
-			return nil, err
-		}
-		return writer, nil
+		return &splitStream{
+			conn:   conn,
+			reader: &responseReader{conn: conn, info: s.info, master: s.master},
+			writer: writer,
+		}, nil
 	}
 
 	// 2022 request stream: salt, a fixed-length header chunk (type, timestamp,
@@ -164,42 +173,27 @@ func (s *Shadowsocks) openStream(conn net.Conn, target Target) (net.Conn, error)
 	fixed = append(fixed, 0) // HeaderTypeClientStream
 	fixed = binary.BigEndian.AppendUint64(fixed, uint64(time.Now().Unix()))
 	fixed = binary.BigEndian.AppendUint16(fixed, uint16(len(varHeader)))
-	if _, err := conn.Write(salt); err != nil {
-		return nil, fmt.Errorf("ss: write salt: %w", err)
+	// One write for salt and both header chunks, for the reason given above in
+	// the legacy branch: the peer reads the header once.
+	head := make([]byte, 0, len(salt)+(len(fixed)+len(varHeader))+2*aead.Overhead())
+	head = append(head, salt...)
+	head = writer.appendChunk(head, fixed)
+	head = writer.appendChunk(head, varHeader)
+	if _, err := conn.Write(head); err != nil {
+		return nil, fmt.Errorf("ss: write request header: %w", err)
 	}
-	if err := writer.writeChunk(fixed); err != nil {
-		return nil, err
-	}
-	if err := writer.writeChunk(varHeader); err != nil {
-		return nil, err
-	}
-
-	// The response stream has its own salt and subkey. Its header names the
-	// request salt, so a server answering a different connection is rejected.
-	serverSalt := make([]byte, s.info.saltLen)
-	if _, err := io.ReadFull(conn, serverSalt); err != nil {
-		return nil, fmt.Errorf("ss: read response salt: %w", err)
-	}
-	serverAEAD, err := s.info.sessionKey(s.master, serverSalt)
-	if err != nil {
-		return nil, fmt.Errorf("ss: %w", err)
-	}
-	reader := newChunkStream(conn, serverAEAD, s.info.maxPayload)
-	header, err := reader.readChunk(11 + s.info.saltLen)
-	if err != nil {
-		return nil, err
-	}
-	if header[0] != 1 {
-		return nil, fmt.Errorf("ss: response header has type %d, want 1", header[0])
-	}
-	stamp := int64(binary.BigEndian.Uint64(header[1:9]))
-	if delta := time.Now().Unix() - stamp; delta > 30 || delta < -30 {
-		return nil, fmt.Errorf("ss: response timestamp is %d seconds away", delta)
-	}
-	if !bytes.Equal(header[9:9+s.info.saltLen], salt) {
-		return nil, errors.New("ss: response header names a different request salt")
-	}
-	return &splitStream{conn: conn, reader: reader, writer: writer}, nil
+	// The answer is keyed by the server's own salt and starts with a header
+	// that names the request salt, so a server answering a different
+	// connection is rejected. Both are read lazily: a server sends them
+	// together with its first payload, and a client that waited here would
+	// deadlock against any target that speaks first only after being spoken to.
+	return &splitStream{
+		conn: conn,
+		reader: &responseReader{
+			conn: conn, info: s.info, master: s.master, requestSalt: salt,
+		},
+		writer: writer,
+	}, nil
 }
 
 // DialPacket opens a datagram association with one destination. The socket is
@@ -230,12 +224,97 @@ func (s *Shadowsocks) DialPacket(ctx context.Context, address string) (PacketCon
 	}, nil
 }
 
-// splitStream joins the request and response streams of a 2022 connection.
-// The two directions use different subkeys (hence different nonces starting at
-// zero) but share one socket and one lifetime.
+// responseReader reads the server's direction of a Shadowsocks connection. It
+// opens lazily on the first read because the server sends what keys it with its
+// first payload: the salt of its own direction, and for 2022 a header naming the
+// request salt. A client that blocked on either inside DialContext would
+// deadlock against a target that only answers what it is asked, which is most of
+// them.
+//
+// The 2022 response header is a chunk of type, timestamp, request salt and the
+// length of what follows; what follows is the first payload, not a framed chunk.
+// Only later payloads carry the two-byte length frame. A reference server made
+// this visible: reading the first payload as a frame fails the tag of a two-byte
+// chunk cut out of it, because the header's length field had already said how
+// much payload was coming.
+type responseReader struct {
+	conn        net.Conn
+	info        cipherInfo
+	master      []byte
+	requestSalt []byte
+
+	stream  *chunkStream
+	pending []byte
+	opened  bool
+}
+
+func (r *responseReader) Read(p []byte) (int, error) {
+	if !r.opened {
+		if err := r.open(); err != nil {
+			return 0, err
+		}
+	}
+	if len(r.pending) > 0 {
+		n := copy(p, r.pending)
+		r.pending = r.pending[n:]
+		return n, nil
+	}
+	return r.stream.Read(p)
+}
+
+// open derives the response subkey and consumes the protocol's response header.
+func (r *responseReader) open() error {
+	salt := make([]byte, r.info.saltLen)
+	if _, err := io.ReadFull(r.conn, salt); err != nil {
+		return fmt.Errorf("ss: read response salt: %w", err)
+	}
+	aead, err := r.info.sessionKey(r.master, salt)
+	if err != nil {
+		return fmt.Errorf("ss: %w", err)
+	}
+	r.stream = newChunkStream(r.conn, aead, r.info.maxPayload)
+	r.opened = true
+	if !r.info.version22 {
+		return nil
+	}
+	header, err := r.stream.readChunk(11 + r.info.saltLen)
+	if err != nil {
+		return err
+	}
+	if header[0] != 1 {
+		return fmt.Errorf("ss: response header has type %d, want 1", header[0])
+	}
+	stamp := int64(binary.BigEndian.Uint64(header[1:9]))
+	if delta := time.Now().Unix() - stamp; delta > 30 || delta < -30 {
+		return fmt.Errorf("ss: response timestamp is %d seconds away", delta)
+	}
+	if !bytes.Equal(header[9:9+r.info.saltLen], r.requestSalt) {
+		return errors.New("ss: response header names a different request salt")
+	}
+	initial := int(binary.BigEndian.Uint16(header[9+r.info.saltLen:]))
+	if initial == 0 {
+		return nil
+	}
+	// The header declares the payload's plaintext length; the chunk that
+	// carries it is that plus the tag.
+	payload := make([]byte, initial+r.stream.aead.Overhead())
+	if _, err := io.ReadFull(r.conn, payload); err != nil {
+		return fmt.Errorf("ss: read initial payload: %w", err)
+	}
+	plain, err := r.stream.openChunk(payload)
+	if err != nil {
+		return err
+	}
+	r.pending = plain
+	return nil
+}
+
+// splitStream joins the request and response streams of a connection. The two
+// directions use different subkeys (hence different nonces starting at zero) but
+// share one socket and one lifetime.
 type splitStream struct {
 	conn   net.Conn
-	reader *chunkStream
+	reader *responseReader
 	writer *chunkStream
 }
 

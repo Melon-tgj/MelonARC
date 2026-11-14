@@ -28,6 +28,7 @@ const (
 	snellCommandUDP       = 6
 	snellUDPForward       = 1
 	snellResponseTunnel   = 0
+	snellResponsePong     = 1
 	snellResponseError    = 2
 
 	snellFrameVersion      = 4
@@ -154,11 +155,8 @@ func (s *Snell) DialContext(ctx context.Context, address string) (net.Conn, erro
 		return nil, fmt.Errorf("snell: %w", err)
 	}
 	return completeHandshake(ctx, conn, func(c net.Conn) (net.Conn, error) {
-		sc := newSnellConn(c, s)
+		sc := newSnellClient(c, s)
 		if err := sc.writeStreamHeader(target); err != nil {
-			return nil, err
-		}
-		if err := sc.readResponse(); err != nil {
 			return nil, err
 		}
 		return sc, nil
@@ -180,11 +178,8 @@ func (s *Snell) DialPacket(ctx context.Context, address string) (PacketConn, err
 		return nil, fmt.Errorf("snell: %w", err)
 	}
 	stream, err := completeHandshake(ctx, conn, func(c net.Conn) (net.Conn, error) {
-		sc := newSnellConn(c, s)
+		sc := newSnellClient(c, s)
 		if _, err := sc.Write([]byte{snellHeaderVersion, snellCommandUDP, 0}); err != nil {
-			return nil, err
-		}
-		if err := sc.readResponse(); err != nil {
 			return nil, err
 		}
 		return &snellPacketConn{sc: sc, dest: target}, nil
@@ -216,6 +211,17 @@ type snellConn struct {
 	rmu    sync.Mutex
 	wmu    sync.Mutex
 
+	// client marks the dialer's side of the connection. The server's reply
+	// byte belongs to the client conversation, so the codec itself stays
+	// usable by a peer that only parses requests.
+	client     bool
+	wrSalt     []byte
+	wrSaltSent bool
+	// responseDone records that the server's reply byte has been consumed.
+	// The reply is read lazily: a server may defer it until it has data to
+	// send, so blocking on it during the handshake would hang a connection
+	// whose destination stays quiet.
+	responseDone bool
 	readBuf      []byte
 	payloadLimit uint16
 	lastWrite    time.Time
@@ -228,9 +234,15 @@ func newSnellConn(conn net.Conn, s *Snell) *snellConn {
 		conn: conn, psk: s.psk, keyLen: s.keyLen,
 		newAEAD: s.newAEAD, version: s.version, firstFrame: true,
 	}
-	if s.version == 5 {
-		c.initialPad = c.randomInitialPadding()
-	}
+	c.initialPad = c.randomInitialPadding()
+	return c
+}
+
+// newSnellClient is the dialer's side: it consumes the server's reply byte
+// before the first payload.
+func newSnellClient(conn net.Conn, s *Snell) *snellConn {
+	c := newSnellConn(conn, s)
+	c.client = true
 	return c
 }
 
@@ -246,9 +258,7 @@ func (c *snellConn) initWrite() error {
 	if err != nil {
 		return err
 	}
-	if _, err := c.conn.Write(salt); err != nil {
-		return fmt.Errorf("snell: write salt: %w", err)
-	}
+	c.wrSalt = salt
 	c.wr = snellDirection{aead: aead, ready: true}
 	return nil
 }
@@ -322,7 +332,14 @@ func (c *snellConn) writeFrame(payload []byte, paddingLength int) error {
 		}
 		snellSwapPadding(padding, payloadCipher)
 	}
-	frame := make([]byte, 0, len(headerCipher)+len(padding)+len(payloadCipher))
+	frame := make([]byte, 0, len(headerCipher)+len(padding)+len(payloadCipher)+snellSaltSize)
+	if !c.wrSaltSent {
+		// The salt shares the first write with the first frame: sent on its
+		// own it would be a 16-byte all-random opening segment, which is a
+		// cheap fingerprint of this protocol.
+		frame = append(frame, c.wrSalt...)
+		c.wrSaltSent = true
+	}
 	frame = append(frame, headerCipher...)
 	frame = append(frame, padding...)
 	frame = append(frame, payloadCipher...)
@@ -371,13 +388,12 @@ func (c *snellConn) readFrame() ([]byte, error) {
 	return payload, nil
 }
 
-// nextPayloadLimit implements v5 dynamic record sizing: the first frame is
-// small so the salt and initial padding fit in one segment, then the limit
-// ramps up and resets after an idle window. v4 uses the full frame size.
+// nextPayloadLimit paces large writes: the first frame stays small enough that
+// salt, padding and header travel in one segment, then the limit ramps up to
+// the maximum over the next few frames and resets after an idle window. The
+// reference client applies the same ramp regardless of version, so this is not
+// gated on version 5.
 func (c *snellConn) nextPayloadLimit() int {
-	if c.version == 4 {
-		return snellMaxPayload
-	}
 	now := time.Now()
 	if !c.lastWrite.IsZero() && now.Sub(c.lastWrite) > snellIdleReset {
 		c.payloadLimit = 0
@@ -407,8 +423,11 @@ func (c *snellConn) randomInitialPadding() int {
 	return snellInitialPaddingMin + int(binary.BigEndian.Uint16(random))%span
 }
 
+// paddingFor pads the first frame only, and only when it carries payload: the
+// reference client uses 0x100..0x1FF bytes there so the opening segment's
+// ones/zeros balance does not look like a bare AEAD header.
 func (c *snellConn) paddingFor(payloadLength int) int {
-	if c.version == 4 || !c.firstFrame || payloadLength == 0 {
+	if !c.firstFrame || payloadLength == 0 {
 		return 0
 	}
 	return c.initialPad
@@ -440,7 +459,10 @@ func (c *snellConn) Write(p []byte) (int, error) {
 func (c *snellConn) Read(p []byte) (int, error) {
 	c.rmu.Lock()
 	defer c.rmu.Unlock()
-	for len(c.readBuf) == 0 {
+	if err := c.awaitResponseLocked(); err != nil {
+		return 0, err
+	}
+	if len(c.readBuf) == 0 {
 		payload, err := c.readFrame()
 		if err != nil {
 			return 0, err
@@ -450,6 +472,24 @@ func (c *snellConn) Read(p []byte) (int, error) {
 	n := copy(p, c.readBuf)
 	c.readBuf = c.readBuf[n:]
 	return n, nil
+}
+
+// readStreamLocked fills b from the framed stream, pulling frames as needed.
+// It does not touch the reply state, so the reply parser can use it.
+func (c *snellConn) readStreamLocked(b []byte) error {
+	for len(b) > 0 {
+		if len(c.readBuf) == 0 {
+			payload, err := c.readFrame()
+			if err != nil {
+				return err
+			}
+			c.readBuf = payload
+		}
+		n := copy(b, c.readBuf)
+		c.readBuf = c.readBuf[n:]
+		b = b[n:]
+	}
+	return nil
 }
 
 // writePacketFrame writes one datagram as one frame.
@@ -465,10 +505,13 @@ func (c *snellConn) writePacketFrame(p []byte) error {
 }
 
 // takePacketFrame returns one frame's payload, draining stream leftovers first
-// (the READY byte may share a frame with the first datagram).
+// (the reply byte may share a frame with the first datagram).
 func (c *snellConn) takePacketFrame() ([]byte, error) {
 	c.rmu.Lock()
 	defer c.rmu.Unlock()
+	if err := c.awaitResponseLocked(); err != nil {
+		return nil, err
+	}
 	if len(c.readBuf) > 0 {
 		out := c.readBuf
 		c.readBuf = nil
@@ -515,21 +558,29 @@ func readSnellStreamHeader(r io.Reader) (Target, byte, error) {
 	return Target{Host: string(host), Port: binary.BigEndian.Uint16(port[:])}, head[1], nil
 }
 
-func (c *snellConn) readResponse() error {
+// awaitResponseLocked consumes the server's reply byte on first use. The reply
+// is not read during the handshake because a server may hold it back until it
+// has data to deliver; reading it eagerly would turn a quiet destination into a
+// dial timeout. Callers hold rmu.
+func (c *snellConn) awaitResponseLocked() error {
+	if !c.client || c.responseDone {
+		return nil
+	}
+	c.responseDone = true
 	var status [1]byte
-	if _, err := io.ReadFull(c, status[:]); err != nil {
+	if err := c.readStreamLocked(status[:]); err != nil {
 		return fmt.Errorf("snell: read response: %w", err)
 	}
 	switch status[0] {
-	case snellResponseTunnel, 1: // tunnel or pong
+	case snellResponseTunnel, snellResponsePong:
 		return nil
 	case snellResponseError:
 		var detail [2]byte
-		if _, err := io.ReadFull(c, detail[:]); err != nil {
+		if err := c.readStreamLocked(detail[:]); err != nil {
 			return fmt.Errorf("snell: read error detail: %w", err)
 		}
 		message := make([]byte, int(detail[1]))
-		if _, err := io.ReadFull(c, message); err != nil {
+		if err := c.readStreamLocked(message); err != nil {
 			return fmt.Errorf("snell: read error message: %w", err)
 		}
 		return fmt.Errorf("snell: server rejected the request (code %d): %s", detail[0], message)

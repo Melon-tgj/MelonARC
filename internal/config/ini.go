@@ -14,14 +14,15 @@ import (
 
 // Section names of the native format.
 const (
-	sectionGeneral   = "general"
-	sectionProxy     = "proxy"
-	sectionProxyGrp  = "proxy group"
-	sectionRule      = "rule"
-	sectionHost      = "host"
-	ruleSetKeyword   = "rule-set"
-	defaultAPIListen = "127.0.0.1:7946"
-	defaultLogLevel  = "info"
+	sectionGeneral      = "general"
+	sectionProxy        = "proxy"
+	sectionProxyGrp     = "proxy group"
+	sectionRule         = "rule"
+	sectionHost         = "host"
+	sectionSubscription = "subscription"
+	ruleSetKeyword      = "rule-set"
+	defaultAPIListen    = "127.0.0.1:7946"
+	defaultLogLevel     = "info"
 )
 
 // Defaults for the inbound listeners. They are on by default because the
@@ -56,6 +57,14 @@ const (
 	defaultInterval  = 300 * time.Second
 	defaultTimeout   = 5 * time.Second
 	defaultTolerance = 50 * time.Millisecond
+)
+
+// Defaults for subscription updates. Six hours matches how often providers
+// publish changes; a shorter floor keeps a typo from turning into a request
+// every few seconds against somebody else's server.
+const (
+	defaultSubscriptionInterval = 6 * time.Hour
+	minSubscriptionInterval     = 5 * time.Minute
 )
 
 // defaultDNSTimeout bounds one attempt against one plaintext upstream, over one
@@ -198,7 +207,38 @@ func Parse(data []byte) (*Config, error) {
 				continue
 			}
 			cfg.Hosts = append(cfg.Hosts, entry)
+		case sectionSubscription:
+			key, value, ok := splitKeyValue(text)
+			if !ok {
+				issues.add(ln.number, "[Subscription]", "expected name = url, got %q", text)
+				continue
+			}
+			if prev, dup := seen["subscription/"+strings.ToLower(key)]; dup {
+				issues.add(ln.number, "[Subscription]", "subscription %q is already defined on line %d", key, prev)
+				continue
+			}
+			seen["subscription/"+strings.ToLower(key)] = ln.number
+			sub, err := parseSubscription(key, value, ln.number)
+			if err != nil {
+				issues.add(ln.number, "[Subscription]", "%v", err)
+				continue
+			}
+			cfg.Subscriptions = append(cfg.Subscriptions, sub)
 		}
+	}
+	// A subscription declares a group of its own. The nodes it contributes are
+	// only known once it has been fetched, but the name has to be a valid
+	// target at load time, so rules and groups can point at it and -check can
+	// run without touching the network. The import fills in the members.
+	for _, sub := range cfg.Subscriptions {
+		cfg.Groups = append(cfg.Groups, Group{
+			Name:      sub.Name,
+			Type:      GroupSelect,
+			Interval:  defaultInterval,
+			Timeout:   defaultTimeout,
+			Tolerance: defaultTolerance,
+			Line:      sub.Line,
+		})
 	}
 	return cfg, issues.Err()
 }
@@ -212,7 +252,7 @@ func parseSectionHeader(text string) (string, error) {
 	fields := strings.Fields(strings.ToLower(name))
 	normalised := strings.Join(fields, " ")
 	switch normalised {
-	case sectionGeneral, sectionProxy, sectionProxyGrp, sectionRule, sectionHost:
+	case sectionGeneral, sectionProxy, sectionProxyGrp, sectionRule, sectionHost, sectionSubscription:
 		return normalised, nil
 	}
 	return "", fmt.Errorf("unknown section %q", name)
@@ -289,6 +329,14 @@ func parseGeneralEntry(cfg *Config, key, value string, line int, seen map[string
 			return fmt.Errorf("tun-udp-timeout: must be positive; omit the key to use the default")
 		}
 		cfg.General.TUN.UDPTimeout = d
+	case "system-proxy":
+		on, err := parseToggle(value)
+		if err != nil {
+			return fmt.Errorf("system-proxy: %w", err)
+		}
+		cfg.General.SystemProxy = on
+	case "system-proxy-bypass":
+		cfg.General.SystemProxyBypass = splitList(value)
 	default:
 		return fmt.Errorf("unknown setting %q", key)
 	}
@@ -384,6 +432,41 @@ func parseGroup(name, value string, line int) (Group, error) {
 		}
 	}
 	return g, nil
+}
+
+// parseSubscription splits "url [interval=...]" into a subscription.
+//
+// The url comes first and is the only required part; everything after it is a
+// whitespace separated option. A comma separator would have been ambiguous,
+// because query strings carry commas of their own.
+func parseSubscription(name, value string, line int) (Subscription, error) {
+	sub := Subscription{
+		Name:     strings.TrimSpace(name),
+		Line:     line,
+		Interval: defaultSubscriptionInterval,
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return sub, fmt.Errorf("subscription %q has no url", name)
+	}
+	sub.URL = unquote(fields[0])
+	for _, field := range fields[1:] {
+		key, val, ok := strings.Cut(field, "=")
+		if !ok {
+			return sub, fmt.Errorf("subscription %q: option %q is not key=value", name, field)
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "interval":
+			d, err := parseSeconds(val)
+			if err != nil {
+				return sub, fmt.Errorf("subscription %q: interval: %v", name, err)
+			}
+			sub.Interval = d
+		default:
+			return sub, fmt.Errorf("subscription %q: unknown option %q", name, strings.TrimSpace(key))
+		}
+	}
+	return sub, nil
 }
 
 // parseSeconds accepts a plain number of seconds or a duration such as "5m".

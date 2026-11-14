@@ -215,7 +215,19 @@ func TestVMessWrongUUIDFails(t *testing.T) {
 	d := mustVMess(t, server, testVMessOtherUUID, "", TLSOptions{})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := d.DialContext(ctx, echo); err == nil {
+	// The server's answer, including its refusal, only arrives with the first
+	// payload, so the check is on the read and not on the dial.
+	conn, err := d.DialContext(ctx, echo)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		return
+	}
+	buf := make([]byte, 8)
+	if _, err := conn.Read(buf); err == nil {
 		t.Fatal("a wrong account identifier was accepted")
 	}
 }

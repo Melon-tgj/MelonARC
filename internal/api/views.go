@@ -61,6 +61,17 @@ type ConfigView struct {
 	TUNAddress string   `json:"tun_address,omitempty"`
 	TUNMTU     int      `json:"tun_mtu,omitempty"`
 	TUNRoutes  []string `json:"tun_routes,omitempty"`
+	// SystemProxy reports whether the daemon points the desktop proxy at its
+	// listeners, and which hosts it leaves alone. It is reported even when
+	// false, because "the machine is proxied by the daemon" is the one thing a
+	// user has to be able to check from a client.
+	SystemProxy       bool     `json:"system_proxy"`
+	SystemProxyBypass []string `json:"system_proxy_bypass,omitempty"`
+	// PendingRestart lists the settings whose value in the loaded
+	// configuration is not in force because applying it needs a restart. It
+	// is empty when the running process and the file agree, and it stays
+	// until a restart, however many reloads happened in between.
+	PendingRestart []string `json:"pending_restart"`
 }
 
 // ProxyView is one outbound as exposed by the API.
@@ -189,6 +200,107 @@ type FailureView struct {
 	Policy   string `json:"policy,omitempty"`
 }
 
+// HistoryView describes the observation history the daemon keeps: how much it
+// holds, how large the file is and whether the last write succeeded.
+//
+// It carries no record of its own. The endpoints below serve those, and a
+// summary that repeated them would be a second copy to keep consistent.
+type HistoryView struct {
+	// Enabled reports whether a history is kept at all. When it is false the
+	// other fields are zero and the record endpoints answer with empty lists
+	// rather than an error: "there is no history" is not a failure.
+	Enabled     bool                `json:"enabled"`
+	Path        string              `json:"path,omitempty"`
+	Bytes       int64               `json:"bytes"`
+	Connections int                 `json:"connections"`
+	Events      int                 `json:"events"`
+	Samples     int                 `json:"samples"`
+	Capacity    HistoryCapacityView `json:"capacity"`
+	Flushes     uint64              `json:"flushes"`
+	LastFlush   string              `json:"last_flush,omitempty"`
+	// LastError is the most recent write failure, empty while writes succeed.
+	// The records are still held in memory when it is set, so the next write
+	// can still put them on disk.
+	LastError string `json:"last_error,omitempty"`
+	// Notice explains a history that could not be loaded, so a daemon that
+	// started on an unreadable file says so instead of reporting an empty
+	// history as if nothing had ever happened.
+	Notice string `json:"notice,omitempty"`
+	// Up and Down are the bytes carried since startup as the live counters
+	// see them. The samples are deltas of these, so the two are not the same
+	// number: one is a total, the other a series.
+	Up   int64 `json:"up"`
+	Down int64 `json:"down"`
+}
+
+// HistoryCapacityView is how many records each table keeps.
+type HistoryCapacityView struct {
+	Connections int `json:"connections"`
+	Events      int `json:"events"`
+	Samples     int `json:"samples"`
+}
+
+// ConnectionListView is a page of the carried connections, oldest first.
+type ConnectionListView struct {
+	Count       int              `json:"count"`
+	Connections []ConnectionView `json:"connections"`
+}
+
+// ConnectionView is one carried connection.
+//
+// It describes where the connection went and what carried it, never what it
+// transmitted: there is no payload, no header and no request path here.
+type ConnectionView struct {
+	Time     string `json:"time"`
+	Protocol string `json:"protocol"`
+	Target   string `json:"target"`
+	Network  string `json:"network"`
+	Rule     string `json:"rule,omitempty"`
+	Policy   string `json:"policy,omitempty"`
+	Outbound string `json:"outbound,omitempty"`
+	Up       int64  `json:"up"`
+	Down     int64  `json:"down"`
+	// DurationMS is how long the connection was served, in milliseconds.
+	DurationMS float64 `json:"duration_ms"`
+}
+
+// EventListView is a page of the events, oldest first.
+type EventListView struct {
+	Count  int         `json:"count"`
+	Events []EventView `json:"events"`
+}
+
+// EventView is one thing that happened to the daemon rather than to a
+// connection: a request that could not be carried, a reload, a subscription
+// refresh or a policy selection.
+type EventView struct {
+	Time   string `json:"time"`
+	Kind   string `json:"kind"`
+	Name   string `json:"name,omitempty"`
+	Detail string `json:"detail,omitempty"`
+	// OK reports whether the event succeeded. A refused reload and a failed
+	// refresh are both recorded: "it happened" and "it worked" are different
+	// questions.
+	OK bool `json:"ok"`
+}
+
+// TrafficListView is the traffic history, one entry per sampling interval.
+type TrafficListView struct {
+	Count int `json:"count"`
+	// Up and Down are the totals of the returned window.
+	Up      int64         `json:"up"`
+	Down    int64         `json:"down"`
+	Samples []TrafficView `json:"samples"`
+}
+
+// TrafficView is the traffic one interval carried. Up and Down are deltas
+// rather than running totals, so a restart does not look like a negative spike.
+type TrafficView struct {
+	Time string `json:"time"`
+	Up   int64  `json:"up"`
+	Down int64  `json:"down"`
+}
+
 // DNSView is what the resolver has done since startup. It reports counts only:
 // the [Host] table names internal services, so its content is never exposed.
 type DNSView struct {
@@ -270,7 +382,14 @@ type ReloadView struct {
 	// credentials it was built with, the API address, the data directory.
 	// Everything else in the file applies immediately.
 	RestartRequired []string `json:"restart_required"`
-	ElapsedMS       float64  `json:"elapsed_ms"`
+	// PendingRestart is the cumulative answer: every setting that still waits
+	// for a restart, including ones an earlier reload could not apply.
+	PendingRestart []string `json:"pending_restart"`
+	// SelectionDropped names the manual groups whose pinned member no longer
+	// exists, so a refresh that removed the node the user picked is visible
+	// instead of leaving the group on a different member without a word.
+	SelectionDropped []string `json:"selection_dropped"`
+	ElapsedMS        float64  `json:"elapsed_ms"`
 }
 
 // AuditListView is the write operations the API carried out, oldest first.
@@ -316,6 +435,20 @@ type Provider interface {
 	Failures(ctx context.Context, limit int) FailureListView
 	// DNS reports the resolver counters.
 	DNS(ctx context.Context) DNSView
+	// History describes the observation history: how much it holds and
+	// whether its last write succeeded.
+	History(ctx context.Context) HistoryView
+	// HistoryConnections returns at most limit carried connections, oldest
+	// first, keeping only the ones at or after since when it is not zero. A
+	// limit of zero returns everything the daemon keeps.
+	HistoryConnections(ctx context.Context, limit int, since time.Time) ConnectionListView
+	// HistoryEvents returns at most limit events, oldest first, keeping only
+	// the ones of that kind when kind is not empty and the ones at or after
+	// since when it is not zero.
+	HistoryEvents(ctx context.Context, limit int, kind string, since time.Time) EventListView
+	// HistoryTraffic returns at most limit traffic samples, oldest first,
+	// keeping only the ones at or after since when it is not zero.
+	HistoryTraffic(ctx context.Context, limit int, since time.Time) TrafficListView
 	// SelectPolicy pins a manual policy group to one of its members. A group
 	// that decides on its own reports a Conflict.
 	SelectPolicy(ctx context.Context, group, member string) (SelectView, error)

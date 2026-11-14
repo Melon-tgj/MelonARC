@@ -71,7 +71,7 @@ pinned.test = 203.0.113.7
 	if err != nil {
 		t.Fatalf("buildDialers: %v", err)
 	}
-	registry, err := buildRegistry(cfg, dialers)
+	registry, err := buildRegistry(cfg, dialers, nil)
 	if err != nil {
 		t.Fatalf("buildRegistry: %v", err)
 	}

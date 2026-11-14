@@ -27,11 +27,24 @@ type fakeProvider struct {
 	selectErr     error
 	reloadView    ReloadView
 	reloadErr     error
+	history       HistoryView
+	connections   ConnectionListView
+	events        EventListView
+	traffic       TrafficListView
 	lastLimit     int
 	lastReq       ExplainRequest
 	lastFailLimit int
 	lastSelect    [2]string
+	lastHistory   historyQuery
 	reloadCalls   int
+}
+
+// historyQuery records what the fake was asked for, so the transport tests can
+// check that the query parameters arrive as they were parsed.
+type historyQuery struct {
+	limit int
+	since time.Time
+	kind  string
 }
 
 func (f *fakeProvider) Status(context.Context) StatusView { return f.status }
@@ -50,7 +63,20 @@ func (f *fakeProvider) Failures(_ context.Context, limit int) FailureListView {
 	f.lastFailLimit = limit
 	return f.failures
 }
-func (f *fakeProvider) DNS(context.Context) DNSView { return f.dns }
+func (f *fakeProvider) DNS(context.Context) DNSView         { return f.dns }
+func (f *fakeProvider) History(context.Context) HistoryView { return f.history }
+func (f *fakeProvider) HistoryConnections(_ context.Context, limit int, since time.Time) ConnectionListView {
+	f.lastHistory = historyQuery{limit: limit, since: since}
+	return f.connections
+}
+func (f *fakeProvider) HistoryEvents(_ context.Context, limit int, kind string, since time.Time) EventListView {
+	f.lastHistory = historyQuery{limit: limit, kind: kind, since: since}
+	return f.events
+}
+func (f *fakeProvider) HistoryTraffic(_ context.Context, limit int, since time.Time) TrafficListView {
+	f.lastHistory = historyQuery{limit: limit, since: since}
+	return f.traffic
+}
 func (f *fakeProvider) SelectPolicy(_ context.Context, group, member string) (SelectView, error) {
 	f.lastSelect = [2]string{group, member}
 	return f.selectView, f.selectErr

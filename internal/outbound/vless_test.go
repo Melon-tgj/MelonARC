@@ -350,7 +350,15 @@ func TestVLESSRejectsUnknownAccount(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := dialer.DialContext(ctx, "example.test:443"); err == nil {
+	// The response header is read on the first Read, not at dial time, so the
+	// refusal surfaces there.
+	conn, err := dialer.DialContext(ctx, "example.test:443")
+	if err == nil {
+		defer conn.Close()
+		buf := make([]byte, 8)
+		_, err = conn.Read(buf)
+	}
+	if err == nil {
 		t.Fatal("a dial with an unknown account succeeded")
 	}
 	if server.Rejected() != 1 {
@@ -369,7 +377,12 @@ func TestVLESSVersionMismatchIsAnError(t *testing.T) {
 	dialer := mustVLESS(t, address, VLESSOptions{TLS: TLSOptions{Enabled: false}})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := dialer.DialContext(ctx, "example.test:443")
+	conn, err := dialer.DialContext(ctx, "example.test:443")
+	if err == nil {
+		defer conn.Close()
+		buf := make([]byte, 8)
+		_, err = conn.Read(buf)
+	}
 	if err == nil || !strings.Contains(err.Error(), "version") {
 		t.Fatalf("err = %v, want a version mismatch", err)
 	}

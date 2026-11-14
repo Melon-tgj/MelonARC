@@ -213,7 +213,21 @@ func TestSnellWrongPSKAndBadCipherFail(t *testing.T) {
 	d := mustSnell(t, server.addr, "a-different-psk", 5, "aes-128-gcm")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := d.DialContext(ctx, echo); err == nil {
+	// The wrong key shows up on the first read, not at dial time: the server's
+	// reply byte arrives with its first payload, so the dial cannot be the
+	// point where the key is proven wrong.
+	conn, err := d.DialContext(ctx, echo)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("deadline: %v", err)
+	}
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		return
+	}
+	if _, err := io.ReadFull(conn, make([]byte, 4)); err == nil {
 		t.Fatal("a wrong pre-shared key was accepted")
 	}
 	if _, err := NewSnell(SnellOptions{Server: "p.example", Port: 1080,
@@ -234,8 +248,9 @@ func TestSnellWrongPSKAndBadCipherFail(t *testing.T) {
 	}
 }
 
-// TestSnellVersionFraming checks the raw first frame on the wire: v5 adds the
-// initial padding block and uses the smaller first record, v4 sends neither.
+// TestSnellVersionFraming checks the raw first frame on the wire. Both versions
+// carry the initial padding block, which is what the reference client does; the
+// versions differ in the connect command, not in the framing.
 func TestSnellVersionFraming(t *testing.T) {
 	for _, version := range []int{4, 5} {
 		t.Run("v"+string(rune('0'+version)), func(t *testing.T) {
@@ -281,11 +296,9 @@ func TestSnellVersionFraming(t *testing.T) {
 			if length != len("first record") {
 				t.Fatalf("payload length = %d", length)
 			}
-			if version == 4 && padding != 0 {
-				t.Fatalf("v4 sent %d padding bytes", padding)
-			}
-			if version == 5 && (padding < snellInitialPaddingMin || padding > snellInitialPaddingMax) {
-				t.Fatalf("v5 padding = %d, want %d..%d", padding, snellInitialPaddingMin, snellInitialPaddingMax)
+			if padding < snellInitialPaddingMin || padding > snellInitialPaddingMax {
+				t.Fatalf("v%d padding = %d, want %d..%d", version, padding,
+					snellInitialPaddingMin, snellInitialPaddingMax)
 			}
 			rest := make([]byte, padding+length+aead.Overhead())
 			if _, err := io.ReadFull(wire, rest); err != nil {

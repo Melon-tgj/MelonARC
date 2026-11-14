@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/melon-tgj/melonarc/internal/outbound"
 	"github.com/melon-tgj/melonarc/internal/policy"
 	"github.com/melon-tgj/melonarc/internal/rules"
+	"github.com/melon-tgj/melonarc/internal/store"
 )
 
 // defaultRulePage is the number of rules returned when the client does not ask
@@ -43,6 +45,19 @@ type daemonState struct {
 	metrics   *inbound.Metrics
 	version   string
 	startedAt time.Time
+
+	// history is the observation record. It is deliberately outside the
+	// snapshot a reload replaces: the history outlives every configuration,
+	// and a reload must not swap the file out from under the records that are
+	// still arriving. Nil is valid and reports an empty history.
+	history *store.Store
+
+	// baseline is the [General] section the process actually started with.
+	// A reload cannot apply every setting in that section, so the settings it
+	// could not apply keep this value until the daemon restarts; comparing it
+	// with the file in force is what answers "what is waiting for a restart".
+	// Nil means the daemon did not record one, and nothing is reported.
+	baseline *config.General
 
 	// reload is installed once, before the API starts serving. A state built
 	// without one answers the reload endpoint with a clear refusal instead of
@@ -83,6 +98,33 @@ func (s *daemonState) install(next stateSnapshot) stateSnapshot {
 	return previous
 }
 
+// baselineGeneral returns the [General] settings the process started with and
+// reports whether one was recorded.
+func (s *daemonState) baselineGeneral() (config.General, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.baseline == nil {
+		return config.General{}, false
+	}
+	return *s.baseline, true
+}
+
+// pendingRestart lists the settings whose value in the loaded configuration
+// cannot take effect until the daemon restarts.
+//
+// It is cumulative where the reload answer is per-call: a reload reports what
+// it could not apply just now, while this reports everything that is still
+// waiting, however many reloads ago it was changed. Changing a setting back to
+// the value the process started with clears it, which is why the comparison is
+// against the baseline and not against a list of attempts.
+func (s *daemonState) pendingRestart(current config.General) []string {
+	baseline, ok := s.baselineGeneral()
+	if !ok {
+		return []string{}
+	}
+	return restartRequired(baseline, current)
+}
+
 // Status implements api.Provider.
 func (s *daemonState) Status(context.Context) api.StatusView {
 	snap := s.snapshot()
@@ -111,20 +153,25 @@ func (s *daemonState) Config(context.Context) api.ConfigView {
 		fallback = config.DNSFallbackNone
 	}
 	view := api.ConfigView{
-		LogLevel:     cfg.General.LogLevel,
-		APIListen:    cfg.General.APIListen,
-		HTTPListen:   cfg.General.HTTPListen,
-		SOCKS5Listen: cfg.General.SOCKS5Listen,
-		Path:         cfg.Path,
-		Proxies:      make([]api.ProxyView, 0, len(cfg.Proxies)),
-		Groups:       make([]api.GroupView, 0, len(cfg.Groups)),
-		RuleSets:     make([]api.RuleSetView, 0, len(cfg.RuleSets)),
-		HostCount:    len(cfg.Hosts),
-		NameServers:  append([]string{}, cfg.General.NameServers...),
-		DNSFallback:  fallback,
-		GeoIPDB:      cfg.DataPath(cfg.General.GeoIPDB),
-		ASNDB:        cfg.DataPath(cfg.General.ASNDB),
-		TUNEnable:    cfg.General.TUN.Enable,
+		LogLevel:       cfg.General.LogLevel,
+		APIListen:      cfg.General.APIListen,
+		HTTPListen:     cfg.General.HTTPListen,
+		SOCKS5Listen:   cfg.General.SOCKS5Listen,
+		Path:           cfg.Path,
+		Proxies:        make([]api.ProxyView, 0, len(cfg.Proxies)),
+		Groups:         make([]api.GroupView, 0, len(cfg.Groups)),
+		RuleSets:       make([]api.RuleSetView, 0, len(cfg.RuleSets)),
+		HostCount:      len(cfg.Hosts),
+		NameServers:    append([]string{}, cfg.General.NameServers...),
+		DNSFallback:    fallback,
+		GeoIPDB:        cfg.DataPath(cfg.General.GeoIPDB),
+		ASNDB:          cfg.DataPath(cfg.General.ASNDB),
+		TUNEnable:      cfg.General.TUN.Enable,
+		SystemProxy:    cfg.General.SystemProxy,
+		PendingRestart: s.pendingRestart(cfg.General),
+	}
+	if len(cfg.General.SystemProxyBypass) > 0 {
+		view.SystemProxyBypass = append([]string(nil), cfg.General.SystemProxyBypass...)
 	}
 	if cfg.General.TUN.Enable {
 		view.TUNName = cfg.General.TUN.Name
@@ -230,7 +277,9 @@ func (s *daemonState) SelectPolicy(_ context.Context, group, member string) (api
 		}
 		return api.SelectView{}, err
 	}
-	return api.SelectView{Group: group, Previous: previous, Active: g.Active()}, nil
+	active := g.Active()
+	s.recordSelection(group, previous, active)
+	return api.SelectView{Group: group, Previous: previous, Active: active}, nil
 }
 
 // ReloadConfig implements api.Provider by delegating to the reloader the daemon
@@ -307,6 +356,102 @@ func (s *daemonState) DNS(context.Context) api.DNSView {
 		Succeeded:   st.Succeeded,
 		Failed:      st.Failed,
 	}
+}
+
+// History implements api.Provider. It describes the observation record and
+// carries none of it: the endpoints under /v1/history/ serve the records.
+//
+// Enabled is separate from "the counts are zero" on purpose. A daemon that keeps
+// a history and has carried nothing yet and a daemon that keeps none look the
+// same in the numbers and mean different things to a caller.
+func (s *daemonState) History(context.Context) api.HistoryView {
+	st := s.history.Status()
+	view := api.HistoryView{
+		Enabled:     s.history != nil,
+		Path:        st.Path,
+		Bytes:       st.Bytes,
+		Connections: st.Connections,
+		Events:      st.Events,
+		Samples:     st.Samples,
+		Capacity: api.HistoryCapacityView{
+			Connections: st.Capacity.Connections,
+			Events:      st.Capacity.Events,
+			Samples:     st.Capacity.Samples,
+		},
+		Flushes:   st.Flushes,
+		LastFlush: formatOptionalTime(st.LastFlush),
+		LastError: st.LastError,
+		Notice:    st.Notice,
+	}
+	view.Up, view.Down = s.metrics.Traffic()
+	return view
+}
+
+// HistoryConnections implements api.Provider.
+func (s *daemonState) HistoryConnections(_ context.Context, limit int, since time.Time) api.ConnectionListView {
+	records := s.history.Connections(limit, since)
+	view := api.ConnectionListView{
+		Count:       len(records),
+		Connections: make([]api.ConnectionView, 0, len(records)),
+	}
+	for _, c := range records {
+		view.Connections = append(view.Connections, api.ConnectionView{
+			Time:     c.At.UTC().Format(time.RFC3339),
+			Protocol: c.Protocol,
+			// The port is part of the destination a client asked for, so it is
+			// rendered the way it was written: host:port, bracketed when the
+			// host is an address literal.
+			Target:     net.JoinHostPort(c.Host, strconv.Itoa(c.Port)),
+			Network:    c.Network,
+			Rule:       c.Rule,
+			Policy:     c.Policy,
+			Outbound:   c.Outbound,
+			Up:         c.Up,
+			Down:       c.Down,
+			DurationMS: float64(c.Duration) / float64(time.Millisecond),
+		})
+	}
+	return view
+}
+
+// HistoryEvents implements api.Provider.
+func (s *daemonState) HistoryEvents(_ context.Context, limit int, kind string, since time.Time) api.EventListView {
+	records := s.history.Events(limit, kind, since)
+	view := api.EventListView{
+		Count:  len(records),
+		Events: make([]api.EventView, 0, len(records)),
+	}
+	for _, e := range records {
+		view.Events = append(view.Events, api.EventView{
+			Time:   e.At.UTC().Format(time.RFC3339),
+			Kind:   e.Kind,
+			Name:   e.Name,
+			Detail: e.Detail,
+			OK:     e.OK,
+		})
+	}
+	return view
+}
+
+// HistoryTraffic implements api.Provider. The totals of the returned window are
+// summed here rather than reported from a counter: a series a client can draw
+// and the sum over it have to agree, and only the samples can promise that.
+func (s *daemonState) HistoryTraffic(_ context.Context, limit int, since time.Time) api.TrafficListView {
+	samples := s.history.Samples(limit, since)
+	view := api.TrafficListView{
+		Count:   len(samples),
+		Samples: make([]api.TrafficView, 0, len(samples)),
+	}
+	for _, sample := range samples {
+		view.Up += sample.Up
+		view.Down += sample.Down
+		view.Samples = append(view.Samples, api.TrafficView{
+			Time: sample.At.UTC().Format(time.RFC3339),
+			Up:   sample.Up,
+			Down: sample.Down,
+		})
+	}
+	return view
 }
 
 // formatOptionalTime renders a timestamp for a view, leaving it out when unset.

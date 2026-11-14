@@ -63,7 +63,7 @@ func wireDaemon(t *testing.T, cfg *config.Config) (*rules.Program, []*inbound.Se
 	if err != nil {
 		t.Fatalf("buildDialers: %v", err)
 	}
-	registry, err := buildRegistry(cfg, dialers)
+	registry, err := buildRegistry(cfg, dialers, nil)
 	if err != nil {
 		t.Fatalf("buildRegistry: %v", err)
 	}
@@ -205,7 +205,7 @@ FINAL,DIRECT
 	if err != nil {
 		t.Fatalf("buildDialers: %v", err)
 	}
-	registry, err := buildRegistry(cfg, dialers)
+	registry, err := buildRegistry(cfg, dialers, nil)
 	if err != nil {
 		t.Fatalf("buildRegistry: %v", err)
 	}

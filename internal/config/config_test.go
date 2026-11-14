@@ -156,6 +156,7 @@ func TestParseSyntaxErrors(t *testing.T) {
 		{name: "missing host address", in: "[Host]\na.example.com =\n", want: "expected name = address"},
 		{name: "unknown group option", in: "[Proxy Group]\nG = select, A, retries=3\n", want: "unknown option"},
 		{name: "bad group interval", in: "[Proxy Group]\nG = url-test, A, url=http://x, interval=lots\n", want: "interval"},
+		{name: "bad system proxy toggle", in: "[General]\nsystem-proxy = maybe\n", want: "neither on nor off"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -287,6 +288,21 @@ func TestValidateErrors(t *testing.T) {
 			name: "inbound port zero",
 			in:   base("[General]\nsocks5-listen = 127.0.0.1:0", rule("FINAL,DIRECT")),
 			want: []string{"socks5-listen", "fixed port"},
+		},
+		{
+			name: "system proxy with nothing to point at",
+			in:   base("[General]\nsystem-proxy = on\nhttp-listen = off\nsocks5-listen = off", rule("FINAL,DIRECT")),
+			want: []string{"system-proxy is on but no inbound listener", "port nothing answers on"},
+		},
+		{
+			name: "bypass without the proxy",
+			in:   base("[General]\nsystem-proxy-bypass = *.internal", rule("FINAL,DIRECT")),
+			want: []string{"system-proxy-bypass is set but system-proxy is off"},
+		},
+		{
+			name: "bypass entry with a separator",
+			in:   base("[General]\nsystem-proxy = on\nsystem-proxy-bypass = a;b", rule("FINAL,DIRECT")),
+			want: []string{"contains ';'"},
 		},
 		{
 			name: "username without password",

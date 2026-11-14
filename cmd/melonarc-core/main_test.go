@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,7 +79,7 @@ FINAL,auto
 	if _, err := dialers.Dialer("later"); err != nil {
 		t.Fatalf("the second proxy has no dialer: %v", err)
 	}
-	registry, err := buildRegistry(cfg, dialers)
+	registry, err := buildRegistry(cfg, dialers, nil)
 	if err != nil {
 		t.Fatalf("buildRegistry: %v", err)
 	}
@@ -137,5 +138,81 @@ FINAL,manual
 	}
 	if _, err := buildDialers(cfg, testResolver(t), testLogger()); err == nil {
 		t.Fatal("buildDialers accepted a username without a password")
+	}
+}
+
+// TestBuildRegistryCarriesThePinnedMember checks the rule a reload relies on:
+// a rebuilt manual group starts on the member it was pinned to, and falls back
+// to its first member only when that member is no longer declared.
+func TestBuildRegistryCarriesThePinnedMember(t *testing.T) {
+	raw := `[General]
+log-level = error
+
+[Proxy]
+alpha = socks5, 127.0.0.1, 1080
+beta = socks5, 127.0.0.1, 1081
+
+[Proxy Group]
+manual = select, alpha, beta
+auto = fallback, alpha, beta, url=http://probe.test/
+
+[Rule]
+FINAL,manual
+`
+	cfg, err := config.Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	dialers, err := buildDialers(cfg, testResolver(t), testLogger())
+	if err != nil {
+		t.Fatalf("buildDialers: %v", err)
+	}
+
+	carry := map[string]string{"manual": "beta", "auto": "beta", "gone": "alpha"}
+	registry, err := buildRegistry(cfg, dialers, carry)
+	if err != nil {
+		t.Fatalf("buildRegistry: %v", err)
+	}
+	defer registry.Close()
+
+	manual, ok := registry.Group("manual")
+	if !ok {
+		t.Fatal("the manual group was not registered")
+	}
+	if got := manual.Active(); got != "beta" {
+		t.Errorf("manual group routes to %q, want the carried member beta", got)
+	}
+	// A group that decides on its own has no pin to carry: its active member is
+	// whatever the probe round produced, and this rebuild starts at the top.
+	auto, ok := registry.Group("auto")
+	if !ok {
+		t.Fatal("the fallback group was not registered")
+	}
+	if got := auto.Active(); got != "alpha" {
+		t.Errorf("fallback group routes to %q, want its first member", got)
+	}
+
+	// A pin whose member the configuration no longer lists cannot be honoured.
+	registry2, err := buildRegistry(cfg, dialers, map[string]string{"manual": "gamma"})
+	if err != nil {
+		t.Fatalf("buildRegistry with a stale pin: %v", err)
+	}
+	defer registry2.Close()
+	stale, _ := registry2.Group("manual")
+	if got := stale.Active(); got != "alpha" {
+		t.Errorf("a stale pin left the group on %q, want the first member", got)
+	}
+
+	// droppedSelections is how that outcome becomes visible.
+	dropped := droppedSelections(map[string]string{"manual": "gamma", "gone": "alpha"}, registry2)
+	if len(dropped) != 2 {
+		t.Fatalf("dropped = %v, want both lost selections", dropped)
+	}
+	// Sorted, so the missing group comes before the stale member.
+	if !strings.Contains(dropped[0], "gone") || !strings.Contains(dropped[1], "manual: gamma") {
+		t.Errorf("dropped = %v, want the missing group and the stale pin", dropped)
 	}
 }

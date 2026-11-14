@@ -211,10 +211,9 @@ func (v *VLESS) DialContext(ctx context.Context, address string) (net.Conn, erro
 		if err := v.writeRequest(c, vlessCommandTCP, target); err != nil {
 			return nil, err
 		}
-		if err := v.readResponse(c); err != nil {
-			return nil, err
-		}
-		return c, nil
+		// The response header arrives with the first payload; see
+		// lazyResponseConn.
+		return &lazyResponseConn{Conn: c, open: func() error { return v.readResponse(c) }}, nil
 	})
 }
 
@@ -236,10 +235,8 @@ func (v *VLESS) DialPacket(ctx context.Context, address string) (PacketConn, err
 		if err := v.writeRequest(c, vlessCommandUDP, target); err != nil {
 			return nil, err
 		}
-		if err := v.readResponse(c); err != nil {
-			return nil, err
-		}
-		return &vlessPacketConn{conn: c, reader: bufio.NewReader(c), dest: target}, nil
+		lazy := &lazyResponseConn{Conn: c, open: func() error { return v.readResponse(c) }}
+		return &vlessPacketConn{conn: lazy, reader: bufio.NewReader(lazy), dest: target}, nil
 	})
 	if err != nil {
 		return nil, err

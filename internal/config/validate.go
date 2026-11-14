@@ -25,9 +25,14 @@ func (c *Config) Validate() error {
 	c.normaliseTargets()
 	c.validateGeneral(issues)
 	targets := c.validateProxies(issues)
-	c.validateGroups(issues, targets)
+	// Subscriptions are checked before groups so their names can be offered as
+	// valid targets: a group or a rule may point at a subscription the same way
+	// it points at a proxy, and the nodes behind it are only known once it has
+	// been fetched.
+	virtual := c.validateSubscriptions(issues, targets)
+	c.validateGroups(issues, targets, virtual)
 	c.validateRuleSets(issues)
-	c.validateRules(issues, targets)
+	c.validateRules(issues, targets, virtual)
 	c.validateHosts(issues)
 	return issues.Err()
 }
@@ -60,6 +65,51 @@ func (c *Config) validateGeneral(issues *Errors) {
 	c.validateDNS(issues)
 	c.validateDatasets(issues)
 	c.validateTUN(issues)
+	c.validateSystemProxy(issues)
+}
+
+// Constants for the desktop proxy setting. The entry bound keeps the value that
+// goes into a desktop field from being unbounded, and the separator is rejected
+// because the Windows value is a semicolon separated list: an entry containing
+// one would silently become two entries.
+const (
+	maxBypassEntries = 128
+	maxBypassLen     = 255
+)
+
+// validateSystemProxy checks the desktop proxy setting.
+//
+// The two errors it can report are the same shape as the ones the TUN settings
+// use: a setting that is written but has no effect is a configuration the
+// operator believes is in force, and turning the desktop proxy on with nothing
+// to point it at would send every application on the machine to a port that
+// does not answer.
+func (c *Config) validateSystemProxy(issues *Errors) {
+	g := &c.General
+	if !g.SystemProxy {
+		if len(g.SystemProxyBypass) > 0 {
+			issues.add(0, "[General]", "system-proxy-bypass is set but system-proxy is off, so it has no effect")
+		}
+		return
+	}
+	if g.HTTPListen == "" && g.SOCKS5Listen == "" {
+		issues.add(0, "[General]", "system-proxy is on but no inbound listener is configured: "+
+			"the desktop proxy would point at a port nothing answers on")
+		return
+	}
+	if len(g.SystemProxyBypass) > maxBypassEntries {
+		issues.add(0, "[General]", "system-proxy-bypass lists more than %d entries", maxBypassEntries)
+	}
+	for _, entry := range g.SystemProxyBypass {
+		switch {
+		case entry == "":
+			issues.add(0, "[General]", "system-proxy-bypass contains an empty entry")
+		case len(entry) > maxBypassLen:
+			issues.add(0, "[General]", "system-proxy-bypass entry %q is longer than %d bytes", entry, maxBypassLen)
+		case strings.ContainsAny(entry, ";"):
+			issues.add(0, "[General]", "system-proxy-bypass entry %q contains ';', which separates entries", entry)
+		}
+	}
 }
 
 // validateTUN checks the device settings and fills in their defaults. It is
@@ -349,7 +399,7 @@ func (c *Config) validateProxies(issues *Errors) map[string]bool {
 
 // validateGroups checks every [Proxy Group] entry, including the reference
 // graph formed by nested groups.
-func (c *Config) validateGroups(issues *Errors, targets map[string]bool) {
+func (c *Config) validateGroups(issues *Errors, targets, virtual map[string]bool) {
 	groups := make(map[string]*Group, len(c.Groups))
 	for i := range c.Groups {
 		g := &c.Groups[i]
@@ -372,7 +422,9 @@ func (c *Config) validateGroups(issues *Errors, targets map[string]bool) {
 		default:
 			issues.add(g.Line, "[Proxy Group]", "group %q has unknown type %q", g.Name, g.Type)
 		}
-		if len(g.Members) == 0 {
+		// A subscription group is filled by the import, so it is legitimately
+		// empty until the first fetch has succeeded.
+		if len(g.Members) == 0 && !virtual[g.Name] {
 			issues.add(g.Line, "[Proxy Group]", "group %q has no members", g.Name)
 		}
 		if g.Type == GroupURLTest || g.Type == GroupFallback {
@@ -404,7 +456,7 @@ func (c *Config) validateGroups(issues *Errors, targets map[string]bool) {
 				issues.add(g.Line, "[Proxy Group]", "group %q lists itself as a member", g.Name)
 				continue
 			}
-			if !targets[m] {
+			if !targets[m] && !virtual[m] {
 				issues.add(g.Line, "[Proxy Group]", "group %q refers to unknown member %q", g.Name, m)
 			}
 		}
@@ -488,7 +540,7 @@ func (c *Config) validateRuleSets(issues *Errors) {
 	}
 }
 
-func (c *Config) validateRules(issues *Errors, targets map[string]bool) {
+func (c *Config) validateRules(issues *Errors, targets, virtual map[string]bool) {
 	if len(c.Rules) == 0 {
 		issues.add(0, "[Rule]", "the rule list is empty")
 		return
@@ -515,7 +567,7 @@ func (c *Config) validateRules(issues *Errors, targets map[string]bool) {
 				issues.add(r.Line, "[Rule]", "%s refers to undeclared rule set %q", r.Kind, r.Payload)
 			}
 		}
-		if !targets[r.Target] {
+		if !targets[r.Target] && !virtual[r.Target] {
 			issues.add(r.Line, "[Rule]", "rule targets unknown policy or outbound %q", r.Target)
 		}
 	}
@@ -558,13 +610,13 @@ func validName(name string) error {
 		c := name[i]
 		switch {
 		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '-' || c == '_' || c == '.':
+		case c == '-' || c == '_' || c == '.' || c == '/':
 		default:
 			return fmt.Errorf("name %q contains an unsupported character %q", name, c)
 		}
 	}
 	switch name[0] {
-	case '-', '.':
+	case '-', '.', '/':
 		return fmt.Errorf("name %q must start with a letter, digit or underscore", name)
 	}
 	return nil

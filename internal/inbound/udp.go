@@ -156,7 +156,7 @@ func (a *association) entry(dest outbound.Target) (*datagramEntry, error) {
 	}
 	a.mu.Unlock()
 
-	conn, _, err := a.handler.Packet(a.ctx, Request{Target: dest, Network: networkUDP})
+	conn, _, err := a.handler.Packet(a.ctx, Request{Target: dest, Network: networkUDP, Protocol: protocolSOCKS5})
 	if err != nil {
 		return nil, err
 	}

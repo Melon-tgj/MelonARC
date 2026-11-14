@@ -207,6 +207,28 @@ func (r *Registry) Names() []string {
 	return out
 }
 
+// Selections returns the member every manual group currently routes to, keyed
+// by group name.
+//
+// It is the state a reload has to carry across: a reload builds a whole new
+// registry, and the one thing in the old one that belongs to the user rather
+// than to the configuration file is the member they picked. Groups that decide
+// on their own are left out — their member is a probe result, and the next
+// probe round produces a fresh one anyway.
+func (r *Registry) Selections() map[string]string {
+	groups := r.Groups()
+	out := make(map[string]string, len(groups))
+	for _, g := range groups {
+		if g.Kind() != KindSelect {
+			continue
+		}
+		if active := g.Active(); active != "" {
+			out[g.Name()] = active
+		}
+	}
+	return out
+}
+
 // Groups lists the registered groups, sorted by name.
 func (r *Registry) Groups() []Group {
 	r.mu.RLock()

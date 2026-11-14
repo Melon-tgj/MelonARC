@@ -80,7 +80,7 @@ func (d *udpDispatcher) handle(pkt ipv4Packet, seg udpSegment) {
 
 	source := flow.src.String() + ":" + strconv.Itoa(int(flow.sport))
 	assoc, err := d.svc.handler.Datagrams(d.svc.ctx,
-		Request{Target: target, Network: networkUDP}, source)
+		Request{Target: target, Network: networkUDP, Protocol: protocolTUN}, source)
 	if err != nil {
 		d.svc.logger.Debug("tun udp destination could not be routed", "destination", target.String(), "error", err)
 		return

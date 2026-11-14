@@ -24,6 +24,24 @@ type Config struct {
 	RuleSets []RuleSet
 	Rules    []*rules.Rule
 	Hosts    []HostEntry
+	// Subscriptions are the [Subscription] declarations. They are fetched by
+	// the daemon, not by this package: parsing a configuration must stay
+	// offline and free of side effects so that -check and the tests are safe.
+	Subscriptions []Subscription
+}
+
+// Subscription is one entry of the [Subscription] section: a URL that returns
+// a list of share links, and how often to refresh it.
+//
+// A subscription is also a target that rules and groups may point at. Once its
+// links are imported it becomes a select group holding every node it
+// contributed, so a rule can say "Subscription" without knowing the node names
+// a provider might change tomorrow.
+type Subscription struct {
+	Name     string
+	URL      string
+	Interval time.Duration
+	Line     int
 }
 
 // General holds the process wide settings of the [General] section.
@@ -72,6 +90,19 @@ type General struct {
 	// Enable is true: creating a device and installing routes is privileged
 	// and must never happen because a configuration was merely loaded.
 	TUN TUN
+	// SystemProxy points the desktop proxy of the machine at the inbound
+	// listeners while the daemon runs, and puts it back when it stops.
+	//
+	// It is off by default and it is a startup setting, not a reloadable one:
+	// writing the desktop setting is a side effect on the machine, and a reload
+	// that changes the routing must not also change what every other
+	// application on the machine sends where. A change to it is reported by
+	// pending_restart until the daemon is restarted.
+	SystemProxy bool
+	// SystemProxyBypass adds hosts the desktop proxy must not be used for. The
+	// loopback names are always bypassed, because the API and the token file
+	// live there.
+	SystemProxyBypass []string
 }
 
 // TUN is one [General] device setting group. A zero value means "off": the
