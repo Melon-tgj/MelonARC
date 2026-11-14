@@ -2376,7 +2376,7 @@ TUIC v5）连同所有 UDP 行为如实留白。
    varint。代价是约 600 行格式代码，收益是**零依赖、零 cgo、GPLv3 干净、Windows 交叉编译
    无感**，而且产物是任何 SQLite 工具都能打开的标准文件（不是私有格式）。
    **不新增任何模块**，`go.mod` 与阶段 11 完全一致（决策 2 一并覆盖）。
-   验证方式是独立的：`sqlite3` 命令行（3.50.4）作为**测试预言机**，检查行数、极值、单行
+   验证方式是独立的：`sqlite3` 命令行（3.45.1）作为**测试预言机**，检查行数、极值、单行
    回读、`sqlite_schema`、空表、`PRAGMA integrity_check` 与 `user_version`；它只在测试里
    通过 PATH 调用，**不链接、不随产品分发、不进仓库**，缺失时该用例跳过。
 2. **观测是旁路，写不出去不算故障**。`Observer` 的方法在承载请求的 goroutine 上调用，
@@ -2472,3 +2472,182 @@ TUIC v5）连同所有 UDP 行为如实留白。
    `WM_SETTINGCHANGE` 广播、README 口径更新。
 3. 之后才是补课项：DoT/DoH 上游、规则集在线更新、XTLS-Vision、Hysteria2 拥塞控制与端口
    跳跃、TUIC 0-RTT 与心跳、`url-test` 重载后的探测历史保留。
+
+---
+
+## 阶段 13 — GUI 第一步：Tauri 骨架与架构（2026-11-14）
+
+范围：把已经定稿的静态版式落成真正的桌面应用骨架，只做三个能读真数据的面板与三个占位页。
+**核心 Go 代码一行未改**，`spikes/` 与 `docs/` 一个字未动；`go.mod` / `go.sum` 零改动。
+顺带更正阶段 12 的一处旧记录：`sqlite3` 测试预言机的版本是 **3.45.1**，不是 3.50.4。
+
+### 完成了什么
+
+**1. 落盘位置与 Tauri 2 骨架**
+
+- 开发文档 §3 只画了「桌面 UI（Tauri）」这一层，没有给目录；选 `apps/desktop`：
+  与单一 Go module 的 `cmd/` / `internal/` 并列，`<app>/src`（前端）与 `<app>/src-tauri`
+  （Rust 壳）同属一个应用目录，后续再加第二个前端或安装包脚本不用搬迁。
+- `src-tauri/`：`Cargo.toml`、`build.rs`、`tauri.conf.json`、`capabilities/default.json`、
+  `main.rs`（一个窗口 + 两个命令）、`settings.rs`（数据目录与 API 地址）、`api.rs`（令牌 +
+  回环 HTTP）。窗口 1180×800，`withGlobalTauri`，CSP 只允许自身资源与 IPC。
+- 前端产物 `dist/` 由 `scripts/build.mjs` 生成；`package.json` + `package-lock.json`
+  入库，依赖图是空的，`npm ci --offline` 即可复现。
+
+**2. 架构三件套**
+
+- 设计令牌：`src/theme/tokens.css` 分两层——原始层（色板、间距刻度、圆角、字阶、
+  动效时长）与语义层（表面、墨色、强调色、毛玻璃参数、布局尺寸）。`base.css` 与
+  `panels.css` 只消费语义层；组件与面板**不写任何颜色、间距、圆角、模糊值、时长**，
+  深色模式与「减少动效」也只是在令牌层覆盖。
+- 面板注册表：`src/panels/registry.js` 是唯一扩展点。侧栏、hash 路由、标题、卸载
+  全部由注册表生成；新增面板 = 新建一个模块 + 一行注册。六个页面签各自一个模块。
+- i18n：`locales/zh-CN.json` 与 `locales/en.json`，本步全部界面文案都在里面，
+  含 `meta.self`（语言自称）。启动时预载全部语言包，切换语言只换一次指针并重新挂载
+  当前面板，**即时生效**、不重载窗口。新增日/韩/德/西 = 加一个同结构 JSON + 一行
+  `LOCALES`。
+
+**3. 三个真数据面板 + 三个占位页**
+
+- 概览：`/v1/status` + `/v1/config` + `/v1/policies` —— 运行状态、版本、运行时长、
+  规则/策略/出站点数、三个监听地址、各策略组当前节点、配置文件路径。
+- 节点与策略：`/v1/policies` —— 组、成员健康与延迟、当前 pin；`select` 组的成员可点，
+  走既有写端点 `POST /v1/policies/select`，成功后用应答里的 `active` 就地更新；
+  `url-test` / `fallback` 组不提供点击（核心会拒绝，按钮不该存在）。
+- 连接：`/v1/inbound` + `/v1/failures?limit=20` —— 活动/累计/失败/拦截四个计数、
+  各监听计数表、最近失败记录表（阶段与类别翻成语言包里的标签，未知类别原样显示）。
+- 规则 / 日志 / 设置：只放多语言占位页，明写「后续步骤实现」与各自计划要做的事；
+  设置页另有关于区（占位 Logo、版本、许可证）。
+
+**4. API 接入与令牌边界**
+
+- 令牌只在两侧代持：Tauri 侧 `api_request` 读 `<data-dir>/api-token` 后加
+  `Authorization` 头发到回环 API；开发预览 `scripts/dev-preview.mjs` 的 `/bridge` 前缀
+  做同样的事。前端只有 `fetch('/bridge/...')` 或 `invoke('api_request')`，
+  **界面、日志、DOM 里都没有令牌**，界面上最多显示令牌文件的**路径**。
+- 数据目录默认规则与 `internal/datadir.Default()` 一致（`os.UserConfigDir()/melonarc`）；
+  API 地址默认 `127.0.0.1:7946`（`defaultAPIListen`）。GUI 没有命令行，因此显式覆盖
+  走 `MELONARC_DATA_DIR` / `MELONARC_API_ADDR`（预览脚本另有 `--data-dir` / `--api`）。
+  Rust 侧**拒绝非回环地址**，避免把明文 bearer 发到别的机器；请求目标还做了
+  字符集与长度校验，读应答有 4MiB 上界。
+- 核心没起来时不是白屏：错误只带类别码（`token_missing` / `core_unreachable` /
+  `unauthorized` / `no_bridge` / `api_error` / `bad_response`），顶部给多语言提示，
+  列出启动命令、当前 API 地址、令牌文件路径与一句技术细节，并有重试按钮。
+  任何一次成功请求都会把窗口自动恢复成在线。
+
+**5. Logo**
+
+- **Logo 已定稿**：蓝色渐变圆角底 + 加粗白色随手弧线 M（用户最终确认版）。
+  已替换 `src/assets/logo.png`，并重新生成 `src-tauri/icons/` 下的 32/128/256/512 PNG
+  与 `icon.ico`；简报里那张黑白磨砂版作废，仓库里不再有它。这仍是**位图占位**，
+  正式矢量重绘与多尺寸导出留待后续图标资产步骤。
+
+**6. 测试与验证件**
+
+- `test/` 下 36 条 `node --test` 用例：语言包键集/占位符/CJK 硬编码扫描、注册表约束、
+  版本四处一致、格式化、错误码映射、数据目录规则、真实核心集成（读五个端点 +
+  pin 切换再还原 + 断言应答里不含令牌）、以及无浏览器 DOM 挂载烟测
+  （六个页签、中英即时切换、离线提示）。
+
+### 关键决策及理由
+
+1. **用户约束一（组件化 + 设计令牌化）**：视觉参数全部收进 `tokens.css` 的语义层，
+   业务组件只带 class 名；`lib/dom.js` 干脆不提供 `style` 入口，从工具上堵住内联样式。
+   单测会扫 `src/` 里的 CJK 与远程资源引用，构建会检查语言包键集和页面引用文件是否齐备。
+   理由是防止「先写死几个颜色、以后改版要翻二十个文件」——动效与排版后续想改，
+   只需动令牌文件。
+2. **用户约束二（预留扩展位）**：注册表模块契约固定为
+   `{ id, icon, titleKey, order, mount(ctx) }`，注册时校验，挂载返回 `dispose`。
+   骨架里没有 `switch (panelId)`，也没有「概览特殊处理」；面板只拿到
+   `{ t, locale, api, core, root, navigate }`。传输层同样是注册表式的
+   `chooseBridge`（原生壳 → 预览代理 → 无通道），加传输不改面板。
+3. **用户约束三（i18n 先行）**：键值语言包在 `locales/<id>.json`，语言自称也进包，
+   `LOCALES` 只列 id；这样目录结构直接能加 ja/ko/de/es。全部文案走 `t(key)`，
+   唯一的例外是 `main.js` 在启动器本身崩掉时的一行 ASCII 兜底文本——那时语言包
+   还没读出来，写什么都得硬编码，所以选了不含界面文案用途的一行。构建与测试都会
+   拦「某个键只存在于一个语言」「源码里出现硬编码中文」。
+4. **用户约束四（一步一步来）**：只做三个真面板、只用一个写端点（pin），
+   规则树/匹配解释/日志/设置/流量曲线/托盘一概不碰，三个页签明确写占位。
+   先把骨架、令牌边界与语言架构建稳，后面每加一个功能都是「新增模块并注册」。
+5. **前端零依赖、构建手写**。本机 npm registry / crates.io / apt 全不通，拉不到
+   Vite、React 或任何 Tauri JS 包；与其把构建建立在一个装不上的依赖上，不如用
+   原生 ES module + 一段 100 行的零依赖构建脚本（`npm ci --offline` 已验证）。
+   Tauri 命令直接经 `window.__TAURI__`（或内部 IPC 回退）调用，不引入 JS 客户端包。
+   后续若引入打包器，只需替换 `scripts/build.mjs` 与 `frontendDist`，面板模块不用改。
+6. **Rust 侧手写回环 HTTP 客户端**。目标是本机明文 HTTP/1.1 + JSON，引入完整 HTTP 栈
+   会顺带拖进一套用不上的 TLS 配置和依赖树；用 `std::net::TcpStream` 写死
+   `Connection: close`、方法白名单、请求目标校验、超时与读上界，反而更容易审。
+7. **两个传输、一份错误分类**。原生壳与预览代理都不把令牌交给页面，错误码在
+   `src/api/errors.js` 里收敛成六个；只有「连不上」和「令牌不认」会改变全局状态，
+   某个端点 500 只是该面板自己显示读失败。这样核心一恢复，界面无需刷新就回来。
+8. **预览代理是开发件，不是分发路径**。它让版式和真数据能在浏览器里迭代，
+   但正式产物只经 Rust 壳；`README.md` 明确写了这一点。
+
+### 依赖登记（GPLv3 兼容）
+
+| 名称 | 版本 | 许可证 | 用途 |
+|---|---|---|---|
+| Tauri（`tauri`） | `2`（caret，精确版本由首次 `cargo build` 生成的 `Cargo.lock` 固定） | MIT 或 Apache-2.0 | 窗口、IPC、能力配置 |
+| `tauri-build` | `2`（同上） | MIT 或 Apache-2.0 | 构建期嵌入配置与图标 |
+| `serde` | `1`（同上） | MIT 或 Apache-2.0 | 命令应答的 `Serialize` 派生 |
+| 前端 JS 依赖 | 无 | — | `package-lock.json` 里只有根包 |
+| 系统运行库（Linux） | 由发行版提供 | WebKitGTK / GTK 等 LGPL 系 | Tauri 运行时动态链接，**不随仓库分发** |
+
+本机没有 crates.io 索引，无法预生成 `Cargo.lock` 或枚举 `tauri` 的全部传递依赖；
+首次联网构建后需要补一次完整许可证清单复核（见遗留问题）。Go 侧无新增依赖。
+
+### 当前状态
+
+- 前端构建链：`npm ci --offline` 通过；`npm run build` 通过（`dist/` 25 文件 / 147.5 KiB）；
+  构建会校验语言包键集一致、页面引用的文件都存在、无远程资源。
+- 前端测试：无核心时 `npm test` **34 通过 / 2 跳过 / 0 失败**（跳过的是需要真实核心的
+  两条，跳过原因写在用例上）；挂真实核心后 **36 通过 / 0 跳过 / 0 失败**。
+- 真实核心验证：用 `/tmp/arc/demo.conf` 起了 `melonarc-core`（数据目录
+  `/tmp/arc/data`，令牌文件 0600），经本地目标服务制造了真实流量：
+  `/v1/status` 报 `0.1.0-dev`、7 条规则、3 个策略组；`/v1/config` 报三个监听地址；
+  `/v1/inbound` 报累计接受 3、失败 2、规则拦截 1；`/v1/failures` 有
+  `example.invalid:80`（refused）与 `blocked.test:80`（rejected）两条真实记录。
+  预览代理 `/bridge/v1/status`、`/bridge/runtime` 及静态资源均 200；集成用例通过
+  `POST /v1/policies/select` 把 `manual` 切到另一成员、回读确认、再切回原值。
+  无浏览器 DOM 烟测覆盖六个页签、中→英即时切换、以及核心不可达时的中文提示。
+- Go 侧验收五连全绿，与阶段 12 完全一致、无回退：
+  `go build ./...`、`go vet ./...`、`gofmt -l .`（无输出）、
+  `go test -count=1 ./...` **1085 条目 / 1064 通过 / 21 跳过 / 0 失败**
+  （21 条仍是既有的 UDP/互通环境跳过，无新增跳过）、
+  `GOOS=windows go build ./cmd/... ./internal/...` 通过。
+- **未通过的验收项（如实记录）**：Tauri 原生窗口没能在 Xvfb :99 打开。本机既没有
+  `rustc` / `cargo`，也没有 `libwebkit2gtk-4.1-dev`，crates.io 与 apt 都不可达，
+  `cargo build` 无法执行；Rust 壳只以源码交付，未做本机编译验证。另外本机自带的
+  Chromium 在此沙箱里启动即 SIGTRAP，连 `about:blank` 都截不到图，所以**没有界面截图**；
+  证据改用上面的真实核心日志、预览代理应答、集成测试与无头挂载烟测。
+
+### 遗留问题
+
+- **Rust 壳未经编译**：`Cargo.lock` 尚未生成，传递依赖清单与许可证复核也还没做；
+  拿到有 Rust 工具链 + WebKitGTK 的机器后第一步应跑 `cargo build` 并把锁文件入库。
+  `tauri.conf.json`、能力文件、命令签名都只做过静态核对（JSON/TOML 语法已校验）。
+- **没有界面视觉留证**：与已定稿静态样板的像素级对齐（毛玻璃、密度、深浅色）
+  目前只靠令牌取值一致与 DOM 烟测，尚未用真实窗口截图核对。
+- **核心若配置了非默认 `data-dir`，GUI 会对不上**：GUI 不解析核心的 INI 配置文件
+  （那会把配置层耦合进界面），只能按同一默认规则找，或由用户设
+  `MELONARC_DATA_DIR` / 预览的 `--data-dir`。这是当前最可能踩到的使用缺口。
+- **API 地址同理**：核心配置里改了 `api-listen` 而 GUI 没设 `MELONARC_API_ADDR` 时
+  会连到默认的 `127.0.0.1:7946`。设置页（后续步骤）应把这两个值做成可见可改。
+- 令牌轮换后旧窗口会进入 `unauthorized` 状态，需要点一次重试；没有自动重读的
+  后台退避。面板轮询节拍写死 4~5 秒，除离线横幅外没有手动刷新按钮。
+- 三个占位页尚未实现；规则树、匹配解释、日志/审计/历史视图、流量曲线、系统托盘、
+  配置编辑与托盘启停都留待后续。
+- 只有 zh-CN 与 en 两个语言包；日/韩/德/西只是结构可加，内容还没有。
+- Windows / macOS 安装包未构建，Windows 实机验证与仓库根 README 的口径更新
+  （阶段 12 已挂账）仍未做。
+- Logo 仍是位图占位：正式矢量重绘、多尺寸与平台专用格式导出留待图标资产步骤。
+
+### 下一步计划
+
+1. **先补编译验证**：在有 Rust + WebKitGTK 的机器跑 `cargo build` 并在 Xvfb :99
+   打开窗口，连真实核心截图三个数据面板；提交 `Cargo.lock`，复核完整依赖许可证。
+2. 之后是规则页（`/v1/rules` + `/v1/rules/explain`）与日志页
+   （`/v1/history/events` + `/v1/audit`），都按「新增模块并注册」的方式接。
+3. 设置页把语言、主题、API 地址与数据目录做成可见可改，顺手消掉上面两条对不上的缺口。
+4. 再往后：连接页接 `/v1/history/connections` 与流量曲线、系统托盘、
+   Logo 矢量化与图标资产、Windows 构建与 README 口径更新。

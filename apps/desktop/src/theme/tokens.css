@@ -1,0 +1,164 @@
+/*
+ * Design tokens — the single source of visual truth for the desktop shell.
+ *
+ * Two layers live here:
+ *   1. primitives (palette, spacing scale, radii, type scale) — raw values;
+ *   2. semantics (surface, ink, accent, glass, motion) — what a component asks
+ *      for by meaning rather than by value.
+ *
+ * Components and panels are only allowed to read the semantic layer. Changing
+ * the look of the app means editing this file, not the components: no colour,
+ * spacing, radius, blur or duration may be written inline in JavaScript or in a
+ * panel stylesheet. Adding a language, a panel or a screen must not require a
+ * new value here either — the scale is deliberately small.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* ---------- primitives: palette ---------- */
+  --palette-melon-700: #0e6e40;
+  --palette-melon-500: #1d9e63;
+  --palette-melon-300: #b9dcc9;
+  --palette-melon-200: #dcefe2;
+  --palette-melon-100: #e8f3e4;
+  --palette-amber-600: #dd9426;
+  --palette-amber-700: #c07f13;
+  --palette-red-500: #cf4440;
+  --palette-ink-900: #16241c;
+  --palette-ink-600: #54645a;
+  --palette-ink-400: #84948a;
+  --palette-white: #ffffff;
+  --palette-glow-green: rgba(84, 190, 130, 0.5);
+  --palette-glow-sky: rgba(64, 150, 190, 0.32);
+  --palette-glow-sand: rgba(240, 200, 90, 0.28);
+
+  /* ---------- primitives: spacing scale ---------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+
+  /* ---------- primitives: radii ---------- */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+
+  /* ---------- primitives: type ---------- */
+  /* No web fonts and no vendor-specific family names: the app must render
+     identically offline, and the system UI font already covers CJK by
+     fallback on every supported platform. */
+  --font-sans: system-ui, sans-serif;
+  --font-mono: ui-monospace, monospace;
+  --text-xs: 11.5px;
+  --text-sm: 12.5px;
+  --text-base: 13.5px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 21px;
+  --text-2xl: 24px;
+  --weight-regular: 500;
+  --weight-bold: 700;
+  --weight-heavy: 800;
+  --leading-tight: 1.25;
+  --leading-normal: 1.6;
+  --tracking-tight: -0.2px;
+  --tracking-wide: 0.4px;
+
+  /* ---------- primitives: motion ---------- */
+  --duration-fast: 140ms;
+  --duration-base: 180ms;
+  --duration-slow: 280ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ---------- semantics: surface and ink ---------- */
+  --color-canvas-1: var(--palette-melon-200);
+  --color-canvas-2: var(--palette-melon-300);
+  --color-canvas-3: var(--palette-melon-100);
+  --color-surface: rgba(252, 255, 252, 0.78);
+  --color-surface-raised: rgba(255, 255, 255, 0.92);
+  --color-surface-card: rgba(255, 255, 255, 0.55);
+  --color-surface-card-hover: rgba(255, 255, 255, 0.82);
+  --color-surface-sidebar: rgba(127, 160, 140, 0.06);
+  --color-ink: var(--palette-ink-900);
+  --color-ink-muted: var(--palette-ink-600);
+  --color-ink-faint: var(--palette-ink-400);
+  --color-line: rgba(22, 52, 36, 0.12);
+  --color-chip: rgba(22, 52, 36, 0.07);
+
+  /* ---------- semantics: accent and state ---------- */
+  --color-accent: var(--palette-melon-500);
+  --color-accent-deep: var(--palette-melon-700);
+  --color-accent-soft: rgba(29, 158, 99, 0.12);
+  --color-on-accent: var(--palette-white);
+  --color-success: var(--palette-melon-500);
+  --color-warning: var(--palette-amber-700);
+  --color-warning-soft: rgba(221, 148, 38, 0.14);
+  --color-warning-border: rgba(192, 127, 19, 0.35);
+  --color-danger: var(--palette-red-500);
+  --color-danger-soft: rgba(207, 68, 64, 0.12);
+  --color-danger-border: rgba(207, 68, 64, 0.35);
+  --color-accent-border: rgba(29, 158, 99, 0.3);
+
+  /* ---------- semantics: glass ---------- */
+  --glass-blur: 26px;
+  --glass-saturate: 1.5;
+  --glass-border: rgba(255, 255, 255, 0.65);
+  --glass-shadow: 0 30px 80px rgba(16, 46, 30, 0.28), 0 4px 18px rgba(16, 46, 30, 0.14);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+  --glass-blur-soft: 12px;
+
+  /* ---------- semantics: layout ---------- */
+  --layout-sidebar: 216px;
+  --layout-header: 54px;
+  --layout-content-max: 1180px;
+  --layout-page-padding: var(--space-6);
+  --focus-ring: 0 0 0 3px var(--color-accent-soft);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-canvas-1: #0d1a13;
+    --color-canvas-2: #12291c;
+    --color-canvas-3: #0a141d;
+    --color-surface: rgba(19, 30, 24, 0.78);
+    --color-surface-raised: rgba(24, 38, 30, 0.94);
+    --color-surface-card: rgba(255, 255, 255, 0.045);
+    --color-surface-card-hover: rgba(255, 255, 255, 0.09);
+    --color-surface-sidebar: rgba(255, 255, 255, 0.02);
+    --color-ink: #e7f2ea;
+    --color-ink-muted: #a7bab0;
+    --color-ink-faint: #71857a;
+    --color-line: rgba(190, 230, 205, 0.13);
+    --color-chip: rgba(255, 255, 255, 0.08);
+    --color-accent: #35c37e;
+    --color-accent-deep: #5fd69a;
+    --color-accent-soft: rgba(53, 195, 126, 0.16);
+    --color-warning: #e0a83e;
+    --color-warning-soft: rgba(224, 168, 62, 0.16);
+    --color-warning-border: rgba(224, 168, 62, 0.38);
+    --color-danger: #e0655f;
+    --color-danger-soft: rgba(224, 101, 95, 0.16);
+    --color-danger-border: rgba(224, 101, 95, 0.38);
+    --color-accent-border: rgba(53, 195, 126, 0.34);
+    --glass-border: rgba(255, 255, 255, 0.14);
+    --glass-shadow: 0 30px 80px rgba(0, 0, 0, 0.55), 0 4px 18px rgba(0, 0, 0, 0.4);
+    --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 1ms;
+    --duration-base: 1ms;
+    --duration-slow: 1ms;
+  }
+}

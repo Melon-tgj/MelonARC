@@ -1,0 +1,8 @@
+# Build output and local tool state. Everything needed to rebuild is tracked.
+
+node_modules/
+dist/
+
+# Rust build output; Cargo.lock is tracked once it exists.
+src-tauri/target/
+src-tauri/gen/
