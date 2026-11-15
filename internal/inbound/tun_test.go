@@ -272,9 +272,18 @@ func TestTUNFakeIPPoolReusesAndSweeps(t *testing.T) {
 	tun := newTunEnv(t, TUNOptions{Handler: env.handler})
 	pool := tun.svc.dns
 
-	first := pool.allocate("One.Test")
-	again := pool.allocate("one.test.")
-	second := pool.allocate("two.test")
+	first, ok := pool.allocate("One.Test")
+	if !ok {
+		t.Fatal("the pool refused the first allocation")
+	}
+	again, ok := pool.allocate("one.test.")
+	if !ok {
+		t.Fatal("the pool refused a repeated name")
+	}
+	second, ok := pool.allocate("two.test")
+	if !ok {
+		t.Fatal("the pool refused a second name")
+	}
 	if first != again {
 		t.Fatalf("the same name got %s then %s", first, again)
 	}

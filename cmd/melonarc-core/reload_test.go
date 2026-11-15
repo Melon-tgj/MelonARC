@@ -33,6 +33,9 @@ type testCore struct {
 	// proxyAddr is the HTTP inbound the test sends connections through.
 	proxyAddr string
 	state     *daemonState
+	// reloader is the object behind state.reload. It is kept so a test can place
+	// a step between "the rebuild finished" and "the rebuild took effect".
+	reloader *reloader
 }
 
 // assembleCore loads the configuration file, builds every routing artefact in the
@@ -76,7 +79,7 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 	if err != nil {
 		t.Fatalf("buildDialers: %v", err)
 	}
-	registry, err := buildRegistry(cfg, dialers, nil)
+	registry, err := buildRegistry(cfg, dialers)
 	if err != nil {
 		t.Fatalf("buildRegistry: %v", err)
 	}
@@ -101,6 +104,7 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 		metrics:   metrics,
 		resolver:  resolver,
 		dialers:   dialers,
+		resolvers: inbound.NewResolverHolder(resolver),
 		version:   "test",
 		startedAt: time.Now(),
 		baseline:  &baseline,
@@ -108,7 +112,7 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 	}
 	level := new(slog.LevelVar)
 	level.Set(logLevel("error"))
-	state.reload = (&reloader{
+	reload := &reloader{
 		path:    cfg.Path,
 		handler: handler,
 		state:   state,
@@ -117,7 +121,8 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 		logger:  testLogger(),
 		subs:    subs,
 		ctx:     ctx,
-	}).reload
+	}
+	state.reload = reload.reload
 	startGroups(ctx, registry, testLogger())
 
 	srv, err := api.New(api.Options{Addr: "127.0.0.1:0", Provider: state, Version: "test", Logger: testLogger()})
@@ -147,6 +152,7 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 		tokenPath: tokenPath,
 		api:       srv,
 		state:     state,
+		reloader:  reload,
 	}
 	if len(services) > 0 {
 		core.proxyAddr = services[0].Addr()

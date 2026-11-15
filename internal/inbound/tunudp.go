@@ -25,6 +25,12 @@ type udpSession struct {
 	target   outbound.Target
 	assoc    *DatagramAssociation
 	lastUsed time.Time
+	// claimed is the name address this session holds a reference on, or the
+	// zero value when the destination was a literal address. The reference is
+	// taken when the session opens and given back when it ends, which is what
+	// keeps the token out of the allocator while the session can still send to
+	// it.
+	claimed ip4
 }
 
 // relayState is the TUN side of one shared association. One reader goroutine
@@ -59,10 +65,6 @@ func newUDPDispatcher(svc *TUNService, timeout time.Duration) *udpDispatcher {
 // handle forwards one datagram, opening a session on the first packet of a flow.
 func (d *udpDispatcher) handle(pkt ipv4Packet, seg udpSegment) {
 	flow := udpFlow{src: pkt.Src, dst: pkt.Dst, sport: seg.SrcPort, dport: seg.DstPort}
-	target, ok := d.svc.destination(pkt, seg.DstPort)
-	if !ok {
-		return
-	}
 	payload := append([]byte(nil), seg.Data...)
 
 	d.mu.Lock()
@@ -78,11 +80,19 @@ func (d *udpDispatcher) handle(pkt ipv4Packet, seg udpSegment) {
 	}
 	d.mu.Unlock()
 
+	// The lookup happens for a new session only. An existing session keeps
+	// sending to the destination it was opened for: the address is still
+	// mapped to that name because the session holds it.
+	target, claimed, ok := d.svc.destinationForSession(pkt, seg.DstPort)
+	if !ok {
+		return
+	}
 	source := flow.src.String() + ":" + strconv.Itoa(int(flow.sport))
 	assoc, err := d.svc.handler.Datagrams(d.svc.ctx,
 		Request{Target: target, Network: networkUDP, Protocol: protocolTUN}, source)
 	if err != nil {
 		d.svc.logger.Debug("tun udp destination could not be routed", "destination", target.String(), "error", err)
+		d.svc.releaseClaim(claimed)
 		return
 	}
 
@@ -90,6 +100,7 @@ func (d *udpDispatcher) handle(pkt ipv4Packet, seg udpSegment) {
 	if d.closed {
 		d.mu.Unlock()
 		assoc.Release()
+		d.svc.releaseClaim(claimed)
 		return
 	}
 	// A second packet of the same flow may have opened the session while the
@@ -99,6 +110,7 @@ func (d *udpDispatcher) handle(pkt ipv4Packet, seg udpSegment) {
 		winner, dest := existing.assoc, existing.target
 		d.mu.Unlock()
 		assoc.Release()
+		d.svc.releaseClaim(claimed)
 		if _, err := winner.Conn.WriteTo(payload, dest); err != nil {
 			d.remove(flow, existing)
 		}
@@ -112,6 +124,7 @@ func (d *udpDispatcher) handle(pkt ipv4Packet, seg udpSegment) {
 		target:   target,
 		assoc:    assoc,
 		lastUsed: d.svc.now(),
+		claimed:  claimed,
 	}
 	d.sessions[flow] = session
 	state := d.relays[assoc]
@@ -233,6 +246,7 @@ func (d *udpDispatcher) removeLocked(flow udpFlow, session *udpSession) {
 			delete(d.relays, session.assoc)
 		}
 	}
+	d.svc.releaseClaim(session.claimed)
 	session.assoc.Release()
 	d.svc.metrics.tunDatagramClosed()
 }
@@ -247,6 +261,7 @@ func (d *udpDispatcher) dropRelay(assoc *DatagramAssociation, state *relayState)
 	for flow, session := range state.sessions {
 		if d.sessions[flow] == session {
 			delete(d.sessions, flow)
+			d.svc.releaseClaim(session.claimed)
 			session.assoc.Release()
 			d.svc.metrics.tunDatagramClosed()
 		}
@@ -268,6 +283,7 @@ func (d *udpDispatcher) close() {
 	d.mu.Unlock()
 
 	for _, session := range sessions {
+		d.svc.releaseClaim(session.claimed)
 		session.assoc.Release()
 		d.svc.metrics.tunDatagramClosed()
 	}

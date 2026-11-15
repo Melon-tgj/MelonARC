@@ -64,10 +64,17 @@ type TUNOptions struct {
 	UDPTimeout time.Duration
 	Handler    *Handler
 	// Resolver answers intercepted DNS questions and, through the DIRECT
-	// dialer, every name a TUN destination maps to.
+	// dialer, every name a TUN destination maps to. It is the resolver the
+	// service starts with; a reload replaces it through Resolvers.
 	Resolver Resolver
-	Metrics  *Metrics
-	Logger   *slog.Logger
+	// Resolvers is the shared holder the service reads the current resolver
+	// from. The device is created once and never rebuilt by a reload, so the
+	// resolver it answers with has to be looked up per query. Nil wraps
+	// Resolver in a holder of its own, which is what a test wants and what a
+	// daemon without a reload would use.
+	Resolvers *ResolverHolder
+	Metrics   *Metrics
+	Logger    *slog.Logger
 
 	// Device is nil in production. It is an injection point, not a test branch:
 	// the packet loop never behaves differently because of it.
@@ -80,14 +87,14 @@ type TUNOptions struct {
 // third kind of inbound: HTTP and SOCKS5 accept sockets, this one accepts raw IP
 // packets and hands each destination to the same Handler pipeline.
 type TUNService struct {
-	dev      tunDevice
-	handler  *Handler
-	resolver Resolver
-	metrics  *Metrics
-	logger   *slog.Logger
-	local    ip4
-	mtu      int
-	now      func() time.Time
+	dev       tunDevice
+	handler   *Handler
+	resolvers *ResolverHolder
+	metrics   *Metrics
+	logger    *slog.Logger
+	local     ip4
+	mtu       int
+	now       func() time.Time
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -153,17 +160,21 @@ func NewTUN(opts TUNOptions) (*TUNService, error) {
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	resolvers := opts.Resolvers
+	if resolvers == nil {
+		resolvers = NewResolverHolder(opts.Resolver)
+	}
 	s := &TUNService{
-		dev:      dev,
-		handler:  opts.Handler,
-		resolver: opts.Resolver,
-		metrics:  opts.Metrics,
-		logger:   loggerOrDiscard(opts.Logger),
-		local:    toIP4(addr),
-		mtu:      mtu,
-		now:      now,
-		ctx:      ctx,
-		cancel:   cancel,
+		dev:       dev,
+		handler:   opts.Handler,
+		resolvers: resolvers,
+		metrics:   opts.Metrics,
+		logger:    loggerOrDiscard(opts.Logger),
+		local:     toIP4(addr),
+		mtu:       mtu,
+		now:       now,
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 	deviceMTU := dev.MTU()
 	if deviceMTU > 0 {
@@ -182,6 +193,11 @@ func NewTUN(opts TUNOptions) (*TUNService, error) {
 
 // Protocol names the listener for logs and metrics.
 func (s *TUNService) Protocol() string { return protocolTUN }
+
+// resolver returns the resolver a query must use right now. A reload replaces it
+// in the shared holder, which is the only way the DNS answer of a device that
+// was opened once can follow a configuration change.
+func (s *TUNService) resolver() Resolver { return s.resolvers.Load() }
 
 // Name reports the device the service owns.
 func (s *TUNService) Name() string { return s.dev.Name() }
@@ -251,7 +267,7 @@ func (s *TUNService) dispatch(raw []byte) {
 			s.logger.Debug("tun udp packet dropped", "error", err)
 			return
 		}
-		if seg.DstPort == 53 && s.resolver != nil {
+		if seg.DstPort == 53 && s.resolver() != nil {
 			// A lookup may take seconds. Keeping it off the read loop means one
 			// slow name cannot delay every TCP connection on the device.
 			query := append([]byte(nil), seg.Data...)
@@ -303,20 +319,34 @@ func (s *TUNService) writePacket(p []byte) error {
 	return err
 }
 
-// destination turns a packet's IP and port into the target the rule pipeline
-// sees. An address from the fake pool maps back to the name the DNS responder
-// handed out, so domain rules and the DIRECT resolver both see a name rather
-// than a token address.
-func (s *TUNService) destination(pkt ipv4Packet, port uint16) (outbound.Target, bool) {
-	if s.dns.isFake(pkt.Dst) {
-		name, ok := s.dns.nameFor(pkt.Dst)
-		if !ok {
-			s.logger.Debug("tun packet for an expired name address dropped", "address", pkt.Dst.String())
-			return outbound.Target{}, false
-		}
-		return outbound.Target{Host: name, Port: port}, true
+// destinationForSession turns a packet's IP and port into the target the rule
+// pipeline sees. An address from the fake pool maps back to the name the DNS
+// responder handed out, so domain rules and the DIRECT resolver both see a name
+// rather than a token address.
+//
+// A name address is claimed on the way, so the mapping cannot be reclaimed from
+// under a stream that is already carrying traffic to it. The claim is returned
+// rather than kept here: the session that opens owns it, and the one that ends
+// has to give it back. A zero value means the destination was a literal address
+// and there is nothing to release.
+func (s *TUNService) destinationForSession(pkt ipv4Packet, port uint16) (target outbound.Target, claimed ip4, ok bool) {
+	if !s.dns.isFake(pkt.Dst) {
+		return outbound.Target{Host: pkt.Dst.String(), Port: port}, ip4{}, true
 	}
-	return outbound.Target{Host: pkt.Dst.String(), Port: port}, true
+	name, ok := s.dns.claim(pkt.Dst)
+	if !ok {
+		s.logger.Debug("tun session for an expired name address dropped", "address", pkt.Dst.String())
+		return outbound.Target{}, ip4{}, false
+	}
+	return outbound.Target{Host: name, Port: port}, pkt.Dst, true
+}
+
+// releaseClaim gives back the reference destinationForSession took.
+func (s *TUNService) releaseClaim(addr ip4) {
+	if addr == (ip4{}) {
+		return
+	}
+	s.dns.release(addr)
 }
 
 // Close stops the packet loop, closes the device and drains the sessions and

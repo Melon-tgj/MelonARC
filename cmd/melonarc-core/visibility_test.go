@@ -116,7 +116,7 @@ FINAL,manual
 	if err != nil {
 		t.Fatalf("buildDialers: %v", err)
 	}
-	registry, err := buildRegistry(cfg, dialers, nil)
+	registry, err := buildRegistry(cfg, dialers)
 	if err != nil {
 		t.Fatalf("buildRegistry: %v", err)
 	}

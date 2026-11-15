@@ -156,7 +156,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("outbound is not usable:\n%w", err)
 	}
-	registry, err := buildRegistry(cfg, dialers, nil)
+	registry, err := buildRegistry(cfg, dialers)
 	if err != nil {
 		return fmt.Errorf("policy groups are not usable:\n%w", err)
 	}
@@ -182,7 +182,13 @@ func run(args []string) error {
 	// The device is opened after the socket listeners. If it fails, the
 	// listeners that are already serving are closed before the error is
 	// returned, so startup never leaves a half-enabled inbound layer behind.
-	tunSrv, err := startTUN(cfg.General, handler, resolver, metrics, logger)
+	//
+	// The resolver is handed over as a holder rather than as a value: the device
+	// outlives every configuration, while the resolver behind it does not. A
+	// reload swaps the resolver in the holder, so the DNS answers the device
+	// gives follow the file instead of staying at what startup read.
+	resolvers := inbound.NewResolverHolder(resolver)
+	tunSrv, err := startTUN(cfg.General, handler, resolvers, metrics, logger)
 	if err != nil {
 		closeInbounds(services, logger)
 		return fmt.Errorf("tun inbound is not usable:\n%w", err)
@@ -220,6 +226,7 @@ func run(args []string) error {
 		metrics:   metrics,
 		resolver:  resolver,
 		dialers:   dialers,
+		resolvers: resolvers,
 		version:   version,
 		startedAt: time.Now(),
 		baseline:  &baseline,
@@ -405,7 +412,11 @@ func startInbounds(g config.General, handler *inbound.Handler, metrics *inbound.
 // startTUN opens the device when the configuration asks for one. It is off by
 // default, and on the other platforms openDevice reports the missing driver
 // instead of the daemon starting without an inbound it was told to enable.
-func startTUN(g config.General, handler *inbound.Handler, resolver *dns.Resolver, metrics *inbound.Metrics, logger *slog.Logger) (*inbound.TUNService, error) {
+//
+// The resolver is taken as the shared holder, not as a value: the device is
+// created once, and the DNS answers it gives have to follow the configuration a
+// reload installs.
+func startTUN(g config.General, handler *inbound.Handler, resolvers *inbound.ResolverHolder, metrics *inbound.Metrics, logger *slog.Logger) (*inbound.TUNService, error) {
 	if !g.TUN.Enable {
 		return nil, nil
 	}
@@ -416,7 +427,7 @@ func startTUN(g config.General, handler *inbound.Handler, resolver *dns.Resolver
 		Routes:     g.TUN.Routes,
 		UDPTimeout: g.TUN.UDPTimeout,
 		Handler:    handler,
-		Resolver:   resolver,
+		Resolvers:  resolvers,
 		Metrics:    metrics,
 		Logger:     logger,
 	})
@@ -539,10 +550,11 @@ func buildDialers(cfg *config.Config, resolver *dns.Resolver, logger *slog.Logge
 // Each probing group gets its own prober bound to the group's url=, and that
 // prober reaches a member through the member's own outbound.
 //
-// carry holds the member each manual group was pinned to before the rebuild.
-// A reload passes what the running registry reports, so a subscription refresh
-// no longer silently moves a group the user chose by hand; startup passes nil.
-func buildRegistry(cfg *config.Config, dialers *outbound.Set, carry map[string]string) (*policy.Registry, error) {
+// Every manual group starts on its first member. Carrying a pin across a rebuild
+// is not part of the build any more: which member the user picked is only known
+// at the moment the new registry replaces the old one, so applySelections does it
+// there (see reloader.commit).
+func buildRegistry(cfg *config.Config, dialers *outbound.Set) (*policy.Registry, error) {
 	reg := policy.NewRegistry()
 	for _, name := range config.BuiltinTargets() {
 		if err := reg.AddLeaf(name); err != nil {
@@ -571,10 +583,8 @@ func buildRegistry(cfg *config.Config, dialers *outbound.Set, carry map[string]s
 		switch g.Type {
 		case config.GroupSelect:
 			// A manual group routes to the member the user picked and never
-			// probes, so it needs no prober. The carried pin is used only
-			// when the member still exists: a node a subscription dropped
-			// cannot be selected any more.
-			group, err = policy.NewSelect(g.Name, g.Members, carriedMember(g, carry))
+			// probes, so it needs no prober.
+			group, err = policy.NewSelect(g.Name, g.Members, "")
 		case config.GroupURLTest:
 			prober, perr := outbound.NewProber(g.URL, resolve)
 			if perr != nil {
@@ -598,25 +608,6 @@ func buildRegistry(cfg *config.Config, dialers *outbound.Set, carry map[string]s
 		}
 	}
 	return reg, nil
-}
-
-// carriedMember returns the member a rebuilt manual group should start on: the
-// one it was pinned to, if that member is still declared.
-//
-// An empty result means "use the first member", which is what a group that was
-// never pinned does. A pin whose node a subscription removed cannot be honoured
-// and is dropped here; reload reports which groups that happened to.
-func carriedMember(g config.Group, carry map[string]string) string {
-	previous, ok := carry[g.Name]
-	if !ok {
-		return ""
-	}
-	for _, member := range g.Members {
-		if member == previous {
-			return previous
-		}
-	}
-	return ""
 }
 
 // carriedSelections returns the state a rebuild has to preserve. A daemon that

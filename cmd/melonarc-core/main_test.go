@@ -81,7 +81,7 @@ FINAL,auto
 	if _, err := dialers.Dialer("later"); err != nil {
 		t.Fatalf("the second proxy has no dialer: %v", err)
 	}
-	registry, err := buildRegistry(cfg, dialers, nil)
+	registry, err := buildRegistry(cfg, dialers)
 	if err != nil {
 		t.Fatalf("buildRegistry: %v", err)
 	}
@@ -144,8 +144,8 @@ FINAL,manual
 }
 
 // TestBuildRegistryCarriesThePinnedMember checks the rule a reload relies on:
-// a rebuilt manual group starts on the member it was pinned to, and falls back
-// to its first member only when that member is no longer declared.
+// a pin is applied to the rebuilt manual group by name, and only when that
+// member is still declared; a group that decides on its own has no pin at all.
 func TestBuildRegistryCarriesThePinnedMember(t *testing.T) {
 	raw := `[General]
 log-level = error
@@ -173,8 +173,7 @@ FINAL,manual
 		t.Fatalf("buildDialers: %v", err)
 	}
 
-	carry := map[string]string{"manual": "beta", "auto": "beta", "gone": "alpha"}
-	registry, err := buildRegistry(cfg, dialers, carry)
+	registry, err := buildRegistry(cfg, dialers)
 	if err != nil {
 		t.Fatalf("buildRegistry: %v", err)
 	}
@@ -184,6 +183,14 @@ FINAL,manual
 	if !ok {
 		t.Fatal("the manual group was not registered")
 	}
+	// A rebuilt group starts on its first member: the pin is applied at the
+	// moment of the swap, not while the rebuild runs.
+	if got := manual.Active(); got != "alpha" {
+		t.Errorf("a freshly built manual group routes to %q, want its first member", got)
+	}
+
+	carry := map[string]string{"manual": "beta", "auto": "beta", "gone": "alpha"}
+	applySelections(carry, registry)
 	if got := manual.Active(); got != "beta" {
 		t.Errorf("manual group routes to %q, want the carried member beta", got)
 	}
@@ -198,11 +205,12 @@ FINAL,manual
 	}
 
 	// A pin whose member the configuration no longer lists cannot be honoured.
-	registry2, err := buildRegistry(cfg, dialers, map[string]string{"manual": "gamma"})
+	registry2, err := buildRegistry(cfg, dialers)
 	if err != nil {
 		t.Fatalf("buildRegistry with a stale pin: %v", err)
 	}
 	defer registry2.Close()
+	applySelections(map[string]string{"manual": "gamma"}, registry2)
 	stale, _ := registry2.Group("manual")
 	if got := stale.Active(); got != "alpha" {
 		t.Errorf("a stale pin left the group on %q, want the first member", got)

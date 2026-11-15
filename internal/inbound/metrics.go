@@ -66,6 +66,15 @@ type Snapshot struct {
 	// Rejected counts the requests a rule blocked on purpose. They are kept
 	// apart from Failures because a REJECT rule doing its job is not a fault.
 	Rejected uint64
+	// NameAddressExhausted counts the TUN DNS questions that were answered with
+	// SERVFAIL because the name address pool had nothing to hand out.
+	//
+	// It is its own counter rather than a Failure: a failure record describes a
+	// request the daemon could not carry, while this is a DNS answer that says
+	// "no address right now". It is deliberately not part of the /v1 view
+	// either — the wire contract of this stage is fixed — so it reaches the
+	// operator through the log line the responder writes once per episode.
+	NameAddressExhausted uint64
 	// FailureCapacity and FailureCount describe the failure record: how many
 	// entries it holds and how many it can hold.
 	FailureCapacity int
@@ -134,6 +143,9 @@ type Metrics struct {
 
 	failures atomic.Uint64
 	rejected atomic.Uint64
+	// nameAddressFailures counts the TUN DNS questions answered with SERVFAIL
+	// because the name address pool had nothing reclaimable.
+	nameAddressFailures atomic.Uint64
 
 	// up and down are the bytes every connection carried since startup. They
 	// only ever grow, which is what lets a sampler take a difference without
@@ -235,6 +247,16 @@ func (m *Metrics) tunDatagramClosed() {
 	m.tun.datagrams.Add(-1)
 }
 
+// nameAddressExhausted counts one TUN DNS question the pool could not serve.
+// It is the only record of a device whose clients are being told SERVFAIL
+// because every name address is leased or still in use.
+func (m *Metrics) nameAddressExhausted() {
+	if m == nil {
+		return
+	}
+	m.nameAddressFailures.Add(1)
+}
+
 // Record notes one request that was not carried.
 //
 // The category decides which counter moves; the record itself goes into the
@@ -295,11 +317,12 @@ func (m *Metrics) Snapshot() Snapshot {
 		return Snapshot{}
 	}
 	snap := Snapshot{
-		Protocols:       make([]ProtocolStats, 0, 3),
-		Failures:        m.failures.Load(),
-		Rejected:        m.rejected.Load(),
-		FailureCapacity: m.ring.capacity(),
-		FailureCount:    m.ring.len(),
+		Protocols:            make([]ProtocolStats, 0, 3),
+		Failures:             m.failures.Load(),
+		Rejected:             m.rejected.Load(),
+		NameAddressExhausted: m.nameAddressFailures.Load(),
+		FailureCapacity:      m.ring.capacity(),
+		FailureCount:         m.ring.len(),
 	}
 	// HTTP first, always: a snapshot that reorders itself is a snapshot a
 	// client cannot diff.

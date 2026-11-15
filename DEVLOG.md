@@ -28,6 +28,7 @@
 | 15 | 按外部评审修订的修复批（9 项） | 完成（QUIC 真实互通待环境复验） |
 | 16 | REALITY 握手改用锁版 uTLS + 薄适配 | 完成（Go 1147 / 1126 / 21 / 0） |
 | 17 | GUI 第三步：桌面壳托管核心进程 | 完成（Rust 壳仍未编译） |
+| 18 | 核心加固批 A：fake-IP 租约保留、重载统一提交点、TUN resolver 随重载 | 完成（Go 1155 / 1134 / 21 / 0） |
 
 ---
 
@@ -3525,3 +3526,203 @@ Go 1147 / 1126 / 21 / 0；前端离线 58 / 56 / 2 / 0、实时 58 / 58 / 0 / 0�
 3. 预览桥 query string 透传（小改动 + 一条实时用例），修完顺手把
    `/bridge/shell/*` 的等价性用例并进同一批。
 4. 视需要加窗口管理插件，让第二实例把已有窗口提到前台。
+
+---
+
+## 阶段 18 — 核心加固批 A：fake-IP 租约保留、重载统一提交点、TUN resolver 随重载（2026-11-15）
+
+范围：三项**核心侧**缺陷修复，纯 Go。前端与 Rust 壳（`apps/desktop`）一个字未改，
+`/v1` 字段与语义未改，`go.mod` / `go.sum` 未改，`spikes/` 与 `docs/` 未改。
+基线 HEAD `3a37ce7`（Go 1147 条目 / 1126 过 / 21 跳 / 0 败）。
+
+### 完成了什么
+
+**1. fake-IP 租约保留与池满的明确失败（`internal/inbound/tundns.go`）**
+
+- `nameAddress` 增加 `refs`，池的回收条件从「过期即回收」收紧为
+  **「过期且无会话引用」**。`allocate`、`sweep`、`nameFor` 三条路径遵守同一条规则，
+  所以清扫器不可能释放一个分配器会拒绝复用的地址。
+- 池满且无可回收地址时 `allocate` 返回 `(ip4{}, false)`，DNS 应答改给 **SERVFAIL**，
+  不再挑最早过期的映射改派。计数落在 `inbound.Metrics` 的新字段
+  `Snapshot.NameAddressExhausted`，日志按「一次告警、恢复时报一次」处理
+  （`dnsResponder.exhausted` 记录当前是否处于枯竭期，避免每个问题一行 Warn）。
+- **引用计数的口径**（本项要求写清）：
+  - **TCP**：`tcpStack.handle` 在 SYN 建立 flow 时 `claim(目的地址)`，
+    `tunTCPConn.Close`（`closeOnce` 内，defer）释放一次。**取在 SYN 而不是握手完成**：
+    SYN 已经指明目的地，从这一刻起这条流就属于那个名字；取在握手完成会让
+    「已回 SYN-ACK、ACK 还在路上」的几百微秒里地址可被改派，而这一小段恰恰是最难
+    用测试覆盖的窗口。代价是只发了 SYN 就消失的半开流会多压住一个 token 直到
+    `Close`（`tcpTimeWait` 或 abort），量级是个位数。
+  - **UDP**：`udpDispatcher.handle` 在**新建会话**时 `claim`，在
+    `removeLocked` / `dropRelay` / `close` 三条会话结束路径上 `release`。
+    每条路径都是同一次释放，所以「会话还在表里但没引用」这种状态不存在。
+  - 一次 `claim` 同时完成「查名 + 计数」（`dnsResponder.claim`），不是「先 `nameFor`
+    再计数」：两步之间清扫器可能刚好删掉一份刚过期的映射，那样会话会拿着一个
+    没人认领的地址继续发包。
+  - **过期但被引用**的 token 在 `nameFor` / `claim` 里仍然可读，`claim` 还会顺手续租：
+    「TTL = 无人使用的时间」比「TTL = 从发答案起的绝对寿命」更贴近这条流的需要，
+    否则一条长连接会在第 10 分钟被自己的租约掐死。
+- 回归测试（`internal/inbound/tundns_test.go`，全部用注入时钟 `svc.now`，零 sleep）：
+  ① `TestTUNFakeIPPoolRefusesToReassignALiveLease`：填满 253 个未过期租约 → 第 254 个
+  分配失败、返回零地址、253 个映射逐个核对一个都没变、池大小仍 253、计数器 1→2；
+  再经设备 DNS 路径问这个放不下的名字，断言 **rcode = SERVFAIL** 且既有映射仍不变。
+  ② `TestTUNFakeIPPoolKeepsALeaseInUse`：先让一个 UDP 会话占住 token，再把时钟推过
+  租约（其余 252 个租约仍新鲜）→ 清扫不回收、`nameFor` 仍可读、新名字分配失败；
+  会话结束（走 dispatcher 的移除路径，与写失败/关闭同一条）→ 引用归零且映射立即消失，
+  下一个名字**恰好**拿到这个被释放的地址（此时它是唯一的空位，所以断言是确定的）。
+  ③ `TestTUNFakeIPTCPStreamHoldsItsLease`：真实握手 → 流占住 token → 租约过期仍可解析、
+  拨号出去的是 `stream.test:443` 而不是 token → FIN + 上游关闭 → 引用与映射一起消失。
+  ④ 既有 `TestTUNFakeIPPoolReusesAndSweeps` 只改了 `allocate` 的两返回值签名，断言未变。
+
+**2. 重载统一提交点（`cmd/melonarc-core/reload.go`、`state.go`）**
+
+- `daemonState` 增加 `commitMu`：**重载的提交**与 **`SelectPolicy`** 共用这一把锁，
+  `mu`（RWMutex，供所有读视图）内嵌其下。`SelectPolicy` 现在整段
+  （取 registry → 读当前成员 → `Select` → 记审计）都在 `commitMu` 内。
+- `reloader.commit` 是唯一的换入点：读「提交那一刻仍在生效的 registry」的 pin →
+  `applySelections` 应用到新 registry → `droppedSelections` 当场算 → `handler.Replace`
+  → `state.install`（顺带更新 TUN 的 resolver 持有者，见第 3 项）。
+  `handler` 与 `state` 在同一个临界区内换入，顺序与旧实现一致（数据面先、状态后）。
+- `buildRegistry` **不再接受 `carry` 参数**，`carriedMember` 删除：pin 继承从
+  「构建期」整体搬到「提交期」，生产路径上只有一个地方应用 pin。
+  `ReloadView.SelectionDropped` 的语义与排序完全不变（仍是 `group: 原因` 的字典序列表）。
+- `reloader.beforeCommit` 是**测试同步点**（生产恒为 nil）：在「重建完成、换入未开始」
+  这一瞬间会合，测试据此把一次 pin 精确放进那个窗口。
+- 回归测试（`cmd/melonarc-core/reload_commit_test.go`）：
+  - `TestReloadKeepsAPinMadeWhileTheRebuildRuns`：重建完成 → 停住 → `SelectPolicy(beta)`
+    成功且**在旧 registry 上可见**（证明 pin 真的落在窗口内）→ 放行 → 新 registry 仍是
+    beta、`selection_dropped` 为空、规则数是新文件的 2 条、随后一条真实连接由 beta 承载。
+  - `TestReloadDropsAPinWhoseMemberIsGone`：同一个交错，但新文件已删掉 beta →
+    `selection_dropped` 恰好一条且说清「组 / 成员 / 退回到谁」、组落到 alpha、
+    再 pin beta 被 API 拒绝。
+  - **非 flaky 的口径**：交错由一对 channel 会合（`arrived` / `proceed` / `done`），
+    断言发生在「会合点已到达」之后，不依赖任何时延；`10s` 只作死锁保护，触发即
+    `t.Fatal` 而不是重试。`-count=10` 与 `-race -count=10` 各跑两轮全绿；
+    另有 `-run` 过滤下的 `-count=10 -race` 结果记在「当前状态」。
+
+**3. TUN DNS resolver 随重载更新（`internal/inbound/resolver.go`、`tun.go`、`tundns.go`、
+`cmd/melonarc-core/main.go`、`state.go`）**
+
+- 新增 `inbound.ResolverHolder`：`atomic.Pointer[Resolver]` 的极薄持有者，nil 接收者安全。
+  `TUNService` 不再保存 `resolver` 字段，只保存 `resolvers *ResolverHolder`，
+  `dispatch` 的 53 端口判断与 `tundns.handle` 的解析都改成**每次查询 `Load()` 一次**。
+- `TUNOptions.Resolvers` 是新的装配入口；`Resolver` 字段保留，`Resolvers == nil` 时
+  `NewTUN` 用它自建一个 holder（既有测试与「没有重载的进程」不受影响）。
+- `daemonState.resolvers` 持有同一个对象，`install` 在 `mu` 临界区内
+  `s.resolvers.Store(next.resolver)`：**API 快照与设备 DNS 的 resolver 同时换代**。
+  重载提交点因此不需要再多一步，也不会出现「API 说新的、设备还在用旧的」。
+- 回归测试：`internal/inbound/tunresolver_test.go`
+  `TestTUNDNSFollowsTheResolverHolder`（换 holder 前同名 NXDOMAIN、换后一条 A 记录，
+  且旧 resolver 不再被问）与 `TestTUNDNSQueryInFlightKeepsItsResolver`
+  （查询停在 resolver 里 → 换 holder → 放行：这条查询仍算旧 resolver 的，
+  下一条才走新的）；`cmd/melonarc-core/reload_commit_test.go`
+  `TestReloadRepointsTheDeviceResolver`（改 `[Host]` → 重载 → holder 给出新地址，
+  且与 `snapshot().resolver` 是同一个对象）。**能测到的层**：inbound 侧证明
+  「responder 用当前 holder」，cmd 侧证明「重载提交更新 holder」；
+  真实设备上「改配置 → 重载 → 内核客户端拿到新答案」这一条仍属真机验证项（见遗留）。
+
+### 关键决策及理由
+
+1. **租约三态而不是两态**。旧实现的隐含假设是「映射是缓存，随时可以换人」，
+   但 token 同时是**在途流的身份**：换人之后 `destination()` 会把旧流的包按新名字转发，
+   错得悄无声息。加上「有没有会话在用」这一维之后，缓存语义只对**没人用**的条目成立，
+   这正是可以安全回收的集合。
+2. **引用计数挂在会话上，不挂在包上**。按包计数会在两个包之间的空隙回到 0，
+   而地址恰恰是在那段空隙里被改派最危险；挂在会话上，计数区间与「这条流可能还会发包」
+   的区间完全重合。
+3. **池满就 SERVFAIL，不踢最旧**。三条路（踢最旧 / 拒绝新名字 / 扩池）里，
+   踢最旧是唯一会**在别人不知情的情况下改变语义**的一条：客户端拿到的地址还是那个，
+   但含义变了。拒绝新名字把代价放在「新名字暂时解析不了」，是唯一诚实的失败模式，
+   而且客户端会按 60s 的应答 TTL 自然重试。扩池不解决根因（只是把阈值推远），
+   留作下一步。
+4. **枯竭计数不进 `failure` 环、也不进 `/v1`**。failure 环的语义是「一次没能承载的请求」，
+   而这是一次 DNS 应答；把它混进去会让 `/v1/failures` 的读者以为有连接失败了。
+   进 `/v1/inbound` 需要给 `InboundStatsView` 加字段，那会改动本阶段明令冻结的契约，
+   因此计数只落在 `inbound.Metrics` 与日志里，**是否需要暴露单列为待决策**（见遗留）。
+5. **pin 继承搬到提交点，而不是给 `SelectPolicy` 加重试**。「提交后进行、发现被覆盖就再
+   pin 一次」能修表象，但会留下「用户看到的 ok 对应哪一代 registry」说不清的问题；
+   把唯一的写者（pin）与唯一的换代者（commit）放到同一把锁下，才让两种顺序成为**仅有的**
+   两种顺序。
+6. **提交锁挂在 `daemonState` 上，不新开一个协调器**。换代与 pin 都已经是 state 的操作，
+   多一个协调器只会多一个「谁先拿锁」的问题；`commitMu` 在 `mu` 之上、且没有任何路径反向
+   获取，锁序是单层的。
+7. **`handler` 与 `state` 同临界区换入，但不合并成一个指针**。合并需要把规则、registry、
+   resolver 全部塞进一个跨层对象，`inbound` 就得认识 `config`/`policy` 的全部字段，
+   与「api 不 import 内部包」同类的分层约束相悖。当前形态把窗口压到两次相邻的原子写，
+   而每个请求各自只读一次（`handler.load()` / `snapshot()`），所以**单个请求内部**
+   仍然只会看到一代；剩下的是「一个 API 请求与一个 TUN DNS 查询在相邻纳秒内读到相邻代」，
+   已记入遗留。
+8. **TUN 用持有者而不是重建 service**。设备、路由、用户态栈都是启动期资源，
+   重建等于一次重启；而 resolver 只被「问一个问题」这一瞬间需要。持有者把
+   「设备寿命」与「配置寿命」解耦，代价是每次查询一次原子读。
+9. **`beforeCommit` 钩子只存在于测试**，不进任何生产分支（生产恒 nil）。用 Sleep 制造
+   窗口的测试会在慢机器上假绿、在快机器上假红；channel 会合让「重建完成」与「换入开始」
+   成为两个可观测事件。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链 `~/sdks/go/bin` 的 Go 1.27.4，Linux/x86_64：
+
+```
+go build ./...                                       通过
+go vet ./...                                         通过
+gofmt -l .                                           无输出
+go test ./... -count=1 -v                            1155 条目 / 1134 通过 / 21 跳过 / 0 失败
+go test -race ./internal/inbound/ ./cmd/melonarc-core/  通过
+go test ./internal/inbound/ -run 'TestTUNFakeIP|TestTUNDNSFollows|TestTUNDNSQueryInFlight' -count=10 通过
+go test ./cmd/melonarc-core/ -run 'TestReloadKeepsAPin|TestReloadDropsAPin|TestReloadRepoints' -count=10 通过
+（上一行两组再加 -race -count=10 亦通过）
+GOOS=windows go build ./cmd/... ./internal/...       通过
+```
+
+- 逐项对基线（`3a37ce7`，1147/1126/21/0）：**条目 +8、通过 +8、跳过 ±0、失败 0**。
+  新增的 8 条：`internal/inbound` 5 条（池 3 + resolver 2）、`cmd/melonarc-core` 3 条。
+  21 条跳过与阶段 8/9/11 起的那一批**完全同一集合**：缺参考实现的互通 10 条、
+  未连接 `sendto` 被 seccomp 拒绝的 UDP 用例 9 条（`Direct` 3 + `SOCKS5` 4 + 回环中继 1 +
+  上游 UDP 1）、上游「UDP 被截断后改走 TCP」1 条（同一根因）、`TestTUNLinuxLoopback` 1 条
+  （需 CAP_NET_ADMIN）；无新增跳过。
+- 本阶段两笔本地提交（未推送）：`c4079a6`（租约保留 + SERVFAIL + resolver 持有者，`internal/inbound`）→
+  `66d2dd9`（重载提交点 + 设备 resolver 重指 + 三组回归用例，`cmd/melonarc-core`）。
+- `go.mod` / `go.sum` 零改动；本阶段没有新增依赖。
+- 前端与 Rust 壳零改动：`git status` 在 `apps/` 下无任何条目；前端测试基线
+  （离线 75/73/2/0、实时 75/75/0/0）本阶段未复跑，因为代码一字未动。
+- 行为对照（可复核）：
+  - 旧实现：第 254 个名字拿到「最早过期」的地址，旧名字后续包被按新名字转发；
+    新实现：第 254 个名字得到 SERVFAIL，253 个映射逐字节不变。
+  - 旧实现：重建期内的 pin 被重建开始时读到的值覆盖且无人报告；新实现：pin 生效或被
+    明确列入 `selection_dropped`。
+  - 旧实现：`[Host]` 改动后 TUN 侧仍用启动时的 resolver；新实现：提交后新查询走新的。
+
+### 遗留问题
+
+- **枯竭计数没有对外出口**：`NameAddressExhausted` 只在 `inbound.Metrics.Snapshot()` 与日志里。
+  要进 `/v1/inbound` 必须给 `InboundStatsView` 加字段，属于契约变更，本阶段按约束未做。
+  **建议单列为决策项**：是给 `/v1` 加可选字段（向后兼容但是契约变更），还是留待
+  「契约 v2」一次性处理。
+- **名字地址池仍是 /24（253 个）**，没有 LRU、没有按名分桶，也没有更大网段或 IPv6 侧方案。
+  池满时的正确行为现在有了，但「更容易池满」这件事没变（阶段 8 起的既有边界）。
+- **提交点是「两次相邻原子写」**：`handler.Replace` 与 `state.install` 在同一把锁内，
+  但不是一个指针。单个请求各自只读一次，因此不会看到跨代半状态；一个 API 请求与一个
+  TUN DNS 查询在相邻纳秒内仍可能读到相邻代。真要消灭这一点需要把「代数」提升为
+  跨层对象，属于架构级改动。
+- **提交锁假设进程内只有一个写入者**：`SelectPolicy` 与 `reload` 是仅有的两处。若将来
+  出现第三个写者（例如按连接自动 pin），必须同样经过 `commitMu`。
+- **TUN 重载只做到「内存设备 + holder」层**：真实 `/dev/net/tun` 上「改 `[Host]` →
+  `POST /v1/config/reload` → 内核里 `getaddrinfo` 拿到新答案」没有跑过（沙箱无
+  CAP_NET_ADMIN；`TestTUNLinuxLoopback` 仍需 `unshare -Urn`）。
+- **过期但被引用的 token 会续租**：一条长期空闲但没关闭的流可以让一个 token 一直不回收。
+  上界是该会话的空闲超时（`tun-udp-timeout` / TCP timewait），没有额外上限。
+- 阶段 8–17 的既有挂账照旧：Windows 实机（TUN / 系统代理 / 令牌文件）、Rust 壳编译、
+  QUIC 真实互通、REALITY UDP 证据、预览桥 query string、SQLite modernc 迁移评估、
+  `core.log` 无轮转、用户态 TCP 的 IPv6/乱序/窗口缩放。
+
+### 下一步计划
+
+1. **决策项先行**：枯竭计数是否进 `/v1`（`InboundStatsView` 加可选字段 vs 留待契约 v2）；
+   决定后若加，补一条 `internal/api` 的序列化用例即可，不动语义。
+2. 名字地址池扩容与 LRU：网段可配置（默认仍 /24）、按名字哈希分桶，并给池加
+   `容量 / 已用 / 枯竭次数` 的只读观测；扩容后应有一条「池满仍失败」的用例保留。
+3. 真机验证：Linux 有 CAP_NET_ADMIN 的机器上跑一遍「改 `[Host]` → 重载 → TUN 侧 DNS 生效」，
+   顺带补 Windows 侧（阶段 8 起一直挂着）。
+4. 若继续加固批：把「提交点」的两次写收敛成跨层代数对象（需先设计分层的边界，
+   不属小改）；以及为 `commitMu` 增加一个「第三个写者必须走提交点」的编译期或测试约束。

@@ -41,6 +41,26 @@ type daemonState struct {
 	// part of the snapshot so a reload can retire the set it replaced.
 	dialers *outbound.Set
 
+	// commitMu is the reload commit point. A reload takes it to read the pins
+	// in force and to swap the routing state in, and SelectPolicy takes it to
+	// write a pin. The two operations are therefore ordered against each other:
+	// a pin is either written before the swap (and inherited by the registry
+	// being installed) or after it (and written into that registry). Without
+	// this an API caller could be told "ok" for a switch that the reload, which
+	// read the old selections before the caller ran, silently overwrote.
+	//
+	// mu is nested inside it, never the other way round.
+	commitMu sync.Mutex
+
+	// resolvers is the holder the TUN inbound reads the current resolver from.
+	// The device is created once at startup, so the DNS answers it gives have to
+	// follow a reload through this pointer rather than through a field copied
+	// into the service. install updates it in the same critical section as the
+	// snapshot, which is what makes "the state and the device agree" true at
+	// every instant. Nil means no device was started, or a test that does not
+	// care; the field is then simply not updated.
+	resolvers *inbound.ResolverHolder
+
 	handler   *inbound.Handler
 	metrics   *inbound.Metrics
 	version   string
@@ -86,6 +106,11 @@ func (s *daemonState) snapshot() stateSnapshot {
 
 // install replaces the configuration and returns the previous one, so the
 // caller can stop whatever it was running.
+//
+// Everything a request can observe changes here, under one lock: the snapshot
+// the API serves from, and the resolver the TUN device answers DNS with. A
+// reload that installed only one of the two would leave the daemon describing a
+// configuration it is not running.
 func (s *daemonState) install(next stateSnapshot) stateSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -95,6 +120,7 @@ func (s *daemonState) install(next stateSnapshot) stateSnapshot {
 	}
 	s.cfg, s.program, s.registry, s.resolver, s.dialers =
 		next.cfg, next.program, next.registry, next.resolver, next.dialers
+	s.resolvers.Store(next.resolver)
 	return previous
 }
 
@@ -257,7 +283,15 @@ func (s *daemonState) Policies(context.Context) []api.PolicyView {
 // The refusals carry the reason a caller can act on — the group does not exist,
 // the group decides on its own, the member is not one of its members and here is
 // the list — because "400" alone would leave a CLI user guessing.
+//
+// The read of the registry and the write of the pin happen under the reload
+// commit lock: a reload that is installing a new registry at that moment either
+// has not started its swap yet (so it will inherit this pin) or has finished it
+// (so this pin goes into the new registry). A pin can no longer be written into
+// a registry that is about to be replaced.
 func (s *daemonState) SelectPolicy(_ context.Context, group, member string) (api.SelectView, error) {
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
 	registry := s.snapshot().registry
 	g, ok := registry.Group(group)
 	if !ok {

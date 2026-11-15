@@ -91,12 +91,13 @@ func (s *tcpStack) handle(pkt ipv4Packet) {
 			conn.sendSynAck() // a retransmitted SYN
 			return
 		}
-		target, ok := s.svc.destination(pkt, seg.DstPort)
+		target, claimed, ok := s.svc.destinationForSession(pkt, seg.DstPort)
 		if !ok {
 			s.mu.Unlock()
 			return
 		}
 		conn := newTunTCPConn(s, flow, target, seg)
+		conn.claimed = claimed
 		s.flows[flow] = conn
 		s.mu.Unlock()
 		s.svc.logger.Debug("tun tcp opening", "source", flow.src.String(), "destination", target.String())
@@ -194,7 +195,13 @@ type tunTCPConn struct {
 	stack  *tcpStack
 	flow   tcpFlow
 	target outbound.Target
-	logger *slog.Logger
+	// claimed is the name address this connection holds a reference on, or the
+	// zero value when the destination was a literal address. It is taken when
+	// the flow opens — the SYN already names the destination, and a hangover
+	// lease expiring mid-handshake must not move the connection — and given
+	// back exactly once, in Close.
+	claimed ip4
+	logger  *slog.Logger
 
 	mu         sync.Mutex
 	iss        uint32
@@ -582,6 +589,7 @@ func (c *tunTCPConn) CloseWrite() error {
 // kept briefly to answer the peer's final ACK.
 func (c *tunTCPConn) Close() error {
 	c.closeOnce.Do(func() {
+		defer c.stack.svc.releaseClaim(c.claimed)
 		c.mu.Lock()
 		established := c.state == tcpEstablished
 		finSent := c.finSent
