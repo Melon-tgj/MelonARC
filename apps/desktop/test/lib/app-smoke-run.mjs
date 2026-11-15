@@ -29,6 +29,25 @@ const answers = {
     api_address: "127.0.0.1:7946",
     data_dir: "/tmp/arc/data",
     token_path: "/tmp/arc/data/api-token",
+    settings_path: "/tmp/arc/melonarc/shell.json",
+  },
+  "/bridge/shell/status": {
+    state: "running",
+    pid: 5150,
+    started_at_unix_ms: 1_760_000_000_000,
+    restarts: 1,
+    detail: "",
+  },
+  "/bridge/shell/settings": {
+    settings_path: "/tmp/arc/melonarc/shell.json",
+    stored: { data_dir: "/tmp/arc/data", api_addr: "", core_path: "", core_config: "" },
+    effective: {
+      data_dir: "/tmp/arc/data",
+      api_addr: "127.0.0.1:7946",
+      core_path: "/opt/melonarc-core",
+      core_config: "/tmp/arc/data/melonarc.conf",
+    },
+    restart_required: false,
   },
   "/bridge/v1/status": {
     version: "0.1.0-dev",
@@ -126,11 +145,14 @@ const explainAnswer = {
 };
 
 const seen = [];
+const posted = [];
+const restartCalls = [];
 let offline = false;
 
 /** @type {(input: any, init?: any) => Promise<any>} */
-async function fakeFetch(input) {
+async function fakeFetch(input, init = {}) {
   const url = typeof input === "string" ? input : String(input?.href ?? input);
+  const method = String(init.method ?? "GET").toUpperCase();
   seen.push(url);
 
   for (const [id, catalog] of Object.entries(catalogs)) {
@@ -143,6 +165,28 @@ async function fakeFetch(input) {
 
   if (offline && url.includes("/bridge/")) {
     return reply(502, { proxied: false, error: { code: "core_unreachable", message: "connect ECONNREFUSED" } });
+  }
+
+  if (url.endsWith("/bridge/shell/settings") && method === "POST") {
+    const written = JSON.parse(init.body ?? "{}");
+    posted.push(written);
+    const next = {
+      ...answers["/bridge/shell/settings"],
+      stored: written,
+      restart_required: written.data_dir !== "" && written.data_dir !== "/tmp/arc/data",
+    };
+    return reply(200, next);
+  }
+
+  if (url.endsWith("/bridge/shell/restart")) {
+    restartCalls.push(method);
+    return reply(200, {
+      state: "starting",
+      pid: null,
+      started_at_unix_ms: null,
+      restarts: 1,
+      detail: "",
+    });
   }
 
   if (url.includes("/bridge/v1/rules/explain?")) return reply(200, explainAnswer);
@@ -211,6 +255,10 @@ async function main() {
   text = shell.textContent;
   assert.match(text, /Overview/, "switching the language relabels the navigation immediately");
   assert.match(text, /Core is running/, "the panel copy is translated too");
+  assert.match(text, /Core process/, "the shell's view of the process is its own card");
+  assert.match(text, /5150/, "the shell-reported process id is shown");
+  assert.match(text, /Automatic restarts/, "the automatic restart count is labelled");
+  assert.match(text, /Reported by the shell/, "the card says where the fact comes from");
   assert.doesNotMatch(text, /概览/, "no Chinese navigation label remains");
 
   const clickPanel = async (id) => {
@@ -295,23 +343,60 @@ async function main() {
 
   // --------------------------------------------------------------- settings
   await clickPanel("settings");
-  assert.match(shell.textContent, /MELONARC_DATA_DIR/, "the data directory override is visible");
-  assert.match(shell.textContent, /MELONARC_API_ADDR/, "the API address override is visible");
+  assert.match(shell.textContent, /Shell settings/, "the overrides card is titled from the locale pack");
+  assert.match(
+    shell.textContent,
+    /\/tmp\/arc\/melonarc\/shell\.json/,
+    "the settings file path replaces the old environment lines",
+  );
+  assert.match(
+    shell.textContent,
+    /MELONARC_DATA_DIR and MELONARC_API_ADDR win over this file/,
+    "the precedence between environment, file and defaults is stated",
+  );
   assert.match(shell.textContent, /\/tmp\/arc\/data/, "the effective data directory is shown");
   assert.match(shell.textContent, /GPLv3/, "the about block names the licence");
   assert.match(shell.textContent, /0\.1\.0/, "the about block shows the version");
 
   const dataInput = find(shell, (node) => node.attributes?.get?.("id") === "settings-data-dir");
   const apiInput = find(shell, (node) => node.attributes?.get?.("id") === "settings-api-addr");
-  assert.ok(dataInput && apiInput, "both overrides are editable");
+  const corePathInput = find(shell, (node) => node.attributes?.get?.("id") === "settings-core-path");
+  const coreConfigInput = find(shell, (node) => node.attributes?.get?.("id") === "settings-core-config");
+  assert.ok(dataInput && apiInput && corePathInput && coreConfigInput, "all four overrides are editable");
+  assert.equal(dataInput.value, "/tmp/arc/data", "the stored value is filled in from the shell");
+  assert.equal(corePathInput.value, "", "an unset override is an empty field");
+
   dataInput.dispatch("input", { target: { value: "/tmp/arc/other" } });
   apiInput.dispatch("input", { target: { value: "127.0.0.1:7947" } });
   const saveButton = find(shell, (node) => node.tagName === "button" && node.textContent === "Save");
   assert.ok(saveButton, "the save button exists");
   saveButton.dispatch("click");
   await tick();
-  assert.match(shell.textContent, /MELONARC_DATA_DIR=\/tmp\/arc\/other/, "the launcher line follows the saved value");
-  assert.match(shell.textContent, /Saved to the window settings/, "the save is confirmed");
+
+  assert.equal(posted.length, 1, "saving goes through the shell contract, not a local store");
+  assert.deepEqual(
+    posted[0],
+    {
+      data_dir: "/tmp/arc/other",
+      api_addr: "127.0.0.1:7947",
+      core_path: "",
+      core_config: "",
+    },
+    "the wire form is snake_case and an empty override stays empty",
+  );
+  assert.match(shell.textContent, /Saved to the settings file/, "the save is confirmed by the shell's answer");
+  assert.match(
+    shell.textContent,
+    /Restart the application to apply this/,
+    "a new data directory is flagged as needing a shell restart",
+  );
+
+  const restartCoreButton = find(shell, (node) => node.tagName === "button" && node.textContent === "Restart core");
+  assert.ok(restartCoreButton, "the core can be restarted without restarting the window");
+  restartCoreButton.dispatch("click");
+  await tick();
+  assert.deepEqual(restartCalls, ["POST"], "the restart goes to the shell");
+  assert.match(shell.textContent, /The core was restarted \(Starting\)/, "the state after a restart is named");
 
   const settingsLang = find(
     shell,
@@ -321,7 +406,7 @@ async function main() {
   settingsLang.dispatch("change", { target: { value: "zh-CN" } });
   await tick();
   assert.match(shell.textContent, /设置/, "the settings switch relabels the window immediately");
-  assert.doesNotMatch(shell.textContent, /Window settings/, "the English label is gone");
+  assert.doesNotMatch(shell.textContent, /Shell settings/, "the English panel label is gone");
 
   // Nothing in the DOM is a credential: the shell only ever shows its path.
   assert.doesNotMatch(shell.textContent, /Bearer /, "no bearer header is rendered");

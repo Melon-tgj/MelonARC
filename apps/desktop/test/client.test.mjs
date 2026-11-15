@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createApiClient } from "../src/api/client.js";
-import { chooseBridge, createHttpBridge, createNullBridge } from "../src/api/bridge.js";
+import { chooseBridge, createHttpBridge, createNullBridge, createTauriBridge } from "../src/api/bridge.js";
 import { ApiFailure, ErrorCode } from "../src/api/errors.js";
 
 /**
@@ -207,4 +207,114 @@ test("the shell wins over the preview server", async () => {
     },
   });
   assert.equal(brokenProbe.kind, "none");
+});
+
+// --------------------------------------------------------------- supervision
+
+const coreStatusWire = {
+  state: "crashed",
+  pid: 4242,
+  started_at_unix_ms: 1_760_000_000_000,
+  restarts: 3,
+  detail: "the core exited with status 1",
+};
+
+const shellSettingsWire = {
+  settings_path: "/home/melon/.config/melonarc/shell.json",
+  stored: { data_dir: "/tmp/arc/data", api_addr: "", core_path: "", core_config: "" },
+  effective: { data_dir: "/tmp/arc/data", api_addr: "127.0.0.1:7946", core_path: "/opt/melonarc-core", core_config: "/tmp/arc/data/melonarc.conf" },
+  restart_required: true,
+};
+
+test("the shell's process status keeps snake_case off the page", async () => {
+  const calls = [];
+  const bridge = createTauriBridge(async (command, args) => {
+    calls.push({ command, args });
+    if (command === "core_status" || command === "core_restart") return coreStatusWire;
+    if (command === "get_shell_settings") return shellSettingsWire;
+    if (command === "set_shell_settings") return { ...shellSettingsWire, stored: { ...shellSettingsWire.stored, ...args.values } };
+    return null;
+  });
+
+  assert.deepEqual(await bridge.coreStatus(), {
+    state: "crashed",
+    pid: 4242,
+    startedAtUnixMs: 1_760_000_000_000,
+    restarts: 3,
+    detail: "the core exited with status 1",
+  });
+  assert.equal((await bridge.coreRestart()).state, "crashed");
+
+  const settings = await bridge.shellSettings();
+  assert.equal(settings.settingsPath, "/home/melon/.config/melonarc/shell.json");
+  assert.equal(settings.restartRequired, true);
+  assert.equal(settings.effective.coreConfig, "/tmp/arc/data/melonarc.conf");
+
+  const saved = await bridge.saveShellSettings({ dataDir: "/tmp/arc/other", apiAddr: "", corePath: "", coreConfig: "" });
+  assert.equal(saved.stored.dataDir, "/tmp/arc/other", "the answer comes back in the page's names");
+  assert.equal("data_dir" in saved.stored, false, "no snake_case key reaches a panel");
+  assert.deepEqual(calls.at(-1), {
+    command: "set_shell_settings",
+    args: { values: { data_dir: "/tmp/arc/other", api_addr: "", core_path: "", core_config: "" } },
+  });
+});
+
+test("the preview bridge answers the same four questions over HTTP", async () => {
+  const seen = [];
+  const bridge = createHttpBridge({
+    fetchImpl: async (url, init = {}) => {
+      const method = init.method ?? "GET";
+      seen.push({ url, method, body: init.body ?? null });
+
+      if (url.endsWith("/shell/status") || url.endsWith("/shell/restart")) {
+        return { ok: true, status: 200, json: async () => coreStatusWire, text: async () => "" };
+      }
+      if (url.endsWith("/shell/settings")) {
+        // A write answers with the file as it now stands, exactly like the shell.
+        const payload = method === "POST" ? { ...shellSettingsWire, stored: JSON.parse(init.body) } : shellSettingsWire;
+        return { ok: true, status: 200, json: async () => payload, text: async () => "" };
+      }
+      return { ok: false, status: 404, json: async () => null, text: async () => "" };
+    },
+  });
+
+  assert.equal((await bridge.coreStatus()).pid, 4242);
+  assert.equal((await bridge.coreRestart()).state, "crashed");
+  assert.equal((await bridge.shellSettings()).restartRequired, true);
+  const saved = await bridge.saveShellSettings({ dataDir: "/tmp/x", apiAddr: "127.0.0.1:1", corePath: "", coreConfig: "" });
+  assert.equal(saved.stored.dataDir, "/tmp/x");
+
+  assert.deepEqual(
+    seen.map((call) => `${call.method} ${call.url}`),
+    [
+      "GET /bridge/shell/status",
+      "POST /bridge/shell/restart",
+      "GET /bridge/shell/settings",
+      "POST /bridge/shell/settings",
+    ],
+  );
+  assert.deepEqual(JSON.parse(seen.at(-1).body), {
+    data_dir: "/tmp/x",
+    api_addr: "127.0.0.1:1",
+    core_path: "",
+    core_config: "",
+  });
+});
+
+test("a transport without supervision says so instead of inventing a state", async () => {
+  const none = createNullBridge();
+  assert.equal(await none.coreStatus(), null);
+  assert.equal(await none.coreRestart(), null);
+  assert.equal(await none.shellSettings(), null);
+  assert.equal(await none.saveShellSettings({ dataDir: "" }), null);
+
+  const bare = { kind: "test" };
+  const api = createApiClient({ bridge: bare });
+  assert.equal(await api.coreStatus(), null);
+  assert.equal(await api.coreRestart(), null);
+  assert.equal(await api.shellSettings(), null);
+  assert.equal(await api.saveShellSettings({ dataDir: "/tmp/x" }), null);
+
+  const failing = { kind: "test", coreStatus: async () => { throw new Error("gone"); } };
+  assert.equal(await createApiClient({ bridge: failing }).coreStatus(), null, "a failure is null, not an invention");
 });

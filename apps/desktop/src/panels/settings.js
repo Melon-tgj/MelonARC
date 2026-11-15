@@ -1,36 +1,33 @@
 /**
- * Settings: the window's own overrides, the language switch and the about block.
+ * Settings: the four overrides the shell reads from its own file, the language
+ * switch and the about block.
  *
- * The two overrides are the environment variables the native shell reads when
- * it starts. The window cannot change the environment of the process it runs
- * in, so it keeps its own copy in local storage, shows what is in effect right
- * now, and prints the exact assignments a launcher needs on the next start.
- * Nothing here edits the core's configuration: that file belongs to the core,
- * and changing its data directory or listener needs a core restart.
+ * The overrides used to live in local storage, which only the window could see;
+ * they now live in `<config-home>/melonarc/shell.json`, which the shell reads at
+ * start-up and which is therefore the only copy that can change where the core
+ * is found. The window edits that file through the transport (`shellSettings` /
+ * `saveShellSettings`), so the same panel works in the native shell and in the
+ * preview bridge.
  *
- * The language switch is connected to the entry point the shell already owns:
- * it writes the same storage key as the header selector and asks that control
- * to change, so the whole window relabels immediately with no shell edit.
+ * Two different restarts are named separately and never merged into one
+ * sentence: data directory and API address are read once by the shell, and core
+ * path and configuration are read on every spawn.
+ *
+ * The language switch is not part of the file: it belongs to this window and is
+ * remembered in local storage, through the same entry point the header uses.
  */
 
 import { card, keyValues, notice, pageHead, pill } from "../components/common.js";
 import { LOCALES } from "../i18n/index.js";
 import { clear, el } from "../lib/dom.js";
-import {
-  DEFAULT_API_ADDR,
-  ENV_API_ADDR,
-  ENV_DATA_DIR,
-  clearSettings,
-  envLines,
-  readSettings,
-  saveSettings,
-  setLocale,
-  validateSettings,
-} from "../lib/gui-settings.js";
+import { readShellDraft, setLocale, validateSettings } from "../lib/gui-settings.js";
 import { APP_LICENSE, APP_VERSION } from "../version.js";
 
 /** Resolved against this module, so the build can copy `src/` verbatim. */
 const logoUrl = new URL("../assets/logo.png", import.meta.url).href;
+
+/** The empty overrides, used by Reset and by a first run. */
+const BLANK = Object.freeze({ dataDir: "", apiAddr: "", corePath: "", coreConfig: "" });
 
 export default {
   id: "settings",
@@ -40,84 +37,154 @@ export default {
 
   mount(ctx) {
     const runtimeSlot = el("div", { class: "stack" });
-    const messageSlot = el("span");
-    const envSlot = el("div", { class: "env-box" });
+    const shellSlot = el("div", { class: "stack" });
+    const saveMessage = el("span");
+    const coreMessage = el("span");
 
-    const stored = readSettings();
-    let draft = {
-      dataDir: stored.dataDir,
-      apiAddr: stored.apiAddr || DEFAULT_API_ADDR,
-    };
+    let view = null;
+    let draft = { ...BLANK };
     let disposed = false;
 
-    const dataInput = el("input", {
-      id: "settings-data-dir",
-      class: "field-input mono",
-      type: "text",
-      "aria-label": ctx.t("settings.field.datadir"),
-      autocomplete: "off",
-      spellcheck: "false",
-      onInput: (event) => {
-        draft.dataDir = String(event?.target?.value ?? "");
-      },
-    });
-    const apiInput = el("input", {
-      id: "settings-api-addr",
-      class: "field-input mono",
-      type: "text",
-      "aria-label": ctx.t("settings.field.api"),
-      autocomplete: "off",
-      spellcheck: "false",
-      onInput: (event) => {
-        draft.apiAddr = String(event?.target?.value ?? "");
-      },
-    });
-    dataInput.value = draft.dataDir;
-    apiInput.value = draft.apiAddr;
+    const inputs = {
+      dataDir: field("dataDir", "settings-data-dir", ctx.t("settings.field.datadir")),
+      apiAddr: field("apiAddr", "settings-api-addr", ctx.t("settings.field.api")),
+      corePath: field("corePath", "settings-core-path", ctx.t("settings.field.corepath")),
+      coreConfig: field("coreConfig", "settings-core-config", ctx.t("settings.field.coreconfig")),
+    };
 
-    /** @param {"ok" | "warn" | "bad" | "muted"} tone @param {string} text */
-    function showMessage(tone, text) {
-      clear(messageSlot);
-      messageSlot.append(pill({ text, tone, withDot: false }));
+    /**
+     * One text field bound to one draft key.
+     *
+     * The key is bound here rather than looked up from the event target: the
+     * field is the only thing that knows which override it edits, and a DOM
+     * shim is free to hand the handler a plain `{value}` target.
+     *
+     * @param {"dataDir" | "apiAddr" | "corePath" | "coreConfig"} key
+     * @param {string} id
+     * @param {string} label
+     */
+    function field(key, id, label) {
+      return el("input", {
+        id,
+        class: "field-input mono",
+        type: "text",
+        "aria-label": label,
+        autocomplete: "off",
+        spellcheck: "false",
+        onInput: (event) => {
+          draft[key] = String(event?.target?.value ?? "");
+        },
+      });
     }
 
-    function renderEnv() {
-      clear(envSlot);
-      for (const line of envLines(draft)) {
-        envSlot.append(el("code", { class: "env-line mono", text: line }));
-      }
+    /** @param {"ok" | "warn" | "bad" | "muted"} tone @param {string} text @param {HTMLElement} slot */
+    function showMessage(tone, text, slot) {
+      clear(slot);
+      slot.append(pill({ text, tone, withDot: false }));
     }
 
     function syncInputs() {
-      dataInput.value = draft.dataDir;
-      apiInput.value = draft.apiAddr;
-      renderEnv();
+      for (const key of Object.keys(inputs)) inputs[key].value = draft[key] ?? "";
     }
 
-    function save() {
+    /** The settings path, the restart warning and the priority note. */
+    function renderShellInfo() {
+      clear(shellSlot);
+      if (!view) {
+        shellSlot.append(
+          notice({
+            tone: "warn",
+            title: ctx.t("settings.unavailable.title"),
+            body: ctx.t("settings.unavailable.body"),
+          }),
+        );
+        return;
+      }
+
+      shellSlot.append(
+        el("p", { class: "faint" }, [
+          el("span", { text: `${ctx.t("settings.settingsfile")}: ` }),
+          el("span", { class: "mono", text: view.settingsPath || ctx.t("common.na") }),
+        ]),
+      );
+
+      if (view.restartRequired) {
+        shellSlot.append(
+          notice({ tone: "warn", title: ctx.t("settings.restart_required"), body: ctx.t("settings.restart_required.body") }),
+        );
+      }
+
+      shellSlot.append(
+        el("p", { class: "faint", text: ctx.t("settings.priority") }),
+      );
+    }
+
+    async function loadRuntime() {
+      const info = await ctx.api.runtime();
+      if (disposed) return;
+      const effective = info ?? {};
+      clear(runtimeSlot);
+      runtimeSlot.append(
+        keyValues([
+          { key: ctx.t("settings.effective.datadir"), value: effective.dataDir || ctx.t("common.na") },
+          { key: ctx.t("settings.effective.api"), value: effective.apiAddress || ctx.t("common.na") },
+          { key: ctx.t("settings.effective.token"), value: effective.tokenPath || ctx.t("common.na") },
+          { key: ctx.t("settings.effective.mode"), value: effective.mode || ctx.t("common.na") },
+        ]),
+      );
+    }
+
+    async function loadShell() {
+      const answer = await ctx.api.shellSettings();
+      if (disposed) return;
+      view = answer;
+      draft = readShellDraft(answer, { blank: BLANK });
+      syncInputs();
+      renderShellInfo();
+    }
+
+    async function save() {
       const checked = validateSettings(draft);
       if (checked.errorKey) {
-        showMessage("bad", ctx.t(checked.errorKey));
+        showMessage("bad", ctx.t(checked.errorKey), saveMessage);
         return;
       }
       draft = checked.values;
+
+      const saved = await ctx.api.saveShellSettings(draft);
+      if (!saved) {
+        // Nothing is claimed that did not happen: the file is untouched, or the
+        // shell refused a value the window's own check let through.
+        showMessage("bad", ctx.t("settings.error.write"), saveMessage);
+        return;
+      }
+      view = saved;
+      draft = readShellDraft(saved, { blank: BLANK });
       syncInputs();
-      const persisted = saveSettings(draft);
-      showMessage(
-        persisted ? "ok" : "bad",
-        ctx.t(persisted ? "settings.saved" : "settings.error.storage"),
-      );
+      renderShellInfo();
+      showMessage("ok", ctx.t("settings.saved"), saveMessage);
     }
 
-    function reset() {
-      const cleared = clearSettings();
-      const fresh = readSettings();
-      draft = { dataDir: fresh.dataDir, apiAddr: fresh.apiAddr || DEFAULT_API_ADDR };
+    async function reset() {
+      const saved = await ctx.api.saveShellSettings({ ...BLANK });
+      if (!saved) {
+        showMessage("bad", ctx.t("settings.error.write"), saveMessage);
+        return;
+      }
+      view = saved;
+      draft = { ...BLANK };
       syncInputs();
-      showMessage(
-        cleared ? "muted" : "bad",
-        ctx.t(cleared ? "settings.reset.done" : "settings.error.storage"),
-      );
+      renderShellInfo();
+      showMessage("muted", ctx.t("settings.reset.done"), saveMessage);
+    }
+
+    async function restartCore() {
+      const answer = await ctx.api.coreRestart();
+      if (!answer) {
+        showMessage("bad", ctx.t("settings.core.restart.failed"), coreMessage);
+        return;
+      }
+      showMessage("ok", ctx.t("settings.core.restarted", { state: ctx.t(stateKey(answer.state)) }), coreMessage);
     }
 
     const langSelect = el(
@@ -140,30 +207,12 @@ export default {
     );
     langSelect.value = ctx.locale;
 
-    async function loadRuntime() {
-      const info = await ctx.api.runtime();
-      if (disposed) return;
-      const effective = info ?? {};
-      clear(runtimeSlot);
-      runtimeSlot.append(
-        keyValues([
-          { key: ctx.t("settings.effective.datadir"), value: effective.dataDir || ctx.t("common.na") },
-          { key: ctx.t("settings.effective.api"), value: effective.apiAddress || ctx.t("common.na") },
-          { key: ctx.t("settings.effective.token"), value: effective.tokenPath || ctx.t("common.na") },
-          { key: ctx.t("settings.effective.mode"), value: effective.mode || ctx.t("common.na") },
-        ]),
-      );
-    }
-
     /**
-     * @param {{ label: string, hint: string, env: string, input: HTMLElement, id: string }} spec
+     * @param {{ id: string, label: string, hint: string, input: HTMLElement }} spec
      */
-    function field(spec) {
+    function labelledField(spec) {
       return el("div", { class: "field" }, [
-        el("label", { class: "field-label", for: spec.id }, [
-          el("span", { text: spec.label }),
-          el("code", { class: "mono", text: spec.env }),
-        ]),
+        el("label", { class: "field-label", for: spec.id }, [el("span", { text: spec.label })]),
         spec.input,
         el("p", { class: "faint", text: spec.hint }),
       ]);
@@ -176,19 +225,29 @@ export default {
         title: ctx.t("settings.overrides"),
         children: el("div", { class: "stack" }, [
           el("div", { class: "form-grid" }, [
-            field({
+            labelledField({
               id: "settings-data-dir",
               label: ctx.t("settings.field.datadir"),
               hint: ctx.t("settings.field.datadir.hint"),
-              env: ENV_DATA_DIR,
-              input: dataInput,
+              input: inputs.dataDir,
             }),
-            field({
+            labelledField({
               id: "settings-api-addr",
               label: ctx.t("settings.field.api"),
               hint: ctx.t("settings.field.api.hint"),
-              env: ENV_API_ADDR,
-              input: apiInput,
+              input: inputs.apiAddr,
+            }),
+            labelledField({
+              id: "settings-core-path",
+              label: ctx.t("settings.field.corepath"),
+              hint: ctx.t("settings.field.corepath.hint"),
+              input: inputs.corePath,
+            }),
+            labelledField({
+              id: "settings-core-config",
+              label: ctx.t("settings.field.coreconfig"),
+              hint: ctx.t("settings.field.coreconfig.hint"),
+              input: inputs.coreConfig,
             }),
           ]),
           el("div", { class: "row" }, [
@@ -197,21 +256,22 @@ export default {
               type: "button",
               dataset: { variant: "primary" },
               text: ctx.t("settings.save"),
-              onClick: save,
+              onClick: () => void save(),
             }),
-            el("button", { class: "btn", type: "button", text: ctx.t("settings.reset"), onClick: reset }),
-            messageSlot,
+            el("button", { class: "btn", type: "button", text: ctx.t("settings.reset"), onClick: () => void reset() }),
+            saveMessage,
           ]),
-          notice({
-            tone: "info",
-            title: ctx.t("settings.restart.title"),
-            hints: [
-              { text: ctx.t("settings.restart.gui") },
-              { text: ctx.t("settings.restart.core") },
-            ],
-          }),
-          el("p", { class: "faint", text: ctx.t("settings.env.note") }),
-          envSlot,
+          shellSlot,
+          el("div", { class: "row" }, [
+            el("button", {
+              class: "btn",
+              type: "button",
+              text: ctx.t("settings.core.restart"),
+              onClick: () => void restartCore(),
+            }),
+            el("span", { class: "faint", text: ctx.t("settings.core.restart.hint") }),
+            coreMessage,
+          ]),
         ]),
       }),
       card({
@@ -224,8 +284,9 @@ export default {
       aboutBlock(ctx.t),
     );
 
-    renderEnv();
+    renderShellInfo();
     void loadRuntime();
+    void loadShell();
 
     return {
       dispose() {
@@ -234,6 +295,17 @@ export default {
     };
   },
 };
+
+/**
+ * The wire state as an i18n key. An unknown state falls back to the raw word.
+ *
+ * @param {string} state
+ */
+function stateKey(state) {
+  return ["starting", "running", "stopped", "crashed"].includes(state)
+    ? `core.state.${state}`
+    : "common.na";
+}
 
 /**
  * @param {(key: string) => string} t

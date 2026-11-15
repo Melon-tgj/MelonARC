@@ -39,7 +39,7 @@ The VLESS `xtls-rprx-vision` flow is rejected at configuration time and is not s
 | Linux x86_64 | Source build and tests pass in this workspace | `go build ./...`, `go vet ./...`, `go test ./...`, `gofmt` and the offline frontend suite run here. No installer, no packaged release, no long-running soak test. |
 | Windows x86_64 | **Cross-compile only** | `GOOS=windows go build ./cmd/... ./internal/...` succeeds; the external review also built `CGO_ENABLED=0` for both targets. Nothing has been executed natively: no installer, no runtime test, no device session. The Windows TUN device entry still returns "session not implemented". |
 | macOS arm64 | External review host only | The 2026-11-15 review ran on macOS arm64 with Go 1.27.4 and Node 24.20.0. It is not a declared release target. |
-| Desktop application | Frontend tested, native shell **not built** | The frontend offline and live-core suites pass. The Rust shell has not been compiled here (no `rustc`/`cargo`/WebKitGTK), `Cargo.lock` is absent, and there are no native window screenshots or native IPC tests. |
+| Desktop application | Frontend tested, native shell **not built** | The frontend offline and live-core suites pass. The Rust shell has not been compiled here (no `rustc`/`cargo`/WebKitGTK), `Cargo.lock` is absent, and there are no native window screenshots or native IPC tests. Its newest job — starting, supervising and stopping the core process — exists only as source: process hosting, the single-instance lock and the shell settings file have **not** been executed. |
 
 The development document's promise of a dual-platform installable build with a resident tray, working system proxy and TUN, every protocol connected and all performance figures measured is **not met**. Treat it as a future acceptance criterion, not a description of this tree.
 
@@ -51,7 +51,7 @@ The development document's promise of a dual-platform installable build with a r
 | TUN inbound | Linux: implemented in source, IPv4 user-space TCP only; Windows: device session unimplemented | Zero-window, retransmission, reordering, half-close and long-connection behaviour are not validated. |
 | System proxy | Takes over and restores a persisted snapshot | Restore returns only fields still equal to what this program wrote, and deletes values that were absent before. No validation of a settings-refresh broadcast to already-running Windows applications; the Linux backend covers the gsettings desktop environments only. |
 | Observation history | Bounded local tables, self-written file writer | Unknown schema or corrupt files are preserved unchanged with writes suspended. A migration to a maintained database driver is planned. |
-| Desktop frontend | Six registered panels, two locales, offline and live-core tests pass | Runs against a development preview bridge only; that bridge is development-only and must not ship in a production package. |
+| Desktop frontend | Six registered panels, two locales, offline and live-core tests pass | Runs against a development preview bridge only; that bridge is development-only and must not ship in a production package. The panel that reports the core's process state reads it from the shell, so in the browser it shows either the bridge's own child (with `--core`) or a real probe of a core somebody else started — never a pid the bridge invented. |
 
 ### Performance
 
@@ -62,7 +62,7 @@ The five performance targets in the development document **have not been measure
 - No native installer, tray, auto-start or signed artefacts on either release target.
 - No end-to-end evidence from a packaged installation through an inbound listener to an outbound protocol.
 - No long-run, public-network, multi-process or crash-recovery results.
-- The desktop shell's settings still require a restart of the GUI to take effect.
+- The desktop shell's data directory and API address still require a restart of the GUI to take effect; the core binary path and core configuration take effect on the next core start (the settings panel can restart the core).
 - No fuzz corpus, no independent CI interop job, and no version-linked machine reports for release tags.
 
 ## Source-level scope

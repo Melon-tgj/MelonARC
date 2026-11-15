@@ -146,6 +146,69 @@ export function createApiClient({ bridge }) {
         return null;
       }
     },
+
+    /**
+     * The process the shell hosts, as the shell sees it: state, pid, start time,
+     * automatic restarts and a technical detail. `null` means "this transport
+     * cannot answer" (or the shell did not) — the overview then hides the whole
+     * section instead of claiming the core is stopped.
+     *
+     * @returns {Promise<any>}
+     */
+    async coreStatus() {
+      if (typeof bridge?.coreStatus !== "function") return null;
+      try {
+        return await bridge.coreStatus();
+      } catch {
+        return null;
+      }
+    },
+
+    /**
+     * Stop the shell's child and start it again. The answer is a status object
+     * of the same shape, so the caller can render it without a second call.
+     *
+     * @returns {Promise<any>}
+     */
+    async coreRestart() {
+      if (typeof bridge?.coreRestart !== "function") return null;
+      try {
+        return await bridge.coreRestart();
+      } catch {
+        return null;
+      }
+    },
+
+    /**
+     * The shell settings file: the stored overrides, the values in effect and
+     * whether the difference needs a new shell.
+     *
+     * @returns {Promise<any>}
+     */
+    async shellSettings() {
+      if (typeof bridge?.shellSettings !== "function") return null;
+      try {
+        return await bridge.shellSettings();
+      } catch {
+        return null;
+      }
+    },
+
+    /**
+     * Write the four overrides. `null` means nothing was written; the caller
+     * must not claim a save it did not get.
+     *
+     * @param {{ dataDir?: string, apiAddr?: string, corePath?: string, coreConfig?: string }} values
+     * @returns {Promise<any>}
+     */
+    async saveShellSettings(values) {
+      if (typeof bridge?.saveShellSettings !== "function") return null;
+      try {
+        return await bridge.saveShellSettings(values);
+      } catch {
+        return null;
+      }
+    },
   };
 }
 

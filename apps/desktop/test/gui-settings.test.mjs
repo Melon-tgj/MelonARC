@@ -1,26 +1,22 @@
 /**
- * The window's own settings store.
+ * The window's own settings helpers.
  *
- * It is deliberately tiny: two strings, one validation rule and the language
- * key shared with the header switcher. These tests use a stub storage so they
- * never depend on a browser being present.
+ * Since this stage the four overrides belong to the shell and live in
+ * `shell.json`; what is left here is the check the panel runs before it sends
+ * anything, plus the language key shared with the header switcher. The tests
+ * therefore pin two things: that a bad value is refused *before* a request, and
+ * that the address rule still matches the shell's loopback-only rule.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  DEFAULT_API_ADDR,
-  ENV_API_ADDR,
-  ENV_DATA_DIR,
+  BLANK_DRAFT,
   LOCALE_KEY,
-  SETTINGS_KEY,
   SettingsError,
-  clearSettings,
-  envLines,
   isLoopbackAddress,
-  readSettings,
-  saveSettings,
+  readShellDraft,
   setLocale,
   validateSettings,
 } from "../src/lib/gui-settings.js";
@@ -36,40 +32,21 @@ function storage() {
   };
 }
 
-test("an absent or damaged record reads as the defaults", () => {
-  const store = storage();
-  assert.deepEqual(readSettings(store), { dataDir: "", apiAddr: "" });
+test("the draft reads the stored overrides and stays blank without them", () => {
+  assert.deepEqual(readShellDraft(null), BLANK_DRAFT);
 
-  store.setItem(SETTINGS_KEY, "not json");
-  assert.deepEqual(readSettings(store), { dataDir: "", apiAddr: "" });
-
-  store.setItem(SETTINGS_KEY, JSON.stringify({ dataDir: 7, apiAddr: null }));
-  assert.deepEqual(readSettings(store), { dataDir: "", apiAddr: "" });
-});
-
-test("a saved record survives a round trip and can be cleared", () => {
-  const store = storage();
-  const values = { dataDir: "/tmp/arc/data", apiAddr: "127.0.0.1:7947" };
-
-  assert.equal(saveSettings(values, store), true);
-  assert.deepEqual(readSettings(store), values);
-  assert.equal(clearSettings(store), true);
-  assert.deepEqual(readSettings(store), { dataDir: "", apiAddr: "" });
-});
-
-test("a storage that refuses writes reports the failure instead of throwing", () => {
-  const refusing = {
-    getItem: () => null,
-    setItem: () => {
-      throw new Error("denied");
-    },
-    removeItem: () => {
-      throw new Error("denied");
-    },
+  const view = {
+    stored: { dataDir: "/tmp/arc/data", apiAddr: "127.0.0.1:7947", corePath: "", coreConfig: "/tmp/arc/demo.conf" },
+    effective: { dataDir: "/tmp/arc/other", apiAddr: "127.0.0.1:7946", corePath: "/opt/core", coreConfig: "/tmp/arc/demo.conf" },
+    settingsPath: "/home/melon/.config/melonarc/shell.json",
+    restartRequired: true,
   };
-  assert.equal(saveSettings({ dataDir: "", apiAddr: "" }, refusing), false);
-  assert.equal(clearSettings(refusing), false);
-  assert.equal(saveSettings({ dataDir: "", apiAddr: "" }, null), false);
+  assert.deepEqual(readShellDraft(view), {
+    dataDir: "/tmp/arc/data",
+    apiAddr: "127.0.0.1:7947",
+    corePath: "",
+    coreConfig: "/tmp/arc/demo.conf",
+  });
 });
 
 test("only a loopback address with a usable port is accepted", () => {
@@ -83,24 +60,33 @@ test("only a loopback address with a usable port is accepted", () => {
   }
 });
 
-test("validation fills the default address and rejects a bad data directory", () => {
-  const trimmed = validateSettings({ dataDir: "  /tmp/arc/data  ", apiAddr: "  127.0.0.1:7947 " });
+test("validation trims the four values and keeps an empty address empty", () => {
+  const trimmed = validateSettings({
+    dataDir: "  /tmp/arc/data  ",
+    apiAddr: "  127.0.0.1:7947 ",
+    corePath: " /opt/melonarc-core ",
+    coreConfig: " /tmp/arc/demo.conf ",
+  });
   assert.equal(trimmed.errorKey, "");
-  assert.deepEqual(trimmed.values, { dataDir: "/tmp/arc/data", apiAddr: "127.0.0.1:7947" });
+  assert.deepEqual(trimmed.values, {
+    dataDir: "/tmp/arc/data",
+    apiAddr: "127.0.0.1:7947",
+    corePath: "/opt/melonarc-core",
+    coreConfig: "/tmp/arc/demo.conf",
+  });
 
-  const blank = validateSettings({ dataDir: "", apiAddr: "" });
+  const blank = validateSettings({ dataDir: "", apiAddr: "", corePath: "", coreConfig: "" });
   assert.equal(blank.errorKey, "");
-  assert.equal(blank.values.apiAddr, DEFAULT_API_ADDR);
-
-  assert.equal(validateSettings({ dataDir: "/tmp/ok", apiAddr: "10.0.0.1:80" }).errorKey, SettingsError.API_ADDR);
-  assert.equal(validateSettings({ dataDir: "/tmp/bad\nplace", apiAddr: "127.0.0.1:80" }).errorKey, SettingsError.DATA_DIR);
+  assert.equal(blank.values.apiAddr, "", "an empty address means 'no override', not 'use the default'");
 });
 
-test("the launcher lines carry the two environment variable names", () => {
-  assert.deepEqual(envLines({ dataDir: "/tmp/arc/data", apiAddr: "127.0.0.1:7947" }), [
-    `${ENV_DATA_DIR}=/tmp/arc/data`,
-    `${ENV_API_ADDR}=127.0.0.1:7947`,
-  ]);
+test("a value the shell would refuse is refused here first", () => {
+  const base = { dataDir: "/tmp/ok", apiAddr: "127.0.0.1:80", corePath: "", coreConfig: "" };
+
+  assert.equal(validateSettings({ ...base, apiAddr: "10.0.0.1:80" }).errorKey, SettingsError.API_ADDR);
+  assert.equal(validateSettings({ ...base, dataDir: "/tmp/bad\nplace" }).errorKey, SettingsError.DATA_DIR);
+  assert.equal(validateSettings({ ...base, corePath: "/opt/bad\ncore" }).errorKey, SettingsError.CORE_PATH);
+  assert.equal(validateSettings({ ...base, coreConfig: "/tmp/bad.conf\u0007" }).errorKey, SettingsError.CORE_CONFIG);
 });
 
 test("a language change writes the shared key and notifies the header control", () => {

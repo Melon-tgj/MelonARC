@@ -1,103 +1,90 @@
 /**
- * Settings owned by the window itself.
+ * The window's own settings helpers.
  *
- * These are not core settings: the core reads its own configuration file, and
- * the shell reads two environment variables when it starts. What the window can
- * own is a small record of those two values plus the chosen language, kept in
- * local storage so it survives a restart. The window never holds the token.
+ * Two very different things used to live here and are now separated:
  *
- * The language key is deliberately the same one the header switcher uses, so a
- * change made here and one made in the header converge on one value.
+ * * the four overrides (data directory, API address, core binary, core
+ *   configuration) belong to the *shell*, are stored in `shell.json`, and are
+ *   read and written through the transport. This module only normalises and
+ *   checks them before they are sent, because an invalid value must be caught
+ *   before a request is made — and the same rule is enforced again on the shell
+ *   side, which is the one that matters.
+ * * the language belongs to *this window* and stays in local storage under the
+ *   key the header switcher uses.
+ *
+ * A `melonarc.gui` record from an earlier build may still sit in local storage.
+ * It is deliberately ignored rather than migrated: the file is the single
+ * source of truth now, and migrating a stale copy into it would resurrect values
+ * the user never re-confirmed.
  */
 
-export const SETTINGS_KEY = "melonarc.gui";
 export const LOCALE_KEY = "melonarc.locale";
-export const ENV_DATA_DIR = "MELONARC_DATA_DIR";
-export const ENV_API_ADDR = "MELONARC_API_ADDR";
+
+/** The core's default listener, shown as a placeholder in the settings panel. */
 export const DEFAULT_API_ADDR = "127.0.0.1:7946";
 
 /** Error keys, not sentences: the panel translates them. */
 export const SettingsError = Object.freeze({
   DATA_DIR: "settings.error.datadir",
   API_ADDR: "settings.error.address",
+  CORE_PATH: "settings.error.corepath",
+  CORE_CONFIG: "settings.error.coreconfig",
 });
 
 /**
- * @param {Storage | null} [storage]
- * @returns {{ dataDir: string, apiAddr: string }}
+ * The four values as the panel edits them, all empty.
  */
-export function readSettings(storage = defaultStorage()) {
-  const empty = { dataDir: "", apiAddr: "" };
-  if (!storage) return empty;
-  try {
-    const raw = storage.getItem(SETTINGS_KEY);
-    if (!raw) return empty;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return empty;
-    return {
-      dataDir: typeof parsed.dataDir === "string" ? parsed.dataDir : "",
-      apiAddr: typeof parsed.apiAddr === "string" ? parsed.apiAddr : "",
-    };
-  } catch {
-    // A damaged record is the same as no record; the defaults still work.
-    return empty;
-  }
-}
+export const BLANK_DRAFT = Object.freeze({
+  dataDir: "",
+  apiAddr: "",
+  corePath: "",
+  coreConfig: "",
+});
 
 /**
- * Persist the two overrides. Returns false when storage is unavailable, so the
- * caller can say so instead of claiming a save that did not happen.
+ * The four values as the panel edits them. An empty string means "no override",
+ * which is also how the shell reads a missing key.
  *
- * @param {{ dataDir: string, apiAddr: string }} values
- * @param {Storage | null} [storage]
- * @returns {boolean}
+ * @param {any} view the answer of `shellSettings` (or `saveShellSettings`)
+ * @param {{ blank?: Record<string, string> }} [options]
+ * @returns {{ dataDir: string, apiAddr: string, corePath: string, coreConfig: string }}
  */
-export function saveSettings(values, storage = defaultStorage()) {
-  if (!storage) return false;
-  try {
-    storage.setItem(SETTINGS_KEY, JSON.stringify({
-      dataDir: String(values?.dataDir ?? ""),
-      apiAddr: String(values?.apiAddr ?? ""),
-    }));
-    return true;
-  } catch {
-    return false;
-  }
+export function readShellDraft(view, { blank = BLANK_DRAFT } = {}) {
+  const stored = view?.stored;
+  if (!stored) return { ...blank };
+  return {
+    dataDir: String(stored.dataDir ?? ""),
+    apiAddr: String(stored.apiAddr ?? ""),
+    corePath: String(stored.corePath ?? ""),
+    coreConfig: String(stored.coreConfig ?? ""),
+  };
 }
 
 /**
- * @param {Storage | null} [storage]
- * @returns {boolean}
- */
-export function clearSettings(storage = defaultStorage()) {
-  if (!storage) return false;
-  try {
-    storage.removeItem(SETTINGS_KEY);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Normalize and check the two values before they are stored.
+ * Normalize and check the four values before they are written.
  *
  * The address rule mirrors the shell: only a loopback host with a usable port
  * is accepted, because a bearer credential must never be sent off the machine.
- * An empty data directory means "use the core's default", which is valid.
+ * An empty value means "keep the default" for every field, so it is always
+ * valid. Paths refuse control characters: a newline in a path would end up in
+ * the settings file and then in a spawn argument.
  *
- * @param {{ dataDir?: string, apiAddr?: string }} input
- * @returns {{ values: { dataDir: string, apiAddr: string }, errorKey: string }}
+ * @param {{ dataDir?: string, apiAddr?: string, corePath?: string, coreConfig?: string }} input
+ * @returns {{ values: { dataDir: string, apiAddr: string, corePath: string, coreConfig: string }, errorKey: string }}
  */
 export function validateSettings(input) {
-  const dataDir = String(input?.dataDir ?? "").trim();
-  const apiAddr = String(input?.apiAddr ?? "").trim();
-  const values = { dataDir, apiAddr: apiAddr || DEFAULT_API_ADDR };
+  const values = {
+    dataDir: String(input?.dataDir ?? "").trim(),
+    apiAddr: String(input?.apiAddr ?? "").trim(),
+    corePath: String(input?.corePath ?? "").trim(),
+    coreConfig: String(input?.coreConfig ?? "").trim(),
+  };
 
-  if (/[\u0000-\u001f\u007f]/.test(dataDir)) {
-    return { values, errorKey: SettingsError.DATA_DIR };
-  }
-  if (!isLoopbackAddress(values.apiAddr)) {
+  const control = /[\u0000-\u001f\u007f]/;
+  if (control.test(values.dataDir)) return { values, errorKey: SettingsError.DATA_DIR };
+  if (control.test(values.corePath)) return { values, errorKey: SettingsError.CORE_PATH };
+  if (control.test(values.coreConfig)) return { values, errorKey: SettingsError.CORE_CONFIG };
+  if (values.apiAddr !== "" && !isLoopbackAddress(values.apiAddr)) {
     return { values, errorKey: SettingsError.API_ADDR };
   }
   return { values, errorKey: "" };
@@ -153,19 +140,6 @@ export function setLocale(id, doc = defaultDocument()) {
     return false;
   }
   return true;
-}
-
-/**
- * The two environment variable assignments a launcher needs on the next start.
- *
- * @param {{ dataDir: string, apiAddr: string }} values
- * @returns {string[]}
- */
-export function envLines(values) {
-  return [
-    `${ENV_DATA_DIR}=${values?.dataDir ?? ""}`,
-    `${ENV_API_ADDR}=${values?.apiAddr ?? ""}`,
-  ];
 }
 
 /** @returns {Storage | null} */

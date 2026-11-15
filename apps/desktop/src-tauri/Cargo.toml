@@ -5,7 +5,9 @@ description = "Desktop shell for the MelonARC core"
 authors = ["MelonARC contributors"]
 license = "GPL-3.0-or-later"
 edition = "2021"
-rust-version = "1.77"
+# Raised from 1.77 for the standard library file lock (`File::try_lock`, stable
+# since 1.89). The alternative was a lock crate, and this stage adds none.
+rust-version = "1.89"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

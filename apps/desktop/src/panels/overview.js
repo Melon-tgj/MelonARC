@@ -1,17 +1,39 @@
 /**
  * Overview: is the core running, where does it listen, what is it routing
- * through right now.
+ * through right now — and what does the shell say about the process it hosts.
  *
  * Reads /v1/status, /v1/config and /v1/policies. The three are fetched together
  * on every tick; a panel that failed to load one of them still shows the others,
  * because "the core is up but policies could not be read" is information.
+ *
+ * The supervision card is a different fact from the status card above it: the
+ * status card answers "does the API answer", the supervision card answers "what
+ * is the shell doing with the process". They are rendered side by side and never
+ * merged, because a core the shell cannot even spawn still has a state, and a
+ * core someone else started still answers. When the transport cannot report the
+ * process at all (`coreStatus` returns null), the whole card is left out.
  */
 
-import { card, empty, keyValues, pageHead, pill, stat } from "../components/common.js";
+import { card, empty, keyValues, notice, pageHead, pill, stat } from "../components/common.js";
 import { icon } from "../components/icons.js";
 import { clear, el } from "../lib/dom.js";
-import { formatDuration } from "../lib/format.js";
+import { formatDateTime, formatDuration } from "../lib/format.js";
 import { createPoll } from "../lib/poll.js";
+
+/** The four wire states, translated. An unknown state is shown as it arrived. */
+const STATE_KEYS = Object.freeze({
+  starting: "core.state.starting",
+  running: "core.state.running",
+  stopped: "core.state.stopped",
+  crashed: "core.state.crashed",
+});
+
+const STATE_TONES = Object.freeze({
+  starting: "warn",
+  running: "ok",
+  stopped: "warn",
+  crashed: "bad",
+});
 
 export default {
   id: "overview",
@@ -23,11 +45,30 @@ export default {
     const body = el("div");
     ctx.root.append(body);
 
-    async function render() {
-      const [status, config, policies] = await Promise.all([
+    let restarting = false;
+
+    async function restartCore() {
+      if (restarting) return;
+      restarting = true;
+      // The answer already is the new status, but the other cards are stale by
+      // then too, so the whole panel is rendered again either way.
+      const answer = await ctx.api.coreRestart();
+      restarting = false;
+      if (!answer) {
+        // Nothing to show but the failure: keep the previous picture and let the
+        // next tick pick up whatever the shell says now.
+        await render({ restartFailed: true });
+        return;
+      }
+      await render();
+    }
+
+    async function render({ restartFailed = false } = {}) {
+      const [status, config, policies, supervision] = await Promise.all([
         ctx.api.status().catch((error) => ({ error })),
         ctx.api.config().catch((error) => ({ error })),
         ctx.api.policies().catch((error) => ({ error })),
+        ctx.api.coreStatus(),
       ]);
 
       const failures = [status, config, policies].filter((value) => value?.error);
@@ -35,7 +76,18 @@ export default {
       if (failures.length < 3) ctx.core.noteSuccess();
 
       clear(body);
-      body.append(...build({ t: ctx.t, status, config, policies }));
+      body.append(
+        ...build({
+          t: ctx.t,
+          locale: ctx.locale,
+          status,
+          config,
+          policies,
+          supervision,
+          restartFailed,
+          onRestart: restartCore,
+        }),
+      );
     }
 
     const poll = createPoll(render, { every: 4000 });
@@ -50,9 +102,15 @@ export default {
 };
 
 /**
- * @param {{ t: (key: string, vars?: Record<string, string | number>) => string, status: any, config: any, policies: any }} input
+ * @param {{
+ *   t: (key: string, vars?: Record<string, string | number>) => string,
+ *   locale: string,
+ *   status: any, config: any, policies: any, supervision: any,
+ *   restartFailed: boolean,
+ *   onRestart: () => Promise<void>,
+ * }} input
  */
-function build({ t, status, config, policies }) {
+function build({ t, locale, status, config, policies, supervision, restartFailed, onRestart }) {
   const running = !status?.error;
   const groups = Array.isArray(policies?.policies) ? policies.policies : [];
   const proxies = Array.isArray(config?.proxies) ? config.proxies : [];
@@ -117,5 +175,83 @@ function build({ t, status, config, policies }) {
     ? el("p", { class: "faint" }, [el("span", { text: `${t("overview.config")}: ` }), el("span", { class: "mono", text: config.path })])
     : null;
 
-  return [pageHead({ title: t("overview.title"), subtitle: t("overview.subtitle") }), statusCard, stats, el("div", { class: "card-grid two" }, [listeners, outboundCard]), configLine];
+  const supervisionCard = supervision
+    ? buildSupervision({ t, locale, supervision, restartFailed, onRestart })
+    : null;
+
+  return [
+    pageHead({ title: t("overview.title"), subtitle: t("overview.subtitle") }),
+    statusCard,
+    supervisionCard,
+    stats,
+    el("div", { class: "card-grid two" }, [listeners, outboundCard]),
+    configLine,
+  ];
+}
+
+/**
+ * The process card: four states, pid, start time, restart count, and the way out
+ * of a stopped or crashed core.
+ *
+ * @param {{
+ *   t: (key: string, vars?: Record<string, string | number>) => string,
+ *   locale: string,
+ *   supervision: any,
+ *   restartFailed: boolean,
+ *   onRestart: () => Promise<void>,
+ * }} input
+ */
+function buildSupervision({ t, locale, supervision, restartFailed, onRestart }) {
+  const state = String(supervision.state ?? "");
+  const tone = STATE_TONES[state] ?? "muted";
+  const labelKey = STATE_KEYS[state];
+  const label = labelKey ? t(labelKey) : state || t("common.na");
+  const needsAttention = state === "stopped" || state === "crashed" || restartFailed;
+
+  const restart = el("button", {
+    class: "btn",
+    type: "button",
+    dataset: { variant: "primary" },
+    text: t("overview.supervision.restart"),
+    onClick: () => void onRestart(),
+  });
+
+  const blocked = notice({
+    tone: state === "crashed" || restartFailed ? "bad" : "warn",
+    title: restartFailed
+      ? t("overview.supervision.restart.failed")
+      : t(state === "crashed" ? "overview.supervision.crashed" : "overview.supervision.stopped"),
+    body: supervision.detail || t("common.na"),
+    actions: [restart],
+  });
+
+  return card({
+    title: t("overview.supervision"),
+    children: el("div", { class: "stack" }, [
+      el("div", { class: "status-row" }, [
+        el("div", { class: "headline" }, [
+          el("div", { class: "status-dot", dataset: { tone } }, [icon("power")]),
+          el("div", {}, [
+            el("div", { class: "title", text: label }),
+            el("div", { class: "sub", text: t("overview.supervision.note") }),
+          ]),
+        ]),
+      ]),
+      keyValues([
+        {
+          key: t("overview.supervision.pid"),
+          value: supervision.pid == null ? t("common.na") : String(supervision.pid),
+        },
+        {
+          key: t("overview.supervision.started"),
+          value:
+            supervision.startedAtUnixMs == null
+              ? t("common.na")
+              : formatDateTime(new Date(supervision.startedAtUnixMs).toISOString(), locale),
+        },
+        { key: t("overview.supervision.restarts"), value: String(supervision.restarts ?? 0) },
+      ]),
+      needsAttention ? blocked : null,
+    ]),
+  });
 }

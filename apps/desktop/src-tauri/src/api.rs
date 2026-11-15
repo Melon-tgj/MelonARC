@@ -10,6 +10,9 @@
 //! dependency tree and a TLS configuration that cannot ever be used here. What
 //! is needed instead is strictness — a short allow list of methods, one
 //! validated request target, `Connection: close`, bounded reads.
+//!
+//! The supervisor's readiness probe (`probe_status`) goes through this same
+//! client: one implementation, one place where the token is read.
 
 use crate::settings::{is_loopback_ip, Settings};
 use std::fs;
@@ -39,7 +42,10 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(code: &str, detail: impl Into<String>) -> Self {
+    /// `code` is part of the UI contract; `detail` is English technical text and
+    /// is never used as a sentence on screen. Other shell commands reuse this
+    /// shape so the page has one error format to handle.
+    pub(crate) fn new(code: &str, detail: impl Into<String>) -> Self {
         Self {
             code: code.to_string(),
             detail: detail.into(),
@@ -53,6 +59,7 @@ pub struct RuntimeInfo {
     pub api_address: String,
     pub data_dir: String,
     pub token_path: String,
+    pub settings_path: String,
 }
 
 #[tauri::command]
@@ -71,7 +78,25 @@ pub fn runtime_info(settings: tauri::State<Settings>) -> RuntimeInfo {
         api_address: settings.api_label.clone(),
         data_dir: settings.data_dir.display().to_string(),
         token_path: settings.token_path().display().to_string(),
+        settings_path: settings.settings_path.display().to_string(),
     }
+}
+
+/// Is a freshly spawned core ready to serve?
+///
+/// This is the same request the window makes to `/v1/status`: the same token
+/// file, the same verified loopback address, the same hand written client. The
+/// supervisor only needs a yes or no, but the reason a no happened is worth
+/// keeping, so the error carries it.
+pub(crate) fn probe_status(settings: &Settings) -> Result<(), ApiError> {
+    let reply = send(settings, "GET", "/v1/status", None)?;
+    if reply.status == 200 {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        "core_not_ready",
+        format!("/v1/status answered with {}", reply.status),
+    ))
 }
 
 fn send(

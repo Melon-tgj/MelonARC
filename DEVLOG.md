@@ -26,6 +26,8 @@
 | 13 | GUI 第一步：Tauri 骨架与架构 | 完成（Rust 壳未编译） |
 | 14 | GUI 第二步：规则 / 日志 / 设置 | 完成（Rust 壳未编译） |
 | 15 | 按外部评审修订的修复批（9 项） | 完成（QUIC 真实互通待环境复验） |
+| 16 | REALITY 握手改用锁版 uTLS + 薄适配 | 完成（Go 1147 / 1126 / 21 / 0） |
+| 17 | GUI 第三步：桌面壳托管核心进程 | 完成（Rust 壳仍未编译） |
 
 ---
 
@@ -3313,3 +3315,213 @@ REALITY 是 TCP，不受本机 `sendto` 限制，所以这一项是**真跑出�
 1. 在允许 UDP 的环境补 REALITY 的 UDP 证据，或明确把该组合标为不支持。
 2. 若要开放 uTLS 模板选择，按模板逐个复跑互通并登记对应关系。
 3. 沿用阶段 15 计划：QUIC 互通复验、Rust 壳编译、modernc 迁移评估、预览桥修复。
+
+## 阶段 17 — GUI 第三步：桌面壳托管核心进程（2026-11-15）
+
+范围：把桌面壳从「只持有令牌的 API 客户端」变成「核心进程的宿主」。
+启动时按壳侧设置拉起核心、监护它、崩溃后退避重启、退出时收尾；前端能看到壳报告的
+进程生命周期状态并手动重启核心；设置面板四个值改走壳契约；预览桥在同一契约下给出
+等价实现。阶段 15 的安全属性一条不丢：令牌只在壳/桥里，绝不下发前端；API 地址只接受
+校验过的回环地址；桥只在开发态、生产构建拒绝启动。
+
+开工前的基线：`HEAD = 422f842`（阶段 16 收尾），`git status` 干净；
+Go 1147 / 1126 / 21 / 0；前端离线 58 / 56 / 2 / 0、实时 58 / 58 / 0 / 0。
+`DEVLOG` 阶段 13/14/15 关于壳与设置的措辞已逐条对照，本阶段改动必须与之一致
+（尤其「令牌不进前端」「地址只回环」「桥是开发态工具」三条）。
+
+### 完成了什么
+
+**1. 壳设置文件（`src-tauri/src/settings.rs` 重写）**
+
+- 位置：`<config_home>/melonarc/shell.json`，即**默认**数据目录，与 `data_dir` 是否被改
+  无关。理由写在模块头上：如果文件名着另一个数据目录，再从那个目录读它就成了循环。
+- 四个键全部可选（`data_dir` / `api_addr` / `core_path` / `core_config`），空值与缺键等价，
+  写入是**稀疏**的——清空的字段从文件里消失，而不是变成 `""`。
+- 优先级：环境变量 `MELONARC_DATA_DIR` / `MELONARC_API_ADDR` > 设置文件 > 默认值。
+  环境层保留，因为开发与本机测试都靠它把壳指向一个临时目录。
+- 写入前逐个校验：`api_addr` 走与启动路径**同一个** `resolve_api_address`（回环判定按
+  IP 类型而非字符串前缀，`localhost` 解析一次且每个答案都必须回环），路径拒绝控制字符；
+  不合格直接报错、文件不动。写入是「同目录临时文件 + rename」，崩在中间不会留下半个文件。
+- 令牌永不写进这个文件；`read_overrides` 对未知键静默忽略（新版本写、旧版本也能启动）。
+- 核心二进制查找顺序：① 壳可执行文件同目录（`melonarc-core` / `.exe`）；
+  ② 文件里的 `core_path`；③ `PATH`。找不到时 `stopped` 的 detail 会把**找过的每个路径**
+  列出来——这是本阶段唯一能自证的排错手段。
+- 默认核心配置：`core_config` 未设时取 `<生效数据目录>/melonarc.conf`。
+- `data_dir` / `api_addr` 只在壳启动时读一次；`core_path` / `core_config` 在**每次 spawn 前**
+  重新解析（`core_targets`），所以「重启核心」能应用新值而不用重启壳。
+
+**2. 核心监护（新增 `src-tauri/src/core.rs`，约 700 行含测试）**
+
+- spawn 参数固定为 `melonarc-core -config <core_config> -api-listen <壳的 api_label>`；
+  **每次都传 `-api-listen`**，见决策 2。
+- 子进程 stdout 与 stderr 都追加到 `<data_dir>/core.log`：桌面启动没有控制台，丢掉核心
+  自己的诊断会让每次失败都不可解释。目前**不轮转**，已记入遗留问题。
+- 状态机四个线名：`starting` / `running` / `stopped` / `crashed`。规则：
+  - 启动 → 解析二进制与配置；缺任一项 → `stopped` + 说清缺什么、找过哪里；齐全 → spawn → `starting`；
+  - `starting`：监护线程每 500 ms 探一次——进程已经退出即失败；进程活着且
+    **令牌文件在**且 `GET /v1/status` 返回 200 → `running`（复用 `api` 的连接与
+    读令牌，`probe_status` 提升为 `pub(crate)`，没有第二套 HTTP 实现）；
+  - 15 s 没到 `running` 算一次失败：杀掉、计数、退避、重来；
+  - 意外退出：失败数 +1，退避 1s → 2s → 5s（封顶 5s）自动重启；
+  - 连续 5 次失败 → `crashed`，不再自动重启，detail 保留最后一次退出信息；
+  - 到达 `running` 清零失败计数。
+- `core_restart`：先礼后兵停掉当前子进程、清零失败计数、重新解析二进制与配置、spawn、
+  返回最新状态。
+- 状态对象 `{ state, pid, started_at_unix_ms, restarts, detail }`；没有子进程时 pid 与启动
+  时刻为 null（绝不编造），`restarts` 只数本会话的自动重启，detail 是英文技术文本。
+- 已经 `running` 的子进程**不再每 tick 探活**：退出由 `try_wait` 看住，健康度归窗口自己的
+  轮询。否则每个 500 ms 都会打一次 `/v1/status`。
+
+**3. 单实例（新增 `src-tauri/src/single.rs`）**
+
+- `File::try_lock`（Rust 1.89 稳定的标准库文件锁）锁 `<生效数据目录>/shell.lock`，
+  先 `create_dir_all`。句柄存进 Tauri state 活到进程结束，drop 即释放；进程被杀时内核
+  自动丢锁，不会留下需要手工清理的 pid 文件。
+- 抢不到（`WouldBlock`）→ 一行 stderr 说明「同一数据目录已有窗口在跑，本次启动到此为止」
+  然后退出；**其它**锁错误（权限等）只告警继续启动——那是文件问题，不是第二实例。
+
+**4. 命令面（`main.rs` + 两个新命令文件）**
+
+- 新增 `core_status` / `core_restart` / `get_shell_settings` / `set_shell_settings`，
+  与既有 `api_request` / `runtime_info` 一起注册，共六个。
+- `get_shell_settings` 返回 `{ settings_path, stored, effective, restart_required }`；
+  `stored` 是文件原样（未设为空串），`effective` 是按优先级算出来的、以及**现在**会用的
+  核心路径（找不到二进制则是空串）；`set_shell_settings` 校验后原子写文件，返回同一形状。
+- `set` 只写文件：不热切换运行中壳的 API 客户端，也不自动重启核心。`core_path` /
+  `core_config` 在下次 spawn（含 `core_restart`）生效。
+- `runtime_info` 保持兼容，只增补 `settings_path`。
+- 退出：`RunEvent::ExitRequested` 与 `RunEvent::Exit` 都挂同一个 `shutdown()`（幂等），
+  置 stopping 标志、终止子进程、状态落到 `stopped`。
+
+**5. 前端契约面（`src/api/bridge.js`、`client.js`）**
+
+- 三个桥都长齐 `coreStatus()` / `coreRestart()` / `shellSettings()` / `saveShellSettings()`：
+  Tauri 桥转 `invoke`，HTTP 桥走 `GET/POST /bridge/shell/{status,restart,settings}`，
+  空桥 `coreStatus` 返回 null（面板整段不渲染），其余与 `runtime()` 一样失败即 null。
+- **snake_case 只在桥里出现**：`coreStatusFromWire` / `shellSettingsFromWire` /
+  `shellSettingsToWire` 三个函数是唯一转换点，面板只看见 camelCase。
+- `client.js` 加四个同名方法，风格与 `runtime()` 一致，走桥不走 HTTP 端点。
+
+**6. 两个面板**
+
+- 概览：状态卡（「核心 API 答不答」）之后加一张**核心进程**卡（「壳眼里的进程」），
+  四态文案 + 进程号 + 启动时刻 + 自动重启次数，`stopped` / `crashed` / 重启失败时给出
+  detail 正文与一个「重启核心」按钮。它和状态卡并排、文案从不混用；
+  `coreStatus()` 返回 null 时整张卡不渲染。取数与 `status/config/policies` 同一个
+  `Promise.all` 批次，且是桥的本地调用，不打核心。
+- 设置：四个字段（数据目录 / API 地址 / 核心路径 / 核心配置）挂载时从
+  `get_shell_settings` 填充、保存走 `saveShellSettings`；显示设置文件路径；
+  `restart_required` 时给一条「需重启应用才生效」；核心路径与配置文件注明
+  「重启核心后生效」并给可直接点的「重启核心」。语言切换仍归本窗口（local storage），
+  旧 `melonarc.gui` 记录**故意不迁移**。
+- 样式只用语义 token，没有新增颜色/间距字面量；新增文案全部进两套语言包
+  （键集与占位符完全一致，构建与测试双重校验）。
+
+**7. 预览桥等价实现（`scripts/dev-preview.mjs` + `scripts/lib/supervisor.mjs`、
+`shell-settings.mjs`）**
+
+- 新增可选 `--core <path>` 与 `--core-config <path>`；**只有给了 `--core` 才托管**。
+  托管时用同样的参数（`-config` + `-api-listen <桥的生效地址>`）、同样的状态机与退避
+  （1s/2s/5s、连续 5 次 → crashed、15 s 启动预算、running 清零），桥收到 SIGINT/SIGTERM
+  先 SIGTERM、超时再 SIGKILL。
+- 不给 `--core` 时 `/bridge/shell/status` **真探一次**：被代理的核心 `/v1/status` 可达 →
+  `running`（pid 与启动时刻为 null，detail 写明「不是本桥启动的」），不可达 → `stopped`
+  并写明地址。绝不编造 pid 或时间。
+- `/bridge/shell/settings` 读写同一个 `shell.json`；桥的 `--data-dir` / `--api` 相当于
+  壳的环境层，生效值由桥自己的解析算。所有 `/bridge/shell/*` 都先过
+  `validateBridgeRequest`（Host/Origin 检查，POST 必须有 Origin），
+  `assertDevelopmentOnly` 一字未动。
+- 既有 `/bridge/runtime` 与代理行为无回退：`query string` 透传是阶段 13 起的已知缺口，
+  本阶段按任务书要求**明确不修**。
+
+### 关键决策及理由
+
+1. **设置在默认数据目录，不在生效数据目录。** 反过来读会自指：文件本身可能正是改
+   `data_dir` 的那一份。代价是「用户改了数据目录后，文件还在老地方」，所以设置面板
+   必须显示完整路径，而不是只说「设置文件」。
+2. **每次 spawn 都传 `-api-listen`。** 核心的配置文件里也有 `api-listen`，不传就会出
+   现「令牌发到 A、核心听在 B」的静默错配。命令行覆盖配置文件是核心自己定义的语义，
+   壳按「壳说听哪就听哪」使用；这条会出现在 DEVLOG，也会出现在设置面板的提示里。
+   附带约束：壳不解析核心 INI（阶段 13 的假设不变），所以非默认 `data_dir` /
+   `api_listen` 时仍要靠环境变量把壳指过去。
+3. **`core.log` 放生效数据目录**，与 `api-token`、`history.sqlite3` 同处：一个数据目录
+   就是一次会话的全部现场，拷走即可复现。不轮转是明确取舍——先有现场，再有整洁；
+   长期运行的轮转/大小上限记入遗留问题。
+4. **Unix 的 SIGTERM 走外部 `kill`。** 标准库没有信号 API，而本阶段的硬约束是零新增
+   crate（`libc` 也算）。`Command::new("kill").arg("-TERM").arg(pid)` 失败不致命：
+   三秒后 `Child::kill()` 仍然收尾。Windows 没有 SIGTERM 可发，直接 `Child::kill()`。
+5. **`rust-version` 1.77 → 1.89。** 单实例用的是标准库稳定不久的 `File::try_lock`；
+   另一条路是加一个锁 crate，与「零新增依赖」冲突。选前者，并把理由写进 `Cargo.toml`
+   注释与本记录。这是本阶段 `Cargo.toml` 唯一的改动。
+6. **锁文件放生效数据目录，第二实例直接退出。** 两个同样配置的窗口才会抢同一个
+   `api-token`，所以判据是数据目录而不是可执行文件。第二实例只打一行 stderr 就退出，
+   **不会**把已有窗口提到前台——那需要窗口管理插件，本阶段不加，记入遗留问题。
+7. **`restart_required` 比的是「文件现在」与「壳启动时那份文件」**，不是「文件」与
+   「生效值」。后者在设了环境变量时会立刻误报（文件没改，但生效值来自环境）。
+   两者的语义在无环境变量时等价，节点是「你刚保存的东西，运行中的壳还没用上」。
+   前端、Tauri 命令与预览桥三处用同一规则，宁可略保守也不三种说法。
+8. **前端地址预检比壳宽松，是故意的。** 面板只挡明显错误（非回环主机、端口不合法），
+   权威判定在壳里（`127.example.com` 这类壳会拒）。这样面板不必复刻 IP 解析，
+   代价是这类值会以「写入失败」而不是「地址不合法」呈现——记入遗留问题。
+9. **监护线程在持锁状态下做就绪探测**（最多一次连接超时 2 s + 读超时 5 s）。
+   代价是这段时间内 `core_status` 会等一下；换来的是一条线程、一个互斥量、
+   没有「探测结果与状态各说一套」的窗口。到达 `running` 后不再探测，影响只限启动期。
+10. **`starting` 也用于「已排期、还没起来」**（失败退避期间）。线名只有四个，
+    要么新增第五个状态，要么复用；`starting` + detail 里的「restarting in Ns」信息量足够，
+    前端四态文案也不必多一套。
+
+### 当前状态
+
+- **Rust 只交付源码，未编译**：本机没有 `rustc` / `cargo`（`~/.cargo` 不存在），也没有
+  WebKitGTK，crates.io 不可达。已做的是：逐个文件括号配平校验、逐条对照
+  `tauri` 2 / 标准库签名人工复核、把可能触发借用检查的写法改成明显安全的形态
+  （`tick` 里先取出 `try_wait` 结果再改状态）。**这不等于编译通过**，
+  沿用阶段 13/14/16 的挂账。
+- 前端构建：`npm run build` 通过，`dist/` 28 文件 / 208.3 KiB（语言包键集一致、
+  页面引用文件都存在、无远程资源三项校验在内）。
+- 前端离线测试（托管 Node 22.22.2，清代理环境变量 + 串行）：
+  **75 条目 / 73 通过 / 2 跳过 / 0 失败**（基线 58 / 56 / 2 / 0，+17 条目、+17 通过，
+  **零新增跳过**；2 条跳过仍是既有的「需真实核心」用例）。逐项对账：
+  - 新增 `bridge-contract.test.mjs` 4 条、`supervisor.test.mjs` 8 条（+12）；
+  - `client.test.mjs` 13 → 16（+3，三个桥的四问一致性）；
+  - `panels.test.mjs` 5 → 9（+4：四态文案与重启按钮、crashed → 重启 → Running、
+    空桥隐藏整段、无壳时的设置提示）；
+  - `gui-settings.test.mjs` 7 → 5（−2：环境变量行与本地存储读写两族用例随旧实现删除）。
+- 前端实时测试（系统 Node 24.22.1，`/tmp/arc/demo.conf` 重建的演示核心、真实令牌文件，
+  `MELONARC_TEST_API` / `MELONARC_TEST_DATA_DIR`）：**75 条目 / 75 通过 / 0 跳过 /
+  0 失败**（基线 58 / 58 / 0 / 0，同样全过）。
+- 桥契约实测（真跑 `dev-preview.mjs`，不是桩）：托管模式观测到 `starting` → `running`
+  （真实 pid 与启动时刻）；`POST /bridge/shell/restart` 后 pid 变化并回到 `running`；
+  `kill -9` 子进程后 detail 给出信号名并按 1s 退避拉回、`restarts` 变 1；
+  `--core` 指向不存在的路径 → `stopped`，pid/时刻为 null 且 detail 点名该路径；
+  设置读写往返一致（稀疏文件、`restart_required` 只在改了数据目录/地址时为真）、
+  非回环地址被 400 `bad_settings` 拒绝且文件未动、无 Origin 的 POST 403、错误方法 405；
+  无 `--core` 时状态与核心真实可达性一致、`restart` 返回 409 `not_managed`。
+- Go 侧零改动（本阶段不需要），验收五连无回退：`go build ./...`、`go vet ./...`、
+  `gofmt -l .`（无输出）、`GOOS=windows go build ./cmd/... ./internal/...` 通过；
+  `go test ./... -count=1 -v` **1147 条目 / 1126 通过 / 21 跳过 / 0 失败**，
+  与阶段 16 完全一致，21 条跳过是同一集合。
+- 命名红线：本阶段新增/修改的源码、测试与文档已扫描，无非开源商业产品名称。
+
+### 遗留问题
+
+- **Rust 壳仍未编译**（`cargo build`、`Cargo.lock`、原生窗口截图、真实 IPC 往返四条
+  全部待有工具链的机器）。本阶段的监护、单实例、设置文件写入、退出收尾都没有在
+  真实进程里跑过；能证明的只有前端契约、预览桥等价实现与纯函数单测。
+- **`core.log` 无轮转**，长期运行会无限增长。
+- **第二实例不会聚焦已有窗口**，只打印一行 stderr 退出（需要窗口管理插件）。
+- **预览桥的 `/bridge` 仍丢 query string**（阶段 13 起的既有缺口，本阶段按要求未碰）。
+- **前端地址预检比壳宽松**：`127.example.com:7946` 这类值会在壳侧被拒，界面呈现为
+  「写入失败」而不是「地址不合法」。
+- **`ExitRequested` 与 `Exit` 共用同一个收尾**：若有插件在 `ExitRequested` 阶段阻止退出，
+  核心已经被停掉了。当前没有这种插件，但这是一个已知耦合。
+- 沿用：QUIC 真实互通复验、SQLite modernc 迁移评估、REALITY UDP 证据。
+
+### 下一步计划
+
+1. 在有 `rustc` + WebKitGTK 的机器上首次编译，先跑通「壳拉起核心 → 页面看到 running →
+   关窗后子进程消失」这一条最短链路，再补单实例与 crashed 两态。
+2. 给 `core.log` 加大小上限或按次轮转（同一次运行一个文件即可）。
+3. 预览桥 query string 透传（小改动 + 一条实时用例），修完顺手把
+   `/bridge/shell/*` 的等价性用例并进同一批。
+4. 视需要加窗口管理插件，让第二实例把已有窗口提到前台。
