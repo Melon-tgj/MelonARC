@@ -137,11 +137,49 @@ func splitHostPort(scheme, hostport string) (string, int, error) {
 	if host == "" {
 		return "", 0, fail(scheme, "the address has no host")
 	}
+	if err := validateHost(scheme, host); err != nil {
+		return "", 0, err
+	}
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {
 		return "", 0, fail(scheme, "port %q is outside 1-65535", portText)
 	}
 	return host, port, nil
+}
+
+// maxHostLen bounds a host name: a DNS name is at most 253 bytes, and anything
+// longer is not a host this product could ever dial.
+const maxHostLen = 253
+
+// validateHost rejects a host that could not be dialled: the bytes that separate
+// the parts of a URL, whitespace, and control characters.
+//
+// A link is written by someone else and arrives over the network, so reaching the
+// parser is not evidence that a string is a host. The check earns its place on the
+// old ss spelling, which base64-decodes a whole "method:password@host:port" and
+// therefore hands the parser a host no URL parser has looked at: a payload of
+// arbitrary bytes decodes into a host holding '#' or a control character, and the
+// imported node could never connect.
+//
+// An address literal is taken as it is, because a colon belongs in one. An
+// internationalised name passes through unchanged as well: this rejects the
+// impossible shapes, not the unfamiliar ones.
+func validateHost(scheme, host string) error {
+	if len(host) > maxHostLen {
+		return fail(scheme, "the host is longer than %d bytes", maxHostLen)
+	}
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+	for i := 0; i < len(host); i++ {
+		switch c := host[i]; {
+		case c < 0x20 || c == 0x7f:
+			return fail(scheme, "the host holds a control character")
+		case c == ' ' || c == ':' || c == '/' || c == '\\' || c == '?' || c == '#' || c == '@' || c == '[' || c == ']':
+			return fail(scheme, "the host holds %q", c)
+		}
+	}
+	return nil
 }
 
 // decodeBase64 accepts every spelling providers use: standard or URL-safe

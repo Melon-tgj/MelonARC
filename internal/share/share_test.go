@@ -194,6 +194,12 @@ func TestParseRejectsWithTheTypeAndReason(t *testing.T) {
 		{"unknown scheme", "wireguard://key@h.example.com:51820", "wireguard", "unsupported link type"},
 		{"no scheme", "h.example.com:443", "", "starts with"},
 		{"empty", "   ", "", "empty"},
+		// The old ss spelling base64-decodes the whole body, so the "host" is
+		// whatever those bytes happen to say. A host holding a '#' or a control
+		// character can never be dialled; importing it would put a node in the
+		// list that is certain to fail at connect time.
+		{"ss payload with a '#' in the host", "ss://0006001A0C0j0006M0", "ss", "host"},
+		{"ss payload with a control character in the host", "ss://" + b64url("aes-128-gcm:pw@exa\x00mple.com:8388"), "ss", "host"},
 	}
 
 	for _, tc := range cases {

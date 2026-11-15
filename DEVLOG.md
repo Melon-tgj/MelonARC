@@ -30,6 +30,7 @@
 | 17 | GUI 第三步：桌面壳托管核心进程 | 完成（Rust 壳仍未编译） |
 | 18 | 核心加固批 A：fake-IP 租约保留、重载统一提交点、TUN resolver 随重载 | 完成（Go 1155 / 1134 / 21 / 0） |
 | 19 | 换库批：BLAKE3 与 SQLite 换成熟第三方库 | 完成（Go 1166 / 1145 / 21 / 0，二进制 +6.39 MiB） |
+| 20 | 测试加固：规则 oracle 对照、四个 fuzz 入口、互通文档与 CI | 完成（Go 1251 / 1230 / 21 / 0，纯测试批 + 一处解析缺陷修复） |
 
 ---
 
@@ -3955,3 +3956,265 @@ GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...  通过
 4. **真机迁移**：Windows 上用 base64 夹具跑一遍「旧文件 → 新构建 → 追加 → 重开」，与阶段 8 起的
    Windows 挂账一起清。
 5. 回到核心侧：阶段 18 留下的两个决策项（枯竭计数是否进 `/v1`、名字地址池扩容与 LRU）。
+
+---
+
+## 阶段 20 — 测试加固：规则 oracle 对照、四个 fuzz 入口、互通与 CI 规范化（2026-11-15）
+
+范围：**测试、判定脚本、文档、CI 定义**，四件事。生产代码只动一处，是 fuzz 抓到的真缺陷
+（第 2 节末段，单独一笔提交）。基线 HEAD `6192b2d`（Go 1166 条目 / 1145 通过 / 21 跳过 /
+0 失败），收尾 **1251 / 1230 / 21 / 0**。`spikes/`、前端与 Rust 壳一个字未改；
+`docs/` 只新增一个文件，`development-doc-v1.md` 未动。
+
+### 完成了什么
+
+**1. 规则引擎的对照实现（`internal/rules/oracle_test.go`，包内 136 → 151 条目）**
+
+- **oracle 是什么**：把引擎的语义用最直白的方式再写一遍——拿 `Program.Rules()`（`Compile`
+  展开后的规则列表），从下标 0 开始逐条判断是否命中，第一条命中即决策。它**不碰任何索引**：
+  DOMAIN 用字符串相等，DOMAIN-SUFFIX 用 `name == suffix || HasSuffix(name, "."+suffix)`，
+  DOMAIN-KEYWORD 用 `strings.Contains`，IP-CIDR/IP-CIDR6 用 `net.ParseCIDR` + `Contains`，
+  DEST-PORT 自己 `strings.Cut` + `Atoi`，PROTOCOL 字符串相等，GEOIP/IP-ASN 调**同一份**
+  `Lookup`，FINAL 恒命中，`no-resolve` 规则在地址来自解析时不命中。
+  引擎侧的 `cidrBlock`、`parsePortSpec`、`parseRulePayload` 一个都没复用，只共用规则列表
+  （那是配置，不是计算）与两个数据集（那是被注入的依赖）。
+- **生成器**：固定种子 `math/rand`（1..6），每个种子一份规则集 + 一份请求集。
+  - 规则集：先放**一条不落的 12 类**骨架，再随机追加 12 条，然后**整体打乱**，让优先级只
+    来自顺序。载荷刻意重叠：`example` / `alpha.example` / `sub.alpha.example` 三级后缀，
+    `10.0.0.0/8` / `/16` / `/24` / `/25` 四级嵌套网段，`443` / `8080` / `9000-9100` /
+    `8000-8100` 重叠端口；`no-resolve` 以 35% 概率落在地址类规则上（触发第二套地址表）。
+    DOMAIN-SET 三份（其一为空文件）、RULE-SET 两份（`set-b` 嵌套引用 `set-a`，且含一条
+    `no-resolve`，验证标志能穿过展开），都由 `Options.ReadFile` 注入内存文件。
+  - 请求集：名字取精确值 / 子域（一层与两层）/ 共享尾标签但越界（`notalpha.example`、
+    `alpha.example.evil`）/ 含关键字 / 无关名；地址取每个网段的首、尾、首+3、首-1、尾+1，
+    两个族共 55 个；端口取区间内、边界、边界外、0、65536、-1；协议取 `tcp`/`udp`/空/`TCP`/
+    `sctp`；**名字与地址的四种组合 × `Resolved` 两值**全取，每个种子 1904 条请求。
+- **规模与结论**：6 份规则集（26~38 条），**11424 次对照，0 处分歧**（11397 条由某条规则
+  决定，27 条什么都没命中——后者来自唯一一份没有 FINAL 的规则集）。
+- **不算白跑的证明**：断言"赢的规则种类"覆盖了能赢的 11 类（RULE-SET 不可能赢，`Compile`
+  已把它换成了文件里的规则），实测分布
+  `IP-CIDR 2171 / PROTOCOL 2132 / FINAL 2108 / IP-CIDR6 929 / IP-ASN 888 / GEOIP 731 /
+  DOMAIN-KEYWORD 723 / DEST-PORT 720 / DOMAIN-SUFFIX 610 / DOMAIN 270 / DOMAIN-SET 115`。
+  一条"语料退化成 FINAL 通吃"的断言守着它：以后谁把生成器改坏，这条会红。
+- **oracle 看不到的那一半**：`Program.Rules()` 已经是展开后的列表，所以展开顺序、目标传递、
+  "DOMAIN-SET 只占一个槽位"这些它验证不了。另加一份 `expectedFlatten`，按生成器的意图把
+  展开结果拼出来，与 `Rule.String()` 逐条比对（含嵌套引用与 `no-resolve` 的顺序）。
+- **边界**：`Compile` 零规则报 `no rules`；只含一个空 RULE-SET 的列表同样报 `no rules`
+  （展开在空检查之前）；空 RULE-SET **不占**优先级槽位、空 DOMAIN-SET **占**一个槽位；
+  无 FINAL 且全不命中返回 `(Decision{}, false)`；FINAL 写在第一行时通吃（这条顺序单列，
+  因为生成器会把落到第一行的 FINAL 挪走，否则整份规则集只剩一种比较）。
+- **换数据源的用例**：用 `internal/geoip/geoiptest` 写一个小 mmdb、经 `internal/geoip`
+  真实加载，再走一遍对照，证明 oracle 不绑在 `MemGeoIP` 上。`internal/geoip` 不 import
+  `internal/rules`（只有它的测试 import），所以包内测试引用它没有环。
+- **注入错误验证 oracle 有效**（临时改引擎、跑完即还原，不提交）：① 后缀树改成"最长匹配"
+  → 抓到（`DOMAIN-SUFFIX,test` 与更深的 `sub.alpha.example` 谁赢）；② 去掉编译期
+  `no-resolve` 的 `continue`，让受限规则漏进"解析来的地址"那张表 → 抓到（`2001:db8::/32`
+  的 `no-resolve` 规则抢答了 `Resolved` 查询）；③ DOMAIN 精确表改成"后者覆盖前者" →
+  抓到（同名两条规则取了大的下标）。三次都是第一条分歧就带着完整规则集打印出来。
+
+**2. 四个 fuzz 目标（+83 条目，见「当前状态」的加总）**
+
+| 目标 | 入口 | 种子 | 不变量 |
+|---|---|---|---|
+| `config.FuzzParse` | `Parse([]byte)` | `sampleConfig` + 15 条（BOM/CRLF、引号与尾注释、以及 `TestParseSyntaxErrors` 那批非法形状） | 有错或有配置，绝不同时为空 |
+| `share.FuzzParse` | `Parse(string)` | 六种链接 + 拒绝样本 + 2 条回归种子（21 条） | 成功即意味着 type/server/port 可拨号、参数非空 |
+| `subscription.FuzzParseBody` | `parseBody([]byte)`（白盒） | 明文、base64、76 列折行的 base64、BOM+注释、空、注释-only、base64 的非法体（8 条） | 成功即意味着至少一个可拨号条目 |
+| `dns.FuzzParseResponse` | `parseResponse([]byte)`（白盒） | 9 条报文（A/AAAA 带压缩指针、NXDOMAIN+SOA、只有头、查询、自指指针、两处截断、rdata 越界） | 有错或应答；id 等于前两字节，rcode 四位，记录长度 4/16 |
+
+- `parseBody` 内部就调 `decodeSubscription`，所以明文与 base64 两条路都在同一个目标里。
+- dns 的语料写成**报文常量**而不是用 `buildTestResponse` 生成（那个助手要 `*testing.T`，
+  fuzz 目标只有 `*testing.F`），另配 `TestFuzzParseResponseSeedsReachTheParser` 逐条断言
+  每个种子落在哪儿——A 记录真的走到 `readName` 的指针路径、负应答真的走到 SOA、三处截断
+  真的报错。语料不会悄悄退化成"一堆早退错误"。
+- **本机有界短跑各 75 秒**（`go test -run xxx -fuzz '^FuzzX$' -fuzztime=75s`）：
+
+  | 目标 | execs | 结论 |
+  |---|---|---|
+  | `config.FuzzParse` | 638,580 | 干净 |
+  | `share.FuzzParse` | 第 8 秒停在第 99 字节输入 | **发现缺陷**，见下 |
+  | `share.FuzzParse`（修复后重跑） | 639,497 | 干净 |
+  | `subscription.FuzzParseBody` | 294,207 | 干净 |
+  | `dns.FuzzParseResponse` | 1,549,848 | 干净 |
+
+- **fuzz 抓到的真缺陷（`1ee0b43`，与测试分开提交）**：输入 `ss://0006001A0C0j0006M0`。
+  `ss` 的旧式写法把整个 `method:password@host:port` 做 base64，解析器直接对**解码出来的
+  字节**切 `@` 与 `:`，中间没有任何 URL 解析——那份载荷解码成 `ÓM:ÓM@Ð-#ÓM:3`，于是
+  "主机"是 `\xd0-#\xd3M`（含 `#`）、端口 3、密码是两字节任意值，**解析成功**。
+  包自己在 `TestParseBuildsEveryLink` 上写着契约："每一条能解析的链接都必须能构建成 dialer"，
+  而 `outbound.New` 拒绝了这个条目——解析产出了一个永远连不上的节点。修法是在**所有协议
+  共用的** `splitHostPort` 后加一道 `validateHost`：拒绝空白、URL 分隔符（`: / \ ? # @ [ ]`）
+  与控制字符，地址字面量原样放行（冒号本来就该在里面），非 ASCII 名字也原样放行（拒绝的是
+  "不可能是主机"的形状，不是"不眼熟"的名字）。回归证据三条：`TestParseRejects…` 表里新增
+  两行、fuzz 种子表里两条可读样本、以及 `testdata/fuzz/FuzzParse/931897f2ffd8da69`
+  ——fuzzer 自己写的那个文件原样保留。
+- **短跑后 `git status`**：`testdata/fuzz` 下只有上面那一个文件，没有别的未解释语料；
+  其余"interesting"输入留在构建缓存里，不进仓库。
+
+**3. 互通文档、判定脚本与 CI（工作三）**
+
+- **`docs/interop-testing.md`**：把阶段的装置从 DEVLOG 里抽出来做成手册——五个参考实现
+  （Xray-core 26.11.9、shadowsocks-rust 1.25.0、snell-server 5.0.0、hysteria v2.13.0、
+  tuic-server 1.0.0）的版本表、各自的发布渠道与校验办法（`.dgst` 里的 `SHA2-256`、
+  `.sha256`、`hashes.txt`、`.sha256sum`、Snell 的发布页哈希）、槽位布局（5 份下载 /
+  7 个槽位，Xray 一个二进制挂三个槽）、复现命令、环境前提（**允许未连接 `sendto`**，
+  否则 UDP 与 QUIC 必然跳过）、以及判定口径。**不写 URL**：发布页由项目主页指向，写死链接
+  只会随仓库迁移过期；能长期成立的是"哪个 tag、哪个资产、拿哪一行哈希"与校验命令。
+- **`scripts/check-interop.sh`（POSIX sh）**：三种退出码——未设 `MELONARC_INTEROP_DIR` 打印
+  说明并退 **2**；跑 `go test ./internal/outbound/ -run TestInterop -count=1 -v`，任一
+  `TestInterop*`（父或子）SKIP 或 FAIL 就列出名字并退 **1**；全过退 **0**。另加一条：
+  **一个用例都没跑也算失败**，否则过滤条件写错就会"因为没失败而成功"。
+  本机实测（`/home/hatch/interop-bin`，只有 Xray 三槽）：
+
+  ```
+  check-interop: SKIPPED (a skip means this protocol was not verified)
+    SKIP TestInteropHysteria2
+    SKIP TestInteropShadowsocks
+    SKIP TestInteropShadowsocksRejectsAWrongPassword
+    SKIP TestInteropSnell
+    SKIP TestInteropSnellRejectsAWrongPSK
+    SKIP TestInteropTUIC
+    SKIP TestInteropTrojan/udp
+    SKIP TestInteropVLESS/udp
+    SKIP TestInteropVMess/udp
+  exit 1
+  ```
+  Xray 系的 **TCP** 子用例（VMess / Trojan / VLESS / VLESS+REALITY）全过，跳过的 9 条是
+  "缺四个槽位 + 三个 UDP 子用例"。**退出码 1 是正确行为**，没有为了变绿放宽判定。
+  脚本其余分支用一个桩 `go` 验过：全过 → 0、什么都没跑 → 1、有 FAIL → 1 并列出名字。
+- **`.github/workflows/ci.yml`（三个 job，`push` / `pull_request` 触发）**：
+  - **Go**：`setup-go` 用 `go-version-file: go.mod`；`go build ./...`、`gofmt` 检查
+    （有输出即失败）、`go vet ./...`、`go test ./... -count=1`、
+    `GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...`（不用 `./...`：`spikes/`
+    的 Unix-only 原型挡着，阶段 8 起如此）。
+  - **Frontend**：`setup-node` 22（`apps/desktop` 要求 `>=20`，且它**零依赖**，`npm ci`
+    不需要网络）；`npm ci` → `npm run build` → `npm test`（两条需要真实核心的用例跳过）；
+    然后 `go build` 出核心、写一份 `/tmp/arc/demo.conf` 演示配置（`data-dir`、一个代理两条、
+    select/url-test/fallback 各一、8 条规则 + 一条外部规则集、`[Host]` 一条）、`-check`
+    通过后后台起核心、轮询 `/healthz` 到应答，再带 `MELONARC_TEST_API` /
+    `MELONARC_TEST_DATA_DIR` 跑 `npm test`。**全部是仓库既有的脚本，没有新造命令。**
+  - **Interop**：按 `docs/interop-testing.md` 下载五个实现（`gh release download` 按资产名
+    glob 取，tag 与版本写在 `env` 里）、逐个校验哈希、布置 7 个槽位、跑
+    `scripts/check-interop.sh`。Snell 没有机器可读清单，因此 zip 的 URL 与 SHA-256 由仓库
+    变量 `SNELL_ZIP_URL` / `SNELL_ZIP_SHA256` 承载，**留空即整步失败**（宁可红，不要一个
+    看起来校验过了的分支）。
+  - **未在 Actions 上实跑**：本阶段不推送。做过的静态检查只有：YAML 缩进结构自检
+    （无制表符、每级 2 空格、块标量内的内容都更深）、`sh -n` 语法检查、以及把每个
+    `run:` 里的 shell 片段按行读一遍。资产名与 tag 形式**没有**逐个核对过 404
+    （本机无外网）。
+
+### 关键决策及理由
+
+1. **oracle 只吃 `Program.Rules()`，不碰索引。** 引擎的价值全在"每个索引返回自己命中的
+   最小下标，再取全局最小"这一步；让 oracle 也走索引就只是把同一份代码抄一遍。测试的独立性
+   来自**换一种实现方式**：线性扫描 + 最直白的判断。代价是它验证不了展开与索引构建，所以
+   `expectedFlatten` 单独补上那一半。
+2. **oracle 自己解析载荷。** `net.ParseCIDR` 与 `strings.Cut` + `Atoi` 都是重写的，没有调
+   `cidrBlock` / `parsePortSpec`。如果复用，载荷解析的错误会在两侧同时错，测试永远是绿的。
+3. **生成器保证覆盖，随机只用来制造顺序。** 12 类各一条是**构造**出来的，不是掷骰子掷出来的；
+   随机只决定载荷细节、追加规则与整体顺序。这样"某个类型一个用例都没覆盖"这类沉默失效不会
+   发生。
+4. **打乱顺序，并且专门照顾 FINAL 的位置。** first-match-wins 的正确性只在"顺序会改变结果"
+   时才被测到；一条写在末尾的 FINAL 会让整份规则集退化成一种比较。所以骨架含 FINAL、整体
+   打乱，但**落到第一行时挪走**，另用一条专门的用例覆盖"FINAL 在第一行"这个真实语义。
+5. **覆盖度写成断言，不写成注释。** 只比较结果的话，"FINAL 回答了一切"也是 0 分歧。
+   断言赢的规则种类覆盖 11 类，把"测试本身退化了"变成一次红灯。
+6. **fuzz 的不变量取"最弱但确实成立"的那条。** 解析器对任意输入的正确行为就是"有错或
+   有结果"，所以四个目标的主断言都是"不 panic、不返回半成品"。在此之上各加一条便宜的结构
+   检查（可拨号的 server/port、id 与 rcode）；`share` 那条正是抓到缺陷的那条。曾考虑在
+   fuzz 里顺手 `outbound.New` 一遍（更强的契约），放弃：每次执行都要生成密钥，execs 会掉
+   一到两个数量级，而那条契约已经由 `TestParseBuildsEveryLink` 在固定夹具上守着。
+7. **dns 语料用字面量，并配一条"种子落在哪儿"的测试。** 随机字节进不了 `parseResponse` 的
+   深处（多数在头部就被拒），所以语料必须是人挑的报文；而人挑的报文最容易悄悄写错，于是
+   用一条普通测试把每条种子的预期解析结果钉住——这条同时证明了"压缩指针路径被覆盖"。
+8. **判定脚本严格，且不猜跳过原因。** 不区分"缺二进制"与"环境缺能力"：两者都是"这次没
+   验证"，而门要回答的只有一个问题。另外把"一个都没跑"当成失败，堵住"过滤条件失效 → 没有
+   失败 → 通过"这条静默路径。
+9. **修 `share` 而不是放宽断言。** 分歧的三条出路里（改 oracle、改引擎、删用例），
+   删用例被明确排除；结论是引擎错，依据是包自己写在 `TestParseBuildsEveryLink` 上的契约与
+   `outbound.New` 的实际拒绝。修的落点选在 `splitHostPort` 之后——六个协议共用这一处，
+   所以不存在"某个协议漏了校验"。
+10. **阶段 11「实现名只出现在 DEVLOG」这条，本阶段有意放宽到 `docs/interop-testing.md`。**
+    阶段 11 的原文是"产品代码、注释、用户文档、提交信息里一个都没有"。互通手册不是用户文档，
+    是开发文档；不写名字它就不可复现。**产品代码与注释仍然一个名字都没有**（装置按协议取
+    二进制），这条没变。
+11. **CI 里 Snell 用仓库变量承载哈希。** 它没有 `.dgst`/`.sha256`/`hashes.txt` 这类机器可读
+    的清单，只有一个网页上的值。把猜来的哈希写进工作流会让第一次真跑就红在一个无法解释的
+    常量上；写成"变量为空即失败"，至少把不确定性放在明面上。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链 `~/sdks/go/bin` 的 Go 1.27.4，Linux/x86_64：
+
+```
+go build ./...                                              通过
+go vet ./...                                                通过
+gofmt -l .                                                  无输出
+go test ./... -count=1 -v                                   1251 条目 / 1230 通过 / 21 跳过 / 0 失败
+go test -race ./internal/rules/ ./internal/config/ ./internal/share/ ./internal/subscription/ ./internal/dns/
+                                                            五包全通过
+GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...  通过
+scripts/check-interop.sh（未设变量）                          退出 2
+MELONARC_INTEROP_DIR=/home/hatch/interop-bin scripts/check-interop.sh
+                                                            退出 1，列出 9 条跳过（预期行为）
+```
+
+- **逐项对基线**（`6192b2d`，1166/1145/21/0）：**条目 +85、通过 +85、跳过 ±0、失败 0**。
+  增量拆解（逐包核对）：rules +15、config +16、share +25（fuzz 23 + 拒绝表 2 行）、
+  subscription +9、dns +20（fuzz 10 + 种子断言 10），合计 85。
+- **21 条跳过与基线逐名 `diff` 完全一致**：缺参考实现的互通 10、未连接 `sendto` 被 seccomp
+  拒绝的 UDP 9、上游「UDP 截断改 TCP」1、`TestTUNLinuxLoopback` 1。无新增跳过。
+- 包内条目：rules 136 → 151、config 122 → 138、share 37 → 62、subscription 11 → 20、
+  dns 94 → 114。
+- **fuzz 数字**：见第 2 节的表（638,580 / 639,497 / 294,207 / 1,549,848 execs，四次各 75 秒）。
+  一次失败（share，第 8 秒，99 字节），修完后重跑到干净。
+- **命名红线**：新增/修改的源码、文档、脚本、工作流与提交信息已按已知清单扫描
+  （`clash|surge|quantumult|shadowrocket|stash|loon|kitsunebi|mellow|surfboard|nekobox|
+  v2ray|…`），零命中。文档里出现的五个参考实现名是本阶段任务明确允许的开源项目名。
+- 三笔代码/文档提交 + 一笔本条记录（均未推送）：
+  `802c3a0`（规则 oracle）→ `1ee0b43`（share 主机校验修复）→ `5902129`（四个 fuzz 目标 +
+  回归语料）→ `b94992d`（互通手册 + 判定脚本 + CI）→ 本条目单独一笔。
+  顺序说明：**修复排在 fuzz 目标之前**，这样每一笔单独 checkout 都是绿的（fuzz 目标那一笔
+  已经带着修复后的语料跑通）；代价是修复那一笔的回归证据只有表里的两行，fuzzer 的原始输入
+  与种子随下一笔落地。
+
+### 遗留问题
+
+- **CI 没有实跑过。** 三个 job 都只做了静态检查；资产名（尤其 `tuic-server` 与
+  `snell-server` 的 zip 命名）、`gh release download` 的 glob、hysteria 的 `app/v2.13.0`
+  这类带斜杠的 tag，**都没有核对过**。首次真跑时最可能在这里 404。
+- **`TestInteropQUICFixtureReachesSendtoBoundary` 与严格判定冲突（需决策）。** 它断言的是
+  "沙箱把 `sendto` 挡住了"；一台**允许** `sendto` 的机器上这条性质不存在，所以它 `t.Skip`。
+  名字以 `TestInterop` 开头，于是被判定脚本记成"这次没验证"。后果：在允许 `sendto` 的
+  runner 上（CI 就是），互通 job 会因为这两条跳过而红，**即使七个协议全部通过**。
+  本阶段**没有**用改名或放宽判定绕开它。两条候选出路：(a) 把它改名出 `TestInterop*` 家族
+  （它测的是夹具接线，不是互通）；(b) 判定脚本区分"环境比沙箱更宽松"与"环境缺东西"。
+  建议 (a)：改的是名字，不是断言，而且名字本来就名不副实。
+- **`share` 的密码套件仍未在解析期校验。** 修掉主机那条之后，`ss://aes-999:pass@h.example.com:1`
+  仍然能解析、要到 `outbound.New` 才被拒——同一份契约的另一条缝。修复方向是让 `share` 拿到
+  `outbound` 支持的套件清单（新增一条 share → outbound 的依赖，需评估），或接受"解析只保证
+  形状、构建才保证可用"。本阶段没动，因为 fuzz 抓到的是主机那一条。
+- **oracle 的输入有三处刻意收窄**：查询名只用 ASCII（引擎的大小写归并是"有 ASCII 大写字节
+  时走 `strings.ToLower`、否则逐字节"，混合脚本名的语义文档没定，不在对照范围）；GEOIP/
+  IP-ASN 用同一份 `Lookup`（任务如此规定，测的是引擎的分派不是数据集）；DOMAIN-SET 的条目
+  取自生成器的意图而非解析器的输出（这是有意的独立性，但也就测不到 `parseDomainSetFile`）。
+- **fuzz 只各跑了 75 秒**，不是持续 fuzz；也没有进 CI 的定时任务。`config` 那个目标 76 秒
+  内只覆盖到 638,580 次执行、语料 224 条，离饱和还很远。
+- **`share` 的 fuzz 不变量仍只覆盖主机与端口**，没有覆盖"参数键集合"（未知键要到构建期
+  才报错）。想覆盖它就得在 fuzz 里构建 dialer，代价见决策 6。
+- 阶段 8–19 的既有挂账照旧：Windows 实机（TUN / 系统代理 / 令牌文件 / 迁移）、Rust 壳编译、
+  QUIC 与 UDP 的真实互通（本机 seccomp 不允许）、REALITY UDP 证据、预览桥 query string、
+  `core.log` 无轮转、用户态 TCP 的 IPv6/乱序/窗口缩放、名字地址池枯竭计数的对外出口、
+  二进制体积与 Flush 成本。
+
+### 下一步计划
+
+1. **CI 首跑**：找一台能出网的机器推一次分支，逐个修资产名/glob 的 404，并把 Snell 的两个
+   仓库变量补上；跑绿之后再谈"这三条 job 是门"。
+2. **决定并落地 `TestInterop` 的冲突**（见遗留第 2 条）；在此之前互通 job 在宽松 runner 上
+   会红，不能当作回归信号。
+3. **把 fuzz 放进 CI 的定时任务**：`schedule` 触发，四个目标各 60~120 秒，发现即开 issue；
+   顺带把 `-race` 也挂到定时任务上（本机 5 包已过，全量 `-race` 尚未跑过）。
+4. **`share` 的套件校验**：先决定契约到底是"解析保证形状"还是"解析保证可构建"，再动代码；
+   若选后者，`outbound` 需要导出一个套件清单。
+5. 回到核心侧的两条既有决策项：阶段 18 的枯竭计数是否进 `/v1`、名字地址池扩容与 LRU；
+   阶段 19 的 `-s -w` + `-trimpath` 与 Flush 成本拆分。
