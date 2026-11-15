@@ -7,8 +7,10 @@
 // error to one. What it buys is the thing the live counters cannot give —
 // history, readable after a restart and by an ordinary SQLite reader.
 //
-// The tables are bounded (see Retention). That bound is what makes the write
-// strategy possible: the whole file is rewritten from memory at every flush,
-// which needs no free list, no incremental b-tree surgery and no journal, and
-// costs a copy of at most a few hundred kilobytes.
+// The file is written through database/sql and modernc.org/sqlite. The tables
+// are bounded (see Retention), and a flush replaces all three from memory in one
+// transaction: a reader sees the previous flush or the new one, never half of
+// one, and the cost is a copy of at most a few thousand rows. A file this build
+// cannot read is never written at all — it is inspected read-only, preserved
+// byte for byte, and the store runs on memory alone for the rest of the run.
 package store

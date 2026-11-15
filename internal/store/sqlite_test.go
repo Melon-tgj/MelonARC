@@ -1,200 +1,78 @@
 package store
 
+// The tests at the file-format boundary: the history this build writes is an
+// ordinary SQLite database, and the history a previous build left behind is
+// read and then appended to by this one.
+//
+// The first property is checked by handing the file to the SQLite command line
+// tool rather than to this package's own reader: a self-consistent mistake in
+// the writer would satisfy the second reader only. The second property is
+// checked against a real file from the previous build, kept in testdata as
+// base64 because it is a binary artefact and the only copy of that layout.
+
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-// The format tests. The writer is exercised end to end: an image is built,
-// written to a file and then read twice — by this package's own reader, and by
-// the SQLite command line tool when the machine has one. The second reader is
-// the point: a self-consistent bug in the writer would satisfy the first one.
-
-// TestVarintRoundTrip covers the widths the format uses, including the nine byte
-// form that carries a full byte in its last position.
-func TestVarintRoundTrip(t *testing.T) {
-	values := []uint64{
-		0, 1, 0x7f, 0x80, 0x3fff, 0x4000, 1 << 20, 1 << 35,
-		0x00ffffffffffffff, 1 << 56, 1<<63 + 12345, ^uint64(0),
-	}
-	for _, want := range values {
-		var buf [9]byte
-		n := putVarint(buf[:], want)
-		if n != varintLen(want) {
-			t.Errorf("putVarint(%d) wrote %d bytes, varintLen says %d", want, n, varintLen(want))
-		}
-		got, width, err := readVarint(buf[:n])
-		if err != nil {
-			t.Fatalf("readVarint(%d): %v", want, err)
-		}
-		if got != want || width != n {
-			t.Errorf("varint round trip of %d gave %d in %d bytes", want, got, width)
-		}
-	}
-	// A varint that claims more bytes than are there is a corrupt file, not a
-	// panic.
-	if _, _, err := readVarint([]byte{0x80}); err == nil {
-		t.Error("readVarint accepted a truncated varint")
-	}
-}
-
-// TestRecordRoundTrip covers the storage classes and the integer widths the
-// encoder chooses.
-func TestRecordRoundTrip(t *testing.T) {
-	want := []recordValue{
-		intValue(0),
-		intValue(1),
-		intValue(-1),
-		intValue(127),
-		intValue(-128),
-		intValue(4096),
-		intValue(-70000),
-		intValue(1 << 40),
-		intValue(-1 << 62),
-		textValue(""),
-		textValue("example.com"),
-		textValue(strings.Repeat("x", 200)),
-	}
-	payload := encodeRecord(want)
-	got, err := decodeRecord(payload)
-	if err != nil {
-		t.Fatalf("decodeRecord: %v", err)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("decoded %d values, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("value %d = %+v, want %+v", i, got[i], want[i])
-		}
-	}
-	// The header length is a varint that counts itself. A row wide enough to
-	// need a two byte header is the case that catches an off-by-one.
-	wide := make([]recordValue, 0, 70)
-	for i := 0; i < 70; i++ {
-		wide = append(wide, textValue("v"))
-	}
-	payload = encodeRecord(wide)
-	back, err := decodeRecord(payload)
-	if err != nil {
-		t.Fatalf("decodeRecord of a wide row: %v", err)
-	}
-	if len(back) != len(wide) {
-		t.Fatalf("wide row decoded to %d values, want %d", len(back), len(wide))
-	}
-}
-
-// TestImageIsReadBySQLite is the check that matters: a file written here is a
-// database any SQLite reader opens.
-func TestImageIsReadBySQLite(t *testing.T) {
-	rows := [][]recordValue{
-		{intValue(1700000000000), textValue("http"), textValue("example.com"), intValue(443), intValue(17), intValue(-3), textValue(""), textValue("a long policy name")},
-		{intValue(1700000001000), textValue("socks5"), textValue("other.test"), intValue(80), intValue(0), intValue(0), textValue("rule"), textValue("DIRECT")},
-	}
-	image, err := buildImage([]table{{
-		name: "connections",
-		sql: "CREATE TABLE connections(" +
-			"at INTEGER NOT NULL, protocol TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, " +
-			"up INTEGER NOT NULL, down INTEGER NOT NULL, rule TEXT NOT NULL, policy TEXT NOT NULL)",
-		rows: rows,
-	}})
-	if err != nil {
-		t.Fatalf("buildImage: %v", err)
-	}
-	path := writeTestImage(t, image)
-
-	// The package's own reader must agree with what went in, reading the bytes
-	// that are on disk rather than the slice the writer kept in memory.
-	if info, err := os.Stat(path); err != nil || info.Size() != int64(len(image)) {
-		t.Fatalf("written file: %v, %d bytes", err, len(image))
-	}
-	onDisk, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	db, err := openImage(onDisk)
-	if err != nil {
-		t.Fatalf("openImage: %v", err)
-	}
-	if db.userVersion != userVersion {
-		t.Errorf("user version = %d, want %d", db.userVersion, userVersion)
-	}
-	payloads, err := db.table("connections")
-	if err != nil {
-		t.Fatalf("table: %v", err)
-	}
-	if len(payloads) != len(rows) {
-		t.Fatalf("read back %d rows, want %d", len(payloads), len(rows))
-	}
-	for i, payload := range payloads {
-		values, err := decodeRecord(payload)
-		if err != nil {
-			t.Fatalf("decode row %d: %v", i, err)
-		}
-		if len(values) != len(rows[i]) {
-			t.Fatalf("row %d has %d columns, want %d", i, len(values), len(rows[i]))
-		}
-		if values[2].s != rows[i][2].s || values[1].i != rows[i][1].i || values[5].i != rows[i][5].i {
-			t.Errorf("row %d read back as %+v", i, values)
-		}
-	}
-}
-
-// TestImageIsReadBySQLiteTool hands the file to the real implementation. It is
-// skipped when the machine has no SQLite command line tool, which is the same
-// rule the reference interop tests follow: a check that needs an external party
-// says so and skips instead of pretending.
-func TestImageIsReadBySQLiteTool(t *testing.T) {
+// TestHistoryFileIsReadBySQLiteTool is the check that matters: a file written
+// here is a database any SQLite reader opens, with the schema, the version and
+// the rows that went in.
+//
+// The 500 rows do not fit one page, so this also exercises the interior pages
+// the engine builds — the case a single row would never reach.
+func TestHistoryFileIsReadBySQLiteTool(t *testing.T) {
 	tool, err := exec.LookPath("sqlite3")
 	if err != nil {
 		t.Skip("no sqlite3 command line tool on this machine")
 	}
-	var rows [][]recordValue
+	path := filepath.Join(t.TempDir(), FileName)
+	s, err := Open(Options{Path: path, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	base := time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC)
 	for i := 0; i < 500; i++ {
-		rows = append(rows, []recordValue{
-			intValue(int64(1700000000000 + i)),
-			textValue(fmt.Sprintf("host-%03d.example", i)),
-			intValue(int64(i)),
-			textValue(strings.Repeat("z", i%120)),
+		s.RecordConnection(Connection{
+			At:       base.Add(time.Duration(i) * time.Millisecond),
+			Protocol: "http",
+			Host:     fmt.Sprintf("host-%03d.example", i),
+			Port:     i,
+			Network:  "tcp",
+			Rule:     strings.Repeat("z", i%120),
+			Policy:   "manual",
+			Outbound: "alpha",
+			Up:       int64(i),
+			Down:     int64(2 * i),
+			Duration: time.Duration(i) * time.Millisecond,
 		})
 	}
-	image, err := buildImage([]table{
-		{
-			name: "connections",
-			sql:  "CREATE TABLE connections(at INTEGER NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, note TEXT NOT NULL)",
-			rows: rows,
-		},
-		{
-			name: "events",
-			sql:  "CREATE TABLE events(at INTEGER NOT NULL, kind TEXT NOT NULL)",
-			rows: [][]recordValue{{intValue(1), textValue("reload")}},
-		},
-		{
-			name: "samples",
-			sql:  "CREATE TABLE samples(at INTEGER NOT NULL)",
-		},
-	})
-	if err != nil {
-		t.Fatalf("buildImage: %v", err)
+	s.RecordEvent(Event{At: base, Kind: KindReload, Name: "/etc/melonarc.ini", Detail: "3 rules", OK: true})
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
-	path := writeTestImage(t, image)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
-	// 500 rows of up to 120 bytes do not fit one page, so this also checks the
-	// interior page the writer places above the leaves.
-	out := runSQLite(t, tool, path, "SELECT count(*), min(at), max(at) FROM connections;")
-	if out != "500|1700000000000|1700000000499" {
+	if out := runSQLite(t, tool, path, "SELECT count(*), min(at), max(at) FROM connections;"); out != "500|1794643200000|1794643200499" {
 		t.Errorf("count/min/max = %q", out)
 	}
-	if out := runSQLite(t, tool, path, "SELECT note FROM connections WHERE port = 499;"); out != strings.Repeat("z", 499%120) {
+	if out := runSQLite(t, tool, path, "SELECT rule FROM connections WHERE port = 499;"); out != strings.Repeat("z", 499%120) {
 		t.Errorf("row 499 came back as %q", out)
 	}
 	if out := runSQLite(t, tool, path, "SELECT name FROM sqlite_schema ORDER BY name;"); out != "connections\nevents\nsamples" {
 		t.Errorf("schema = %q", out)
+	}
+	if out := runSQLite(t, tool, path, "SELECT count(*) FROM events;"); out != "1" {
+		t.Errorf("events answered %q", out)
 	}
 	if out := runSQLite(t, tool, path, "SELECT count(*) FROM samples;"); out != "0" {
 		t.Errorf("an empty table answered %q", out)
@@ -207,87 +85,188 @@ func TestImageIsReadBySQLiteTool(t *testing.T) {
 	}
 }
 
-// TestImageRejectsWhatItCannotRead covers the reader's guards: a file that is
-// not a database, one that is truncated and one whose page count is a lie are
-// all refused instead of being decoded into nonsense.
-func TestImageRejectsWhatItCannotRead(t *testing.T) {
-	image, err := buildImage([]table{{
-		name: "events",
-		sql:  "CREATE TABLE events(at INTEGER NOT NULL)",
-		rows: [][]recordValue{{intValue(7)}},
-	}})
+// TestLegacyHistoryFileIsReadByThisBuild loads the file the previous build
+// wrote and checks every column of every row of all three tables. The fixture
+// was chosen to be uncomfortable on purpose: a 252 byte host name, byte counts
+// beyond 32 bits, an empty string column and a punycode name, so a decoder that
+// only handles the easy row is caught here.
+func TestLegacyHistoryFileIsReadByThisBuild(t *testing.T) {
+	path := legacyHistoryFile(t)
+	s, err := Open(Options{Path: path, FlushInterval: time.Hour})
 	if err != nil {
-		t.Fatalf("buildImage: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
-	if _, err := openImage([]byte("not a database at all, but long enough to look like one")); err == nil {
-		t.Error("a text file was accepted as a database")
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+
+	if status := s.Status(); status.Notice != "" {
+		t.Fatalf("the file a previous build wrote was not adopted: %s", status.Notice)
 	}
-	if _, err := openImage(image[:len(image)-100]); err == nil {
-		t.Error("a truncated image was accepted")
+
+	at := func(ms int64) time.Time { return time.UnixMilli(ms).UTC() }
+	conns := s.Connections(0, time.Time{})
+	if len(conns) != 4 {
+		t.Fatalf("read %d connections, want 4: %+v", len(conns), conns)
 	}
-	lie := append([]byte(nil), image...)
-	putU32(lie[28:], 99)
-	if _, err := openImage(lie); err == nil {
-		t.Error("a header claiming 99 pages was accepted for a one page file")
+	want := Connection{
+		At:       at(1794643200000),
+		Protocol: "http",
+		Host:     "example.com",
+		Port:     443,
+		Network:  "tcp",
+		Rule:     "DOMAIN-SUFFIX,example.com",
+		Policy:   "manual",
+		Outbound: "alpha",
+		Up:       1200,
+		Down:     34000,
+		Duration: 1500 * time.Millisecond,
 	}
-	// An empty file has nothing to read, which a caller reports as "no history
-	// yet" rather than as a database.
-	if _, err := openImage(nil); err == nil {
-		t.Error("an empty image was accepted")
+	if conns[0] != want {
+		t.Errorf("first connection = %+v, want %+v", conns[0], want)
+	}
+	// An empty string column stays empty rather than coming back as NULL would
+	// be a difference no caller could see, but a NULL would have made the row
+	// unreadable, so this pins that the previous build really wrote ''.
+	if conns[1].Rule != "" || conns[1].Policy != "auto" || conns[1].Network != "udp" {
+		t.Errorf("second connection = %+v", conns[1])
+	}
+	if len(conns[2].Host) != 252 {
+		t.Errorf("the long host came back with %d bytes, want 252", len(conns[2].Host))
+	}
+	if conns[2].Up != 1<<40 || conns[2].Down != 1<<41 {
+		t.Errorf("the 40 bit counters came back as %d/%d", conns[2].Up, conns[2].Down)
+	}
+	if conns[2].Duration != 90*time.Second || conns[2].Outbound != "node-b" {
+		t.Errorf("third connection = %+v", conns[2])
+	}
+	if conns[3].Host != "xn--fsqu00a.example" || conns[3].Up != 7 || conns[3].Down != 8 {
+		t.Errorf("fourth connection = %+v", conns[3])
+	}
+
+	events := s.Events(0, "", time.Time{})
+	if len(events) != 3 {
+		t.Fatalf("read %d events, want 3: %+v", len(events), events)
+	}
+	wantEvents := []Event{
+		{At: at(1794643200000), Kind: KindReload, Name: "/etc/melonarc.ini", Detail: "3 rules", OK: true},
+		{At: at(1794643260000), Kind: KindFailure, Name: "alpha", Detail: "dial_timeout", OK: false},
+		{At: at(1794643320000), Kind: KindPolicy, Name: "airport", Detail: "airport: node-a -> node-b", OK: true},
+	}
+	for i := range wantEvents {
+		if events[i] != wantEvents[i] {
+			t.Errorf("event %d = %+v, want %+v", i, events[i], wantEvents[i])
+		}
+	}
+
+	samples := s.Samples(0, time.Time{})
+	if len(samples) != 3 {
+		t.Fatalf("read %d samples, want 3: %+v", len(samples), samples)
+	}
+	wantSamples := []Sample{
+		{At: at(1794643200000), Up: 4000, Down: 90000},
+		{At: at(1794643260000)},
+		{At: at(1794643320000), Up: 1024, Down: 2048},
+	}
+	for i := range wantSamples {
+		if samples[i] != wantSamples[i] {
+			t.Errorf("sample %d = %+v, want %+v", i, samples[i], wantSamples[i])
+		}
+	}
+
+	// Loading must not be a rewrite: the file has to be the one that was there.
+	if status := s.Status(); status.Bytes != fileSize(t, path) {
+		t.Errorf("status reports %d bytes, the file is %d", status.Bytes, fileSize(t, path))
 	}
 }
 
-// TestBuildImageRefusesAnOversizedRow keeps the writer honest about the layout it
-// implements: a row that would need an overflow page is refused, not written as
-// something no reader can follow.
-func TestBuildImageRefusesAnOversizedRow(t *testing.T) {
-	_, err := buildImage([]table{{
-		name: "events",
-		sql:  "CREATE TABLE events(note TEXT NOT NULL)",
-		rows: [][]recordValue{{textValue(strings.Repeat("x", maxLocalPayload))}},
-	}})
-	if err == nil {
-		t.Fatal("buildImage accepted a row that cannot fit a page")
+// TestLegacyHistoryFileTakesNewWrites is the takeover path: a file from the
+// previous build is opened, appended to, flushed and read back by a third run.
+// Both the rows that came from the old file and the ones written by this build
+// have to survive, in order.
+func TestLegacyHistoryFileTakesNewWrites(t *testing.T) {
+	path := legacyHistoryFile(t)
+	s, err := Open(Options{Path: path, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
 	}
-	if !strings.Contains(err.Error(), "overflow") {
-		t.Errorf("error = %v, want it to name the overflow page", err)
+	newAt := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	s.RecordConnection(Connection{
+		At: newAt, Protocol: "tun", Host: "new.example", Port: 8443, Network: "tcp",
+		Rule: "MATCH", Policy: "DIRECT", Outbound: "DIRECT", Up: 5, Down: 6,
+		Duration: 7 * time.Millisecond,
+	})
+	s.RecordEvent(Event{At: newAt, Kind: KindSubscription, Name: "airport", Detail: "12 nodes", OK: true})
+	s.RecordSample(Sample{At: newAt, Up: 11, Down: 22})
+	if err := s.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := Open(Options{Path: path, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open again: %v", err)
+	}
+	defer reopened.Close()
+	if status := reopened.Status(); status.Notice != "" {
+		t.Fatalf("the rewritten file is not usable: %s", status.Notice)
+	}
+
+	conns := reopened.Connections(0, time.Time{})
+	if len(conns) != 5 {
+		t.Fatalf("read %d connections, want 5: %+v", len(conns), conns)
+	}
+	if conns[0].Host != "example.com" || conns[0].Up != 1200 {
+		t.Errorf("the oldest row from the previous build was lost: %+v", conns[0])
+	}
+	if conns[2].Up != 1<<40 || len(conns[2].Host) != 252 {
+		t.Errorf("a wide row from the previous build was mangled: %+v", conns[2])
+	}
+	if conns[4].Host != "new.example" || conns[4].At != newAt || conns[4].Up != 5 {
+		t.Errorf("the row written by this build = %+v", conns[4])
+	}
+	if events := reopened.Events(0, "", time.Time{}); len(events) != 4 || events[3].Kind != KindSubscription {
+		t.Errorf("events = %+v", events)
+	}
+	if samples := reopened.Samples(0, time.Time{}); len(samples) != 4 || samples[3].Up != 11 {
+		t.Errorf("samples = %+v", samples)
 	}
 }
 
-// TestVarintWidthsMatchTheFormat pins the widths the encoder picks, so a change
-// to the body layout is noticed by a test rather than by a reader.
-func TestVarintWidthsMatchTheFormat(t *testing.T) {
-	cases := []struct {
-		v    int64
-		want uint64
-	}{
-		{0, 8}, {1, 9}, {-1, 1}, {127, 1}, {-128, 1}, {128, 2}, {4096, 2},
-		{1 << 30, 4}, {1 << 40, 6}, {-1 << 40, 6},
-	}
-	for _, c := range cases {
-		serial, body := serialType(intValue(c.v))
-		if serial != c.want {
-			t.Errorf("serialType(%d) = %d, want %d", c.v, serial, c.want)
-		}
-		encoded := encodeRecord([]recordValue{intValue(c.v)})
-		values, err := decodeRecord(encoded)
-		if err != nil {
-			t.Fatalf("decodeRecord(%d): %v", c.v, err)
-		}
-		if values[0].i != c.v {
-			t.Errorf("%d read back as %d in %d body bytes", c.v, values[0].i, body)
-		}
-	}
-}
-
-// writeTestImage writes an image to a file the tests can hand to another tool.
-func writeTestImage(t *testing.T, image []byte) string {
+// legacyHistoryFile decodes the fixture a previous build left behind into a
+// temporary file. The text is base64 rather than the database itself because a
+// binary blob in a diff cannot be reviewed; the layout it represents is the one
+// the tests above have to keep reading.
+func legacyHistoryFile(t *testing.T) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "history.sqlite3")
-	if err := os.WriteFile(path, image, 0o600); err != nil {
-		t.Fatalf("write image: %v", err)
+	encoded, err := os.ReadFile(filepath.Join("testdata", "legacy-history.sqlite3.base64"))
+	if err != nil {
+		t.Fatalf("read the fixture: %v", err)
+	}
+	clean := strings.NewReplacer("\n", "", "\r", "", " ", "", "\t", "").Replace(string(encoded))
+	raw, err := base64.StdEncoding.DecodeString(clean)
+	if err != nil {
+		t.Fatalf("decode the fixture: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write the fixture: %v", err)
 	}
 	return path
+}
+
+// fileSize is the on-disk size, which Status reports after a load.
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Size()
 }
 
 // runSQLite runs one statement through the command line tool and returns its

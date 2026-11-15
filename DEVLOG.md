@@ -29,6 +29,7 @@
 | 16 | REALITY 握手改用锁版 uTLS + 薄适配 | 完成（Go 1147 / 1126 / 21 / 0） |
 | 17 | GUI 第三步：桌面壳托管核心进程 | 完成（Rust 壳仍未编译） |
 | 18 | 核心加固批 A：fake-IP 租约保留、重载统一提交点、TUN resolver 随重载 | 完成（Go 1155 / 1134 / 21 / 0） |
+| 19 | 换库批：BLAKE3 与 SQLite 换成熟第三方库 | 完成（Go 1166 / 1145 / 21 / 0，二进制 +6.39 MiB） |
 
 ---
 
@@ -3726,3 +3727,231 @@ GOOS=windows go build ./cmd/... ./internal/...       通过
    顺带补 Windows 侧（阶段 8 起一直挂着）。
 4. 若继续加固批：把「提交点」的两次写收敛成跨层代数对象（需先设计分层的边界，
    不属小改）；以及为 `commitMu` 增加一个「第三个写者必须走提交点」的编译期或测试约束。
+
+## 阶段 19 — 换库批：BLAKE3 与 SQLite 驱动（2026-11-15）
+
+范围：两处**自研实现换成成熟第三方库**，纯核心侧。前端与 Rust 壳（`apps/desktop`）一个字未改，
+`/v1` 的字段与语义未改，`spikes/` 与 `docs/` 未改。基线 HEAD `d566fcc`
+（Go 1155 条目 / 1134 通过 / 21 跳过 / 0 失败）。
+
+上一轮任务被机器刷新打断，本阶段在**已落地的那部分**上继续：BLAKE3 与 SQLite 两处换库的代码
+上一轮已经写完、`go build ./...` 已通过，缺的是 store 包的测试、迁移读用例、语义核对、
+体积与依赖台账。本条目记录的是**收尾后的完整状态**，两项换库一并登记。
+
+### 完成了什么
+
+**1. BLAKE3 换成 `lukechampine.com/blake3` v1.4.1（`internal/outbound/blake3.go`）**
+
+- 三个包内函数 `blake3Hash` / `blake3Keyed` / `blake3DeriveKey` 的名字与签名不变，函数体改成对
+  模块的一行转调（`Sum256`、`New(32, key)`、`DeriveKey`）；调用点（`aead.go` 一处、
+  `shadowsocks.go` 两处 `derive-key`）一个字未动，差异锁在一个文件里。
+- **换之前做过差分**：derive-key / hash / keyed 三种模式在 0/1/32/64/100/1024/5000/102400/102401
+  等长度上与旧实现逐字节比对，全部相等；换库后这些期望值进测试成为常量，不是「跑通了就算」。
+- `blake3_test.go` 重写为三层：① 官方 `test_vectors.json` 的 8 个长度（0/1/1023/1024/1025/2048/
+  31744/100000）三列各取前 32 字节；② 上一实现产出、且已与模块互验的 5000 与 102400 两组值，
+  钉住官方向量没覆盖到的多块与 100 块路径；③ 2022 家族真正在用的那条路径——
+  `derive_key("shadowsocks 2022 session subkey", …)` 的 8 个值作为常量，另加一条上下文域分离断言。
+  outbound 包的测试条目 20 → 30。
+- 旧的 ~230 行压缩函数、chunk 链接与父节点折叠整份删除。保留这三个函数而不把调用点改成直接
+  import 模块，是为了让「BLAKE3 从哪来」成为**一个文件里的一个决定**（决策 3）。
+
+**2. SQLite 换成 `database/sql` + `modernc.org/sqlite` v1.62.0（`internal/store/db.go`，删除 `sqlite.go`）**
+
+- 自研的 763 行格式代码（100 字节文件头、4096 页、table b-tree 叶子/内部页、record 头与
+  serial type、varint、overflow 判定、镜像自读）整份删除；新增 `db.go`：三张表的定义与 `CREATE`
+  语句、建库、只读校验、整表重写、三张表的读回。
+- **契约不变**：同三张表、同列名/列序/类型/可空性、同 `user_version = 1`、同文件名
+  `history.sqlite3`。旧构建写的文件能被新构建读，新构建能往旧文件里追加（下面有两条用例）。
+- **打开顺序是契约的一部分**：先用 `mode=ro&_query_only=1` 的 DSN 只读连上去 →
+  `PRAGMA user_version` → `PRAGMA table_info` 三张表逐列比 → 三张表读一遍并统计行数 →
+  `Close` 之后才 `openWritable`。校验阶段任何一条不满足就走 `preserve`，**从不以可写方式打开**，
+  所以「保全」不再依赖「我们没写」这种自觉，而是依赖 SQLite 的 `SQLITE_READONLY`。
+- 写路径：`_journal_mode=delete`（单文件，不留 WAL 对）、`_synchronous=full`（提交即落盘，
+  等价于旧实现的 `Sync` + `Rename`）、`_txlock=immediate`（事务开始就拿写锁，两个写者排队而不是
+  一方在升级时失败）。一次 `BEGIN IMMEDIATE` 里三张表 `DELETE` + 重插，读者看到上一份或这一份。
+- 建库时用 `O_RDWR|O_CREATE|O_EXCL` 自己按 0600 创建文件再交给驱动：驱动会按进程 umask 建
+  （通常 0644），而历史文件不该有一瞬间是别人可读的；`O_EXCL` 顺带让两个同时启动不会都去初始化
+  schema（`ErrExist` 视为「已经是别人的文件」，走接管）。
+
+**3. 测试：删掉测已消失格式的用例，补迁移读、接管写与四条语义**
+
+- **删除 6 条**（随实现一起消失）：`TestVarintRoundTrip`、`TestRecordRoundTrip`、
+  `TestImageIsReadBySQLite`、`TestImageRejectsWhatItCannotRead`、`TestBuildImageRefusesAnOversizedRow`、
+  `TestVarintWidthsMatchTheFormat`。它们断言的是 `putVarint`/`readVarint` 的宽度、
+  `encodeRecord`/`decodeRecord` 的头长度、页内 payload 上界与镜像自读，这些函数已经不存在。
+  其中「读不懂的文件被拒」这一**意图**没有丢：文件不是数据库、头对正文短、schema 版本超前、
+  列类型对不上，四条都各有用例（见下），比原来的三条更全。
+- **保留意图并改写 1 条**：`TestImageIsReadBySQLiteTool` → `TestHistoryFileIsReadBySQLiteTool`。
+  不再是「手搭镜像再交给 sqlite3」，而是**建真 Store → 写 500 行（跨页）→ Flush → 交给系统
+  `sqlite3`** 查行数与极值、单行回读、`sqlite_schema` 的三个表名、空表计数、`PRAGMA integrity_check`、
+  `PRAGMA user_version`。缺 `sqlite3` 时 `t.Skip`，口径与旧一致；它只在测试里通过 PATH 调用，
+  不链接、不随产品分发、不进仓库。
+- **新增 7 条**：
+  - `TestLegacyHistoryFileIsReadByThisBuild`：把 `testdata/legacy-history.sqlite3.base64` 解码成
+    旧实现写的文件，逐列核对三张表全部 10 行（4 连接 / 3 事件 / 3 采样）。夹具故意挑难：252 字节
+    主机名、`2^40`/`2^41` 的计数、空字符串列（不能变成 NULL）、punycode 主机名。
+  - `TestLegacyHistoryFileTakesNewWrites`：**接管写**——打开旧文件 → 追加 1 连接 / 1 事件 / 1 采样
+    → `Flush` → 再打开断言 5/4/4，且旧行字段不变、新行在末尾（顺序不乱）。
+  - `TestStorePreservesATruncatedFile`：合法 100 字节头 + 半页正文 → 拒绝、字节不变、无 `-journal/-wal/-shm`。
+  - `TestStorePreservesAFileWithAColumnItCannotRead`：schema 全对、行列数全对，但某列是错类型
+    （把 INTEGER 列写成文本，SQLite 的动态类型允许）→ 同样拒绝。旧实现的读端对解不开的行是
+    `continue`，**下一次 Flush 就会把那一行从文件里抹掉**；新实现的 `Scan` 出错直接让整次接管失败。
+  - `TestStoreDefaultsBoundTheTables`：默认 2000/500/1440 的容量与「丢最旧」在**默认值**上验一遍
+    （原来只在自定的 {2,1,2} 上验），顺带把三个常量钉住。
+  - `TestStoreFlushesWithoutBeingTold`：只靠节拍（测试里 5ms，生产 30s）落盘，全程没有显式
+    `Flush`，重开后记录在。
+  - `TestStoreRetriesAFailedWrite`：写失败后记录仍在内存、`last_error` 有值、下一次 Flush 把
+    它们写进去（用「句柄被关掉」制造可确定的写失败，因为满盘与权限在测试里不可控）。
+- **改 fixture 不改断言 1 条**：`TestStorePreservesAFileFromAnotherVersion` 不再自己拼镜像，改成
+  「用本构建建库 → 只改头部第 60 字节的 `user_version` 再 +1」；`another version` + `preserved`
+  的 notice、`ErrHistoryPreserved`、字节不变、重启后仍保全，四条断言逐条保留。
+- 新增 `assertNoSidecars`：preserve 路径结束后，文件旁边不得出现 `-journal` / `-wal` / `-shm`
+  ——「没写」要能被测出来，而不是靠 review 相信。
+- 另加 `internal/store/benchmark_test.go`（`BenchmarkFlushFullHistory`），把「一次 Flush 多久」
+  变成可复现的数字（见「当前状态」与「遗留」）。
+- 包内测试条目：store 包 16 → 17（删 6、改写 1、增 7）。
+
+### 关键决策及理由
+
+1. **手写格式换成驱动：维护成本已经超过收益**。阶段 12 选自研，是因为当时模块代理不可达、
+   cgo 驱动会毁掉「单文件 + 交叉编译」这两条硬要求。现在 `modernc.org/sqlite` 是纯 Go、无 cgo、
+   Windows 交叉编译已实测通过，而那份 763 行代码的每一行都要我们自己对 SQLite 文件格式负责
+   （页分裂、空闲表、溢出页、崩溃恢复都是我们自己没实现的部分）。观测层是**旁路**，它不值得
+   继续占用这种级别的注意力。
+2. **先只读校验、再可写打开，顺序是契约的一部分**。`preserve` 的全部价值在于「原文件一个字节
+   都没动」；只要在校验前以可写方式打开过一次，`-journal`、头部 change counter、乃至
+   `journal_mode` 的持久化都可能落盘，那就不再是「保全」而是「碰过但没改内容」。所以校验走
+   `mode=ro&_query_only=1`，通过之后才拿可写句柄，并且测试额外断言旁边没有 sidecar 文件。
+3. **BLAKE3 保留三个函数名，不把调用点改成直接 import**。2022 家族的会话子密钥是安全关键路径：
+   换实现时最怕的是「某处调用忘了换」或「换了一半」；把差异收在一个 40 行的文件里，配合
+   「旧值 vs 新值逐字节相同」的常量测试，才能保证这次替换是**可审的**。
+4. **迁移用旧实现的产物当夹具，不按新代码重新生成**。「新代码能读自己写的文件」是同义反复；
+   真问题是「新代码能不能读**别人**写的文件」。夹具是从旧构建的真实产物里拿的（base64 存文本，
+   二进制 blob 在 diff 里没法 review），并且在用例里被逐列核对，包括那 252 字节的主机名与
+   超过 32 位的计数——这两处正是格式实现最容易出错的地方。
+5. **删测试，不删意图**。六条被删的用例测的是已经不存在的函数，留着只会变成编译错误；
+   但它们覆盖的风险（产物别人能读、读不懂的文件不被覆盖）全部在新用例里以更高一层的形态存在。
+   `DEVLOG` 逐条记录了删了什么、为什么，避免「测试变少了」被读成「覆盖变差了」。
+6. **不允许「读不懂的行被跳过，然后被 Flush 抹掉」**。旧读端对解不开的行是 `continue`：文件能
+   打开、行数少一行、下一次 Flush 把少的那行永久删掉，全程没有一句日志。新实现的 `Scan` 出错
+   直接让接管失败，文件进入保全。这条是阶段 12「不静默丢历史」原则的补齐，而不是新原则。
+7. **`_journal_mode=delete` 而不是 WAL**。WAL 会带出 `-wal`/`-shm` 两个伴生文件：运维拷贝或删除
+   「那份历史」时得记着三件套，备份也容易只备主文件。历史是旁路，读少、写更少（30 秒一次），
+   WAL 的并发收益用不上，单文件的可搬运性更重要。
+8. **别让驱动按 umask 建文件**。`0600` 是契约里的一条（历史里有访问过的主机名），而
+   `sql.Open` 会以 0644 建文件。所以先 `O_EXCL` 按 0600 建，再把路径交给驱动；`O_EXCL` 还顺带
+   解决了「两个进程同时首次启动都去初始化 schema」。
+9. **go.sum 补齐到 `go mod tidy` 幂等**。上一轮留下的 go.sum 缺 28 行传递依赖条目（模块图层面
+   的哈希，构建其实不需要），导致任何人跑一次 `go mod tidy` 都会得到一个无关 diff。这次补齐，
+   并验证第二次运行无差异。
+
+### 依赖登记（GPLv3 兼容）
+
+许可证逐项从**模块缓存里该版本自带的 LICENSE 原文**核对（不是从文档或印象），`go mod verify` 通过。
+
+| 组件 | 版本 | 许可证 | 用途 | 与 GPLv3 |
+|---|---|---|---|---|
+| `lukechampine.com/blake3` | v1.4.1 | MIT（Luke Champine） | 2022 家族的子密钥派生、hash、keyed hash | 兼容 |
+| `modernc.org/sqlite` | v1.62.0 | BSD-3-Clause（The Sqlite Authors） | `database/sql` 驱动：历史文件的读写 | 兼容 |
+| `modernc.org/libc` | v1.80.1 | BSD-3-Clause（The Libc Authors） | 驱动依赖：被转译的 C 运行时 | 兼容 |
+| `modernc.org/memory` | v1.12.1 | BSD-3-Clause（The Memory Authors） | 驱动依赖：分配器 | 兼容 |
+| `modernc.org/mathutil` | v1.7.1 | BSD-3-Clause（The mathutil Authors） | 驱动依赖：大整数/位运算 | 兼容 |
+| `github.com/remyoudompheng/bigfft` | v0.0.0-20230129092748-24d4a6f8daec | BSD-3-Clause（The Go Authors） | `mathutil` 依赖：FFT 乘法 | 兼容 |
+| `github.com/dustin/go-humanize` | v1.1.0 | MIT（Dustin Sallings） | `libc` 依赖：数字/时间格式化 | 兼容 |
+| `github.com/mattn/go-isatty` | v0.0.24 | MIT / Expat（Yasuhiro MATSUMOTO） | `libc` 依赖：TTY 判定 | 兼容 |
+| `github.com/ncruces/go-strftime` | v1.1.0 | MIT（Nuno Cruces） | `libc` 依赖：`strftime` | 兼容 |
+| `github.com/google/uuid` | v1.6.0 | BSD-3-Clause（Google Inc.） | `libc` 依赖：UUID 类型 | 兼容 |
+| `github.com/klauspost/cpuid/v2` | v2.0.9 | MIT（Klaus Post） | `blake3` 依赖：运行期 CPU 特性探测（选用 AVX2/AVX512 实现） | 兼容 |
+| `golang.org/x/sys` | v0.50.0（阶段 9 已登记的直接依赖） | BSD-3-Clause（Go Authors） | 本阶段新增用途：`modernc.org/libc` 的 syscall 面 | 兼容 |
+
+驱动**随源码带进来的 C 代码**（同一份 `LICENSE-3RD-PARTY.md` 逐条核对，与本项目二进制的关系写明）：
+
+| 组件 | 版本 | 许可证 | 是否进本项目的二进制 | 与 GPLv3 |
+|---|---|---|---|---|
+| SQLite | 3.54.1（转译进 `modernc.org/sqlite/lib`） | 公有领域（`LICENSE-SQLITE`） | 是 | 兼容（无限制） |
+| musl libc | —（经 `modernc.org/libc`） | MIT | 是 | 兼容 |
+| Go 运行时 / `go-netdb` | —（经 `modernc.org/libc`） | BSD-3-Clause / MIT | 是 | 兼容 |
+| `sqlite-vec` | v0.1.9（`LICENSE-SQLITE_VEC`） | MIT | **否**：只有 import `modernc.org/sqlite/vec` 才链接，本项目没有 | 兼容 |
+| SQLite `test_demovfs.c` | — | 公有领域 | **否**：只有 import `modernc.org/sqlite/vfs` 才链接 | 兼容 |
+
+其它：`go.mod` 新增 2 个直接依赖、9 个传递依赖（其中 `klauspost/cpuid/v2` 归 BLAKE3，
+其余归驱动）；`github.com/molecule-man/go-brrr` 等既有传递依赖未变。`go.sum` 补 28 行，
+`go mod tidy` 两次运行无差异。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链 `~/sdks/go/bin` 的 Go 1.27.4，Linux/x86_64：
+
+```
+go build ./...                                            通过
+go vet ./...                                              通过
+gofmt -l .                                                无输出
+go test ./... -count=1 -v                                 1166 条目 / 1145 通过 / 21 跳过 / 0 失败
+go test -race ./internal/store/ ./internal/outbound/       通过
+go test ./internal/store/ -run XXX -bench BenchmarkFlushFullHistory -benchtime 20x   39–42 ms/op
+GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...  通过
+```
+
+- 逐项对基线（`d566fcc`，1155/1134/21/0）：**条目 +11、通过 +11、跳过 ±0、失败 0**。
+  增量 = outbound +10（BLAKE3 向量分列成 hash / keyed / derive 三组，另加两组常量与一条域分离）
+  + store +1（删 6、改写 1、增 7 的结果）。21 条跳过与阶段 8/9/11 起的那一批**逐名核对完全同一集合**：
+  缺参考实现的互通 10、未连接 `sendto` 被 seccomp 拒绝的 UDP 9、上游「UDP 截断改 TCP」1、
+  `TestTUNLinuxLoopback` 1。无新增跳过。
+- `GOOS=windows GOARCH=amd64 go build ./...` 仍是 `./cmd/... ./internal/...`：`./...` 会被
+  `spikes/tun` 的 Unix-only 原型挡住（阶段 8 起如此），与本次换库无关；驱动本身交叉编译通过，
+  `GOOS=windows go vet ./internal/store/` 也通过。
+- **二进制体积**（同机同工具链，`go build -o` 默认参数，均未 strip）：
+
+  | 树 | 大小 | 相对 HEAD |
+  |---|---|---|
+  | HEAD `d566fcc` | 17,588,294 B（16.77 MiB） | — |
+  | HEAD + 只换 BLAKE3 | 17,733,376 B（16.91 MiB） | +145,082 B（+141.7 KiB） |
+  | HEAD + 两项都换（当前树） | 24,287,933 B（23.16 MiB） | +6,699,639 B（+6.39 MiB，+38.1%） |
+
+  即：BLAKE3 换库几乎不改变体积（+142 KiB，模块带 AVX2/AVX512 实现，换掉的是 230 行纯 Go），
+  **体积增量基本全部来自驱动**（+6.25 MiB，被转译的 SQLite + libc）。
+- `go.mod` / `go.sum`：`go mod verify` 通过，`go mod tidy` 幂等。
+- **包外零改动**：`git status` 在 `internal/store`、`internal/outbound`、`go.mod`、`go.sum` 之外
+  没有任何条目；`internal/api` / `internal/cli` / `cmd/` 一个字未改，`/v1/history*` 的字段与
+  CLI 输出形状因此不变（相关用例在 1166 条里原样通过）。
+- 两笔本地提交（未推送）：`795898e`（BLAKE3 → 模块，含 `go.mod` / `go.sum`）→
+  `f0c5586`（store → 驱动 + 测试 + 迁移夹具 + 基准）。本条目单独一笔，不推送。
+
+### 遗留问题
+
+- **体积 +6.39 MiB（+38%）**，单文件二进制 23.16 MiB，且未 strip。这是换驱动的主要代价：换来自研
+  写端（约 600 行）为一份被转译的 SQLite + libc。若要压，`-ldflags "-s -w"` 与 `-trimpath` 是
+  下一步；驱动侧能裁的只有我们本来就没链接的 `vec`/`vfs`。
+- **一次满载 Flush 约 40ms，是旧实现的约 3 倍**（旧 10–14ms，新 39–42ms；见
+  `BenchmarkFlushFullHistory`）。里面至少有一次 fsync（`_synchronous=full` 买的是「提交即落盘」），
+  其余是约 3900 行插入走转译引擎；**没有拆分测量**，所以「fsync 占多少」目前是推测。
+  30 秒一次、0.13% 占空比，可以接受；但保留量若上调，这条要重新评估。
+- **整表重写没有变**：仍然每次把三张表删光重插。驱动本身能做增量（`INSERT`/`UPDATE`/`DELETE`
+  逐行），只是「内存表是唯一真相」这条设计没变，改成增量会让「内存与文件不一致」变成可能。
+  要改的话是一次独立设计，不属换库批次。
+- **掉电与并发没有真机证据**：`_synchronous=full` 只保证提交落盘，`kill -9` 后重开、
+  两个进程同时打开同一个 history 文件（`_txlock=immediate` 下应排队）都没有用例。沙箱里能做的
+  只有「句柄被关掉」这种可确定的失败（已覆盖）。WAL 模式、热日志回滚同理未验。
+- **迁移只在 Linux/x86_64 上跑过**：Windows 侧交叉编译通过，但没有在真机上对旧文件（夹具）跑
+  一遍迁移，与阶段 8 起的 Windows 挂账同类。
+- **启动期行为有一处可观测变化**：路径不可创建时，旧实现是「静默在内存里跑，第一次 Flush 才
+  报错」，现在是启动就 `preserve`，`/v1/history` 的 `notice` 立刻有值、`last_error` 也有值。
+  行为更诚实（运维在启动后就能看见），但确实与旧版不同，记在这里。
+- **保留的 `blake3Hash` / `blake3Keyed` 目前没有生产调用点**（生产只走 derive-key），留着是为了
+  签名稳定与测试可读；若确认长期不用，可连同测试一起收掉，但那会让「换库前后逐字节一致」的
+  证据链少一环。
+- 阶段 8–18 的既有挂账照旧：Windows 实机（TUN / 系统代理 / 令牌文件）、Rust 壳编译、QUIC 真实
+  互通、REALITY UDP 证据、预览桥 query string、`core.log` 无轮转、用户态 TCP 的 IPv6/乱序/窗口缩放、
+  名字地址池枯竭计数的对外出口。
+
+### 下一步计划
+
+1. **二进制体积**：`-s -w` + `-trimpath` 实测（预计 -25%~-30%），并把「是否 strip」写进构建脚本与
+   发布说明；顺手确认三个平台的产物大小都可接受。
+2. **Flush 成本**：把「fsync 占多少」拆出来测（`_synchronous=off` 的对照跑，只作测量不作默认），
+   再决定是否需要「只在有变化时重写」或按保留量自适应的节拍。
+3. **掉电与并发**：两个进程同时打开同一个 history 文件跑一遍；`kill -9` 后重开的一致性；
+   若要，再把 WAL 作为可选模式评估（收益是 Flush 更快，代价是三个文件）。
+4. **真机迁移**：Windows 上用 base64 夹具跑一遍「旧文件 → 新构建 → 追加 → 重开」，与阶段 8 起的
+   Windows 挂账一起清。
+5. 回到核心侧：阶段 18 留下的两个决策项（枯竭计数是否进 `/v1`、名字地址池扩容与 LRU）。
