@@ -121,7 +121,18 @@
   --layout-header: 54px;
   --layout-content-max: 1180px;
   --layout-page-padding: var(--space-6);
+  --layout-log-viewport: 360px;
+  --layout-control-height: 34px;
+  --layout-field-min: 240px;
+  --border-hairline: 1px;
   --focus-ring: 0 0 0 3px var(--color-accent-soft);
+
+  /* ---------- semantics: table column ratios ---------- */
+  --table-columns-rules: 0.4fr 0.9fr 1.5fr 0.9fr 0.9fr 0.45fr 0.7fr;
+  --table-columns-rule-sets: 1fr 2.4fr;
+  --table-columns-steps: 0.4fr 0.8fr 1.3fr 0.5fr 1.6fr;
+  --table-columns-audit: 0.9fr 1fr 0.6fr 1.6fr 0.9fr;
+  --table-columns-log-failures: 0.9fr 1.6fr 0.6fr 0.7fr 0.8fr 0.9fr;
 }
 
 @media (prefers-color-scheme: dark) {

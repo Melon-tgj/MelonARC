@@ -10,13 +10,16 @@
 
 import { ApiFailure, ErrorCode, asApiFailure } from "./errors.js";
 
-/** Paths of this step's read-only surface. */
+/** Paths of the read-only surface the panels consume. */
 export const Paths = Object.freeze({
   status: "/v1/status",
   config: "/v1/config",
   policies: "/v1/policies",
   inbound: "/v1/inbound",
   failures: "/v1/failures",
+  rules: "/v1/rules",
+  explain: "/v1/rules/explain",
+  audit: "/v1/audit",
   select: "/v1/policies/select",
 });
 
@@ -102,7 +105,62 @@ export function createApiClient({ bridge }) {
      */
     selectPolicy: (group, member) =>
       request("POST", Paths.select, JSON.stringify({ group, member })),
+
+    /**
+     * One page of compiled rules. The core caps a page at 5000 rules; a panel
+     * asks for the size it can render and reports the total separately.
+     *
+     * @param {number} [limit]
+     * @returns {Promise<any>}
+     */
+    rules: (limit = 500) => request("GET", withQuery(Paths.rules, { limit })),
+
+    /**
+     * Explain a classification. Only the four parameters the core accepts are
+     * sent; an empty one is left out so the core's own validation stays in charge.
+     *
+     * @param {{ name?: string, addr?: string, port?: number, network?: string }} [query]
+     * @returns {Promise<any>}
+     */
+    explain: (query = {}) => request("GET", withQuery(Paths.explain, query)),
+
+    /**
+     * The write operations the local API carried out.
+     *
+     * @param {number} [limit]
+     * @returns {Promise<any>}
+     */
+    audit: (limit = 64) => request("GET", withQuery(Paths.audit, { limit })),
+
+    /**
+     * Metadata about where the shell looks for the core. This comes from the
+     * bridge, not from an HTTP endpoint, and never contains the token itself.
+     *
+     * @returns {Promise<any>}
+     */
+    async runtime() {
+      if (typeof bridge?.runtime !== "function") return null;
+      try {
+        return await bridge.runtime();
+      } catch {
+        return null;
+      }
+    },
   };
+}
+
+/**
+ * Build a path with only the query parameters that carry a value.
+ *
+ * @param {string} path
+ * @param {Record<string, unknown>} params
+ * @returns {string}
+ */
+function withQuery(path, params) {
+  const pairs = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && value !== "")
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+  return pairs.length ? `${path}?${pairs.join("&")}` : path;
 }
 
 /**

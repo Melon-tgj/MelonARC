@@ -147,7 +147,10 @@ export function installFakeDom({ languages = ["zh-CN"] } = {}) {
     createElement: (tag) => new FakeNode(tag),
     createElementNS: (_namespace, tag) => new FakeNode(tag),
     createTextNode: (text) => new FakeText(text),
-    getElementById: (id) => (id === "app" ? root : null),
+    // The shell is attached through replaceWith, so look for an id in the
+    // mounted tree as well as in the original mount point. A panel that wants
+    // to ask the header's language control to change needs this lookup.
+    getElementById: (id) => (id === "app" ? root : findById(root.replacedWith ?? root, id)),
     addEventListener() {},
     removeEventListener() {},
     visibilityState: "visible",
@@ -185,6 +188,21 @@ export function installFakeDom({ languages = ["zh-CN"] } = {}) {
       }
     },
   };
+}
+
+/**
+ * @param {FakeNode | FakeText} node
+ * @param {string} id
+ * @returns {FakeNode | null}
+ */
+function findById(node, id) {
+  if (!(node instanceof FakeNode)) return null;
+  if (node.attributes.get("id") === id) return node;
+  for (const child of node.children) {
+    const found = findById(child, id);
+    if (found) return found;
+  }
+  return null;
 }
 
 /** @param {string} key @param {any} value */

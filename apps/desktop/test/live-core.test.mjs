@@ -26,7 +26,7 @@ const skip =
     ? "set MELONARC_TEST_API and MELONARC_TEST_DATA_DIR to run against a live core"
     : false;
 
-test("the three panels' endpoints answer a real core", { skip }, async () => {
+test("every panel's endpoints answer a real core", { skip }, async () => {
   const { client, token } = await liveClient();
 
   const status = await client.status();
@@ -71,8 +71,42 @@ test("the three panels' endpoints answer a real core", { skip }, async () => {
     assert.ok(typeof record.category === "string" && record.category !== "");
   }
 
+  // The rules panel reads the compiled list and the declared external sets.
+  const rules = await client.rules(500);
+  assert.ok(typeof rules.total === "number");
+  assert.ok(Array.isArray(rules.rules) && rules.rules.length > 0);
+  for (const rule of rules.rules) {
+    assert.equal(typeof rule.index, "number");
+    assert.equal(typeof rule.type, "string");
+    assert.equal(typeof rule.target, "string");
+  }
+  assert.ok(Array.isArray(config.rule_sets), "the config reports its rule sets");
+
+  // The hit test uses the core's own explanation endpoint, for a name and an IP.
+  const byName = await client.explain({ name: "example.com", network: "tcp" });
+  assert.equal(byName.query.name, "example.com");
+  assert.equal(typeof byName.matched, "boolean");
+  assert.ok(Array.isArray(byName.steps));
+  for (const step of byName.steps) {
+    assert.equal(typeof step.type, "string");
+    assert.equal(typeof step.match, "boolean");
+    assert.equal(typeof step.detail, "string");
+  }
+  const byAddr = await client.explain({ addr: "203.0.113.9" });
+  assert.equal(byAddr.query.addr, "203.0.113.9");
+  assert.equal(typeof byAddr.report, "string");
+
+  const audit = await client.audit(64);
+  assert.ok(typeof audit.capacity === "number");
+  assert.ok(Array.isArray(audit.entries));
+  for (const entry of audit.entries) {
+    assert.equal(typeof entry.time, "string");
+    assert.ok(["policy.select", "config.reload"].includes(entry.action), `unexpected action ${entry.action}`);
+    assert.ok(["ok", "failed"].includes(entry.result), `unexpected result ${entry.result}`);
+  }
+
   // The token is a credential: nothing the API returns may contain it.
-  for (const payload of [status, config, policies, inbound, failures]) {
+  for (const payload of [status, config, policies, inbound, failures, rules, byName, byAddr, audit]) {
     assert.ok(!JSON.stringify(payload).includes(token), "a payload leaked the token");
   }
 });

@@ -18,9 +18,11 @@
  */
 
 import connections from "./connections.js";
+import logs from "./logs.js";
 import overview from "./overview.js";
 import policies from "./policies.js";
-import { logsPanel, rulesPanel, settingsPanel } from "./placeholders.js";
+import rules from "./rules.js";
+import settings from "./settings.js";
 
 /** @type {Array<ReturnType<typeof normalize>>} */
 const panels = [];
@@ -66,4 +68,4 @@ function normalize(panel) {
 }
 
 // The single line a new panel touches. Keep it alphabetical-ish by order value.
-registerPanels([overview, policies, connections, rulesPanel, logsPanel, settingsPanel]);
+registerPanels([overview, policies, connections, rules, logs, settings]);

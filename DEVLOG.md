@@ -2651,3 +2651,214 @@ TUIC v5）连同所有 UDP 行为如实留白。
 3. 设置页把语言、主题、API 地址与数据目录做成可见可改，顺手消掉上面两条对不上的缺口。
 4. 再往后：连接页接 `/v1/history/connections` 与流量曲线、系统托盘、
    Logo 矢量化与图标资产、Windows 构建与 README 口径更新。
+
+## 阶段 14 — GUI 第二步：规则 / 日志 / 设置（2026-11-14）
+
+范围：按阶段 13 的下一步计划，先限时重试 Rust / WebKitGTK 工具链，再把规则、日志、
+设置三个占位页补成真实功能。**核心 Go 代码一行未改**，`spikes/` 与 `docs/` 一个字未动，
+`go.mod` / `go.sum` 零改动；阶段 13 暂缓的 6 个图标二进制文件本阶段不处理。
+开工前已确认工作区干净、HEAD 为 `e4a5f74`。
+
+### 任务 A：Rust 工具链与 Tauri Linux 依赖重试（限时，两次为限）
+
+用户提示本机网络状态可能已变化、凌晨曾从镜像成功取到 `.deb`，故按「一次完整安装尝试
+＋一次换源尝试」上限重试，**不无限重试**。两次都失败，确切失败点如下。
+
+**第 1 次：默认源的一次完整安装尝试**
+
+- `apt-get update` 直接失败，代理主机名解析不了，且沙箱不允许写 apt 状态目录：
+
+  ```text
+  Temporary failure resolving 'hatch-egress-proxy'
+  W: Problem unlinking the file /var/lib/apt/lists/partial/... - IsAccessibleBySandboxUser (1: Operation not permitted)
+  E: Unable to read /var/cache/apt/ - opendir (1: Operation not permitted)
+  E: The package lists or status file could not be parsed or opened.
+  ```
+
+- 安装前探测确认：本机既没有 `rustc` / `cargo`，也没有 `libwebkit2gtk-4.1-dev`；
+  因此 Tauri 官方 Linux 依赖清单（`libwebkit2gtk-4.1-dev`、`build-essential`、
+  `curl`、`wget`、`file`、`libxdo-dev`、`libssl-dev`、`libayatana-appindicator3-dev`、
+  `librsvg2-dev`、`patchelf` 等）连解析包索引这一步都没走到。
+- 网络探测结果不一致：通用环境代理对 apt 镜像返回 `403`、对 crates 端点超时；
+  `hatch-egress-proxy:3128` 对 Ubuntu 镜像的 HTTP URL 能返回 `200`，但
+  `crates.io` 与 cargo 镜像全部 `000`（超时）。即.deb 通道可能可用，Rust 依赖通道不可用。
+
+**第 2 次：换源 + 显式出网代理**
+
+- 改用镜像源并显式指定出网代理后，更新与安装仍全部失败：
+
+  ```text
+  UPDATE_RC=100
+  INSTALL_RC=100
+  Temporary failure resolving 'hatch-egress-proxy'
+  E: Unable to locate package rustc
+  E: Unable to locate package cargo
+  E: Unable to locate package libwebkit2gtk-4.1-dev
+  E: The package lists or status file could not be parsed or opened.
+  ```
+
+- 该次尝试还被沙箱安全策略拦截（「命令被安全策略拦截，但 Sandbox 未返回具体资源，
+  无法安全重试」），并明确要求不得重试等价方案；因此按预定上限停止，不再尝试第三条路径。
+
+**任务 A 结论（如实记录）**：Rust 工具链与 WebKitGTK 开发包**没装上**，
+所以下面四件约定产物本阶段都**没有**：
+
+1. `cargo build` 未执行，Rust 壳仍只以源码交付、未做本机编译验证；
+2. `Cargo.lock` 未生成、未入库，Rust 依赖版本仍未锁定；
+3. Xvfb :99 上**没有原生窗口**（Xvfb 进程本身在跑，但没有可启动的窗口二进制），
+   概览 / 节点与策略 / 连接三张截图**没有**；
+4. Rust 传递依赖许可证清单**无法枚举**，阶段 13 登记的那张表仍是唯一依据，
+   待首次联网 `cargo build` 后补复核。
+
+这不是功能缺陷，是构建环境问题；任务 A 到此封顶，继续任务 B。
+
+### 完成了什么（任务 B）
+
+**1. 先查 API 现状，命中测试不用改核心**
+
+动手前逐个核对 `internal/api/server.go` 的路由表与 `internal/api/views.go` 的线格式，
+确认核心**已经有** `GET /v1/rules/explain`（`parseExplainRequest` 接受 `name` / `addr` /
+`port` / `network`，自己校验 IP、端口与网络），装配在 `cmd/melonarc-core/state.go` 的
+`daemonState.Explain`。因此阶段 13 记的「可能缺 HTTP Explain 端点」不成立，规则页的
+命中测试直接接既有能力，**核心 Go 代码零改动**，也不需要把「命中测试」挂成遗留。
+
+- 只读规则列表：`GET /v1/rules?limit=500`，字段严格照 `RuleView`
+  （`index` / `type` / `payload` / `target` / `source` / `line` / `no_resolve`）；
+  外部规则集来自 `GET /v1/config` 的 `rule_sets`（`name` / `path`）。
+  API 只给这两个字段，界面明确写出「没有条目数与刷新时间」，不臆造。
+- 命中测试：输入域名或 IP，`isIP` 判定后分别发 `name=` 或 `addr=`（可选 `network`），
+  展示 `matched`、命中规则、`steps` 决策路径、`resolution` 与 `report`；
+  IP 走 `addr` 而不是 `name`，有单测钉住。全程只读，不改配置。
+- 面板 5 秒轮询，读失败只显示类别化错误，成功则 `core.noteSuccess()` 恢复在线状态。
+
+**2. 日志面板：`/v1/audit` + `/v1/failures`**
+
+- 审计走 `GET /v1/audit?limit=64`（`time` / `action` / `result` / `detail` / `remote`），
+  失败记录走 `GET /v1/failures?limit=20`
+  （`time` / `target` / `network` / `stage` / `category` / `policy`）。
+- **过滤按线格式真实字段推导，不新增字段**：级别 = 审计的 `result`
+  （`ok` / `failed`）或失败记录的隐式 `failed`；来源 = 审计的 `action`
+  （`policy.select` / `config.reload`）或失败记录的 `stage`（`route` / `dial`）。
+  未知值原样显示，翻译缺失时回落原文。
+- 「暂停滚动」保留当前快照：暂停期间不再拉取、不再自动滚到底部，恢复后继续 4 秒轮询。
+
+**3. 设置面板：可见可改、持久化、重启口径**
+
+- 新增叶子模块 `src/lib/gui-settings.js`：`localStorage` 键 `melonarc.gui` 存
+  `MELONARC_DATA_DIR` / `MELONARC_API_ADDR` 两份覆盖值，默认 API 地址
+  `127.0.0.1:7946`；提供 read / save / clear / validate / `envLines` / `setLocale`。
+  API 地址只接受回环（`localhost`、`::1`、`127.*`）+ 合法端口，与 Rust 侧红线一致；
+  数据目录拒绝控制字符；存储不可写不抛异常，只回报失败。
+- 面板显示「当前生效值」（来自 bridge 的 runtime 元数据，只含路径/地址不含令牌）、
+  可编辑的两个字段、保存/重置，以及**下次启动 GUI 时要设的两行环境变量**。
+  重启口径写死在文案里：这两个值由桌面壳**启动时**读取 → 保存后**重启 GUI 生效**；
+  只有核心配置里的 `data-dir` / `api-listen` 改了才需要**同时重启核心**（且重启会轮换令牌）。
+- 语言切换复用阶段 13 的头部机制：`setLocale()` 写共享键 `melonarc.locale` 后
+  向 `#locale-select` 派发 `change`，由既有 `app.js` 完成重挂载，**即时生效**；
+  因此 `app.js` / 路由 / 侧栏一字未改。
+- 关于区用定稿 Logo `src/assets/logo.png`、`APP_VERSION` 与 `APP_LICENSE`（GPLv3 字样），
+  并配一条多语言许可证说明。
+
+**4. 接入层与测试**
+
+- `src/api/client.js` 新增 `rules` / `explain` / `audit` 三个方法与 `withQuery`（只带非空参数），
+  `Paths` 补齐四条路径；新增 `runtime()` 读 bridge 元数据（不含令牌）。
+- `src/panels/registry.js` 只把三处占位导入换成真模块，注册行仍是唯一扩展点；
+  `src/panels/placeholders.js` 删除。样式只在 `tokens.css` 增加布局尺寸、表格列比、
+  1px 边框宽度令牌，`panels.css` 新增类全部消费语义令牌。
+- 语言包 zh-CN / en 各 **220 键**，键集与 `{占位符}` 集合完全一致；删除废弃的
+  `placeholder.*` 键，新增 `common.yes` / `common.no` 等共享键。
+- 新增 `test/gui-settings.test.mjs`（缺省/损坏设置、存取往返、存储拒绝、回环校验、
+  环境变量行、语言切换通知）与 `test/panels.test.mjs`（三个真面板的无头挂载、
+  过滤、暂停、命中测试参数、注册表契约）；扩展 `client.test.mjs`、
+  `test/lib/app-smoke-run.mjs`（六页签烟测改为真面板断言）、`test/lib/fake-dom.mjs`
+  与 `live-core.test.mjs`（实时断言覆盖新端点，并把新应答加入令牌泄漏检查）。
+
+### 关键决策及理由
+
+1. **不改核心**：Explain 端点已存在，用现成的比在阶段 14 动 `api` / `rules` 边界更安全，
+   也正好满足用户「先查 API 现状、缺了才降级」的分支条件。
+2. **日志不臆造字段**：审计与失败记录没有 `level` / `source`，用 `result` / `action` /
+   `stage` 做映射并在语言包里给出可读标签；宁可少一列，也不给界面喂假数据。
+3. **GUI 设置归 GUI**：`MELONARC_*` 是壳的启动期环境，窗口内无法热替换，
+   所以设计成「窗口自己持久化 + 明确提示重启 GUI」，并把「核心要不要重启」单独说清，
+   避免把两类重启混成一句「重启生效」。
+4. **语言切换借道既有头部控件**：派发 `change` 复用 `app.js` 的重载与重挂载逻辑，
+   既满足「即时生效」又不动壳/路由/侧栏结构，改动面最小。
+5. **只加模块、只改一行注册**：新增 4 个模块、删 1 个占位模块，`registry.js` 的注册行
+   是唯一结构改动；面板契约 `mount(ctx) → { dispose }` 保持不变。
+6. **视觉值只在令牌层**：新增 3 个布局尺寸、5 组表格列比、1 个 `--border-hairline`；
+   新增 CSS 与面板 JS 里没有颜色、间距、圆角、时长、像素字面量。
+7. **零新依赖**：前端运行时依赖与 Rust crate 都保持 0 新增，
+   `package.json` / `package-lock.json` / `Cargo.toml` 未改；本机无 crates.io 索引，
+   强行加依赖只会让构建更不可复现。
+8. **实时测试挂真核心**：新增端点全部用真实 `melonarc-core` + 真实令牌文件 +
+   真实代理流量验证，并把四份新应答并入「任何应答都不许含令牌」的检查。
+
+### 依赖登记（GPLv3 兼容）
+
+| 名称 | 版本 | 许可证 | 用途 |
+|---|---|---|---|
+| 前端运行时依赖 | 本阶段新增 0 | — | `package.json` / `package-lock.json` 零改动，依赖图仍只有根包 |
+| Rust crate | 本阶段新增 0 | — | `Cargo.toml` 零改动；`Cargo.lock` 仍缺（任务 A 失败） |
+| Go module | 本阶段新增 0 | — | `go.mod` / `go.sum` 零改动 |
+| 系统运行库（Linux） | 由发行版提供 | WebKitGTK / GTK 等 LGPL 系 | 不随仓库分发，未安装、未链接 |
+
+阶段 13 登记的 Tauri / `tauri-build` / `serde` 表仍是唯一依据；任务 A 没跑成
+`cargo build`，因此**没有**可枚举的传递依赖清单，也没有可复核的锁文件版本。
+
+### 当前状态
+
+- 前端构建链：本阶段早前一次 `node scripts/build.mjs` 通过（`dist/`
+  **28 文件 / 191.0 KiB**，比阶段 13 的 25 文件多 3 个净新增模块）；构建会校验
+  语言包键集一致、页面引用的文件都存在、无远程资源。语言包实测 zh-CN / en
+  各 **220 键**、键集与占位符 **0 差异**。
+- 前端离线测试（托管 Node 22.22.2）：
+  `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u NODE_USE_ENV_PROXY node --test --test-concurrency=1 "test/*.test.mjs"`
+  → **50 条目 / 48 通过 / 2 跳过 / 0 失败**（基线 34/2/0，通过数 +14；
+  2 条跳过仍是既有的「需真实核心」用例，**无新增跳过**）。
+- 前端实时测试（系统 Node 24.22.1，挂 `/tmp/arc/demo.conf` 起的演示核心、真实令牌文件
+  与真实代理流量）：**50 条目 / 50 通过 / 0 跳过 / 0 失败**（基线 36/0/0，通过数 +14）。
+  新增实时断言覆盖 `/v1/rules`、`/v1/rules/explain?name=…&network=tcp`、
+  `/v1/rules/explain?addr=…`、`/v1/audit?limit=64`，并全部并入令牌泄漏检查。
+- Go 侧验收五连全绿、与阶段 12/13 完全一致、无回退：`go build ./...`、`go vet ./...`、
+  `gofmt -l .`（无输出）、`go test -count=1 -v ./...`
+  **1085 条目 / 1064 通过 / 21 跳过 / 0 失败**（16 个包，21 条仍是既有的 UDP/互通环境跳过）、
+  `GOOS=windows go build ./cmd/... ./internal/...` 通过。
+- 命名红线：新增/修改的源码、样式、语言包、测试、DEVLOG 新增段落与两处提交信息
+  已扫描，无非开源商业产品名称；公开协议名与开源项目名不在此限。
+- 提交：任务 A 的失败记录单独一笔（`5d7e320`），任务 B 的代码与本记录随后一笔。
+
+### 遗留问题
+
+- **任务 A 四件产物仍缺**：Rust 壳未编译、`Cargo.lock` 未生成、原生窗口三张截图没有、
+  Rust 传递依赖许可证清单无法枚举；沿用阶段 13 的挂账，未因本阶段重试而改善。
+- **托管 Node 22 在本沙箱有 undici Wasm 问题**：本机 `vmemory` 硬上限 4 GiB，
+  Node 22.22.2 下一次普通 `node:http` 请求会触发 `lazyllhttp` 的
+  `WebAssembly.instantiate(): Out of memory`，以 `unhandledRejection` 形式污染
+  `node:test` 的第一个用例；HTTP 请求本身成功，属环境瑕疵而非产品缺陷。
+  已用最小复现钉住，实时模式改用系统 Node 24.22.1 验证并全绿；
+  离线模式仍用托管 Node 22（清理代理环境变量 + 串行并发）全绿。
+- **`dist/` 当前是部分陈旧产物**：收尾时重跑构建，脚本的清空步骤被沙箱删除保护拦下，
+  且拦截前已删掉部分旧文件（28 → 4）。`dist/` 是 git 忽略的构建输出、不入库，
+  源码树、语言包校验与全部测试都不依赖它；在允许清理的环境重跑一次
+  `node scripts/build.mjs` 即可复原。安全策略明确要求不得重试等价删除命令，故未强行绕过。
+- **GUI 设置还不能「点了就生效」**：值存在窗口里，环境变量仍需在下次启动时由用户或
+  启动器注入；本阶段按用户要求明确写成「重启 GUI 生效」，没有改 Rust 侧读取逻辑。
+- 规则集 API 只有 `name` / `path`，没有条目数与刷新时间；命中测试也没有批量与历史。
+- 日志只有固定 limit 与级别/来源过滤，没有时间范围、搜索、分页、导出或历史视图；
+  暂停是「停拉取 + 保快照」，不是服务端流式订阅。
+- 沿用阶段 13 的其它挂账：令牌轮换后旧窗口需手动重试、轮询节拍写死、
+  连接页尚未接 `/v1/history/connections` 与流量曲线、系统托盘、只有两种语言、
+  Logo 位图待矢量化与图标资产、各平台安装包与 README 口径更新。
+
+### 下一步计划
+
+1. 找一台有 `rustc` / `cargo` / `libwebkit2gtk-4.1-dev` 且能连 crates.io 的机器：
+   `cargo build` → 提交 `Cargo.lock` → 在 Xvfb :99 打开窗口、连真实核心截三张图 →
+   复核完整传递依赖许可证；同时重跑一次 `node scripts/build.mjs` 复原 `dist/`。
+2. 把 GUI 设置从「提示环境变量」升级为「壳启动时直接读窗口设置」，做到保存后
+   只需重启、无需手工设环境变量（这一步要改 Rust 侧，届时同步登记依赖与权限）。
+3. 规则页接规则集内容预览与命中历史；日志页接时间范围、搜索、导出与
+   `/v1/history/events`，并评估服务端流式订阅。
+4. 之后是连接页历史与流量曲线、系统托盘、Logo 矢量化与图标资产、安装包与 README 更新。

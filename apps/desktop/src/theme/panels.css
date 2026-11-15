@@ -226,7 +226,166 @@
   font-size: var(--text-xs);
 }
 
-/* --------------------------------------------------------------- settings */
+/* ------------------------------------------------------------------- rules */
+
+.table.rules {
+  --table-columns: var(--table-columns-rules);
+}
+
+.table.rule-sets {
+  --table-columns: var(--table-columns-rule-sets);
+}
+
+.table.steps {
+  --table-columns: var(--table-columns-steps);
+}
+
+.table.rules .table-row,
+.table.rule-sets .table-row,
+.table.steps .table-row {
+  padding: var(--space-2) var(--space-3);
+}
+
+.table .wrap {
+  overflow-wrap: anywhere;
+  font-weight: var(--weight-bold);
+}
+
+.subhead {
+  margin: 0 0 var(--space-2);
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-heavy);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+.test-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.test-row .field-input {
+  flex: 1 1 var(--layout-field-min);
+}
+
+.explain-report {
+  margin: 0;
+  padding: var(--space-3);
+  border: var(--border-hairline) solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-chip);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--text-xs);
+}
+
+.match-yes {
+  color: var(--color-accent-deep);
+}
+
+.match-no {
+  color: var(--color-ink-faint);
+}
+
+/* -------------------------------------------------------------------- logs */
+
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.log-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-height: var(--layout-log-viewport);
+  overflow-y: auto;
+}
+
+.table.audit {
+  --table-columns: var(--table-columns-audit);
+}
+
+.table.log-failures {
+  --table-columns: var(--table-columns-log-failures);
+}
+
+.table.audit .table-row,
+.table.log-failures .table-row {
+  padding: var(--space-2) var(--space-3);
+}
+
+.table.audit .time,
+.table.log-failures .time {
+  color: var(--color-ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.table.log-failures .target {
+  overflow-wrap: anywhere;
+  font-weight: var(--weight-bold);
+}
+
+/* ---------------------------------------------------------------- settings */
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--layout-field-min), 1fr));
+  gap: var(--space-3);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.field-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+}
+
+.field-input,
+.field-select {
+  min-height: var(--layout-control-height);
+  padding: var(--space-1) var(--space-3);
+  border: var(--border-hairline) solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.field-input {
+  width: 100%;
+}
+
+.env-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: var(--border-hairline) dashed var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-chip);
+}
+
+.env-line {
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+}
 
 .about {
   display: flex;

@@ -52,6 +52,37 @@ test("reads the endpoints this step needs", async () => {
   );
 });
 
+test("the rules, explanation and audit endpoints go through the same bridge", async () => {
+  const bridge = recordingBridge({ status: 200, body: "{}" });
+  const api = createApiClient({ bridge });
+
+  await api.rules(500);
+  await api.explain({ name: "example.com", network: "tcp" });
+  await api.explain({ addr: "203.0.113.9", port: 443, network: "" });
+  await api.audit(64);
+
+  assert.deepEqual(
+    bridge.calls.map((call) => `${call.method} ${call.path}`),
+    [
+      "GET /v1/rules?limit=500",
+      "GET /v1/rules/explain?name=example.com&network=tcp",
+      "GET /v1/rules/explain?addr=203.0.113.9&port=443",
+      "GET /v1/audit?limit=64",
+    ],
+  );
+});
+
+test("runtime metadata comes from the bridge, and a missing one is not an error", async () => {
+  const withRuntime = { kind: "test", runtime: async () => ({ mode: "preview", dataDir: "/tmp/arc/data" }) };
+  assert.equal((await createApiClient({ bridge: withRuntime }).runtime()).dataDir, "/tmp/arc/data");
+
+  const noRuntime = { kind: "test" };
+  assert.equal(await createApiClient({ bridge: noRuntime }).runtime(), null);
+
+  const failing = { kind: "test", runtime: async () => { throw new Error("gone"); } };
+  assert.equal(await createApiClient({ bridge: failing }).runtime(), null);
+});
+
 test("pins a member with a JSON body", async () => {
   const bridge = recordingBridge({ status: 200, body: JSON.stringify({ group: "manual", active: "b" }) });
   const api = createApiClient({ bridge });

@@ -45,6 +45,7 @@ const answers = {
     socks5_listen: "127.0.0.1:7891",
     proxies: [{ name: "office-a", type: "socks5", server: "127.0.0.1", port: 1080 }],
     groups: [{ name: "manual", type: "select", members: ["office-a", "office-b", "DIRECT"] }],
+    rule_sets: [{ name: "ads", path: "./rulesets/ads.txt" }],
   },
   "/bridge/v1/policies": {
     policies: [
@@ -85,13 +86,52 @@ const answers = {
       },
     ],
   },
+  "/bridge/v1/rules?limit=500": {
+    total: 2,
+    limit: 2,
+    rules: [
+      { index: 0, type: "DOMAIN", payload: "api.example.com", target: "manual", source: "config", line: 31, no_resolve: false },
+      { index: 1, type: "DOMAIN-SUFFIX", payload: "example.com", target: "manual", source: "ads", line: 32, no_resolve: true },
+    ],
+  },
+  "/bridge/v1/audit?limit=64": {
+    capacity: 64,
+    count: 2,
+    entries: [
+      { time: "2026-11-14T11:06:00Z", action: "policy.select", result: "ok", detail: "manual -> office-b", remote: "127.0.0.1" },
+      { time: "2026-11-14T11:07:00Z", action: "config.reload", result: "failed", detail: "rule set missing", remote: "127.0.0.1" },
+    ],
+  },
+  "/bridge/v1/failures?limit=64": {
+    capacity: 64,
+    count: 2,
+    failures: [
+      { time: "2026-11-14T11:05:00Z", target: "example.invalid:80", network: "tcp", stage: "dial", category: "refused", policy: "manual" },
+      { time: "2026-11-14T11:08:00Z", target: "blocked.test:80", network: "tcp", stage: "route", category: "rejected", policy: "" },
+    ],
+  },
 };
 
+const explainAnswer = {
+  query: { name: "example.com" },
+  matched: true,
+  rule: { index: 1, type: "DOMAIN-SUFFIX", payload: "example.com", target: "manual", source: "config", line: 32, no_resolve: false },
+  target: "manual",
+  resolution: { source: "hosts", addrs: ["203.0.113.5"], note: "static mapping" },
+  steps: [
+    { type: "DOMAIN", index: 0, rule: "DOMAIN,api.example.com,manual", match: false, detail: "exact entry not found" },
+    { type: "DOMAIN-SUFFIX", index: 1, rule: "DOMAIN-SUFFIX,example.com,manual", match: true, detail: "suffix matched" },
+  ],
+  report: "DOMAIN-SUFFIX,example.com -> manual",
+};
+
+const seen = [];
 let offline = false;
 
 /** @type {(input: any, init?: any) => Promise<any>} */
 async function fakeFetch(input) {
   const url = typeof input === "string" ? input : String(input?.href ?? input);
+  seen.push(url);
 
   for (const [id, catalog] of Object.entries(catalogs)) {
     if (url.endsWith(`/locales/${id}.json`)) return reply(200, catalog);
@@ -104,6 +144,8 @@ async function fakeFetch(input) {
   if (offline && url.includes("/bridge/")) {
     return reply(502, { proxied: false, error: { code: "core_unreachable", message: "connect ECONNREFUSED" } });
   }
+
+  if (url.includes("/bridge/v1/rules/explain?")) return reply(200, explainAnswer);
 
   const key = Object.keys(answers).find((candidate) => url.endsWith(candidate));
   if (key) return reply(200, answers[key]);
@@ -186,8 +228,100 @@ async function main() {
   assert.match(shell.textContent, /example\.invalid:80/, "the connections panel lists real failure rows");
   assert.match(shell.textContent, /Recent failures/, "the failure card is translated");
 
+  // ------------------------------------------------------------------ rules
   await clickPanel("rules");
-  assert.match(shell.textContent, /Comes in a later step/, "placeholder panels state what is missing");
+  assert.match(shell.textContent, /DOMAIN-SUFFIX/, "the rules panel lists compiled rules");
+  assert.match(shell.textContent, /rulesets\/ads\.txt/, "the declared rule set is listed");
+
+  const hitInput = find(shell, (node) => node.tagName === "input");
+  assert.ok(hitInput, "the hit test has an input");
+  hitInput.dispatch("input", { target: { value: "example.com" } });
+  const hitButton = find(shell, (node) => node.tagName === "button" && node.textContent === "Test");
+  assert.ok(hitButton, "the hit test has a run button");
+  hitButton.dispatch("click");
+  await tick();
+  assert.ok(
+    seen.some((url) => url.includes("/bridge/v1/rules/explain?name=example.com")),
+    "a name is sent as the name parameter",
+  );
+  assert.match(shell.textContent, /Rule matched/, "the explanation reports a match");
+  assert.match(shell.textContent, /Decision path/, "the decision path is rendered");
+  assert.match(shell.textContent, /203\.0\.113\.5/, "the resolution addresses are rendered");
+  assert.match(shell.textContent, /Full report/, "the core report is rendered");
+
+  hitInput.dispatch("input", { target: { value: "203.0.113.9" } });
+  hitButton.dispatch("click");
+  await tick();
+  assert.ok(
+    seen.some((url) => url.includes("/bridge/v1/rules/explain?addr=203.0.113.9")),
+    "an IP address is sent as the addr parameter",
+  );
+
+  // ------------------------------------------------------------------- logs
+  await clickPanel("logs");
+  assert.match(shell.textContent, /Policy selection/, "audit actions are translated");
+  assert.match(shell.textContent, /example\.invalid:80/, "failure records are listed");
+  assert.match(shell.textContent, /blocked\.test:80/, "the second failure record is listed");
+
+  const levelSelect = find(
+    shell,
+    (node) => node.tagName === "select" && node.attributes?.get?.("aria-label") === "Level",
+  );
+  assert.ok(levelSelect, "the level filter exists");
+  levelSelect.dispatch("change", { target: { value: "ok" } });
+  await tick();
+  assert.doesNotMatch(shell.textContent, /example\.invalid:80/, "a success level hides the failures");
+  levelSelect.dispatch("change", { target: { value: "" } });
+  await tick();
+
+  const sourceSelect = find(
+    shell,
+    (node) => node.tagName === "select" && node.attributes?.get?.("aria-label") === "Source",
+  );
+  assert.ok(sourceSelect, "the source filter exists");
+  sourceSelect.dispatch("change", { target: { value: "route" } });
+  await tick();
+  assert.match(shell.textContent, /blocked\.test:80/, "the routing failure survives the source filter");
+  assert.doesNotMatch(shell.textContent, /example\.invalid:80/, "the dialing failure is filtered out");
+  sourceSelect.dispatch("change", { target: { value: "" } });
+  await tick();
+
+  const pauseButton = find(shell, (node) => node.tagName === "button" && node.textContent === "Pause scrolling");
+  assert.ok(pauseButton, "the pause button exists");
+  pauseButton.dispatch("click");
+  await tick();
+  assert.match(shell.textContent, /Paused/, "pausing is shown");
+  assert.match(shell.textContent, /Resume scrolling/, "the button offers to resume");
+
+  // --------------------------------------------------------------- settings
+  await clickPanel("settings");
+  assert.match(shell.textContent, /MELONARC_DATA_DIR/, "the data directory override is visible");
+  assert.match(shell.textContent, /MELONARC_API_ADDR/, "the API address override is visible");
+  assert.match(shell.textContent, /\/tmp\/arc\/data/, "the effective data directory is shown");
+  assert.match(shell.textContent, /GPLv3/, "the about block names the licence");
+  assert.match(shell.textContent, /0\.1\.0/, "the about block shows the version");
+
+  const dataInput = find(shell, (node) => node.attributes?.get?.("id") === "settings-data-dir");
+  const apiInput = find(shell, (node) => node.attributes?.get?.("id") === "settings-api-addr");
+  assert.ok(dataInput && apiInput, "both overrides are editable");
+  dataInput.dispatch("input", { target: { value: "/tmp/arc/other" } });
+  apiInput.dispatch("input", { target: { value: "127.0.0.1:7947" } });
+  const saveButton = find(shell, (node) => node.tagName === "button" && node.textContent === "Save");
+  assert.ok(saveButton, "the save button exists");
+  saveButton.dispatch("click");
+  await tick();
+  assert.match(shell.textContent, /MELONARC_DATA_DIR=\/tmp\/arc\/other/, "the launcher line follows the saved value");
+  assert.match(shell.textContent, /Saved to the window settings/, "the save is confirmed");
+
+  const settingsLang = find(
+    shell,
+    (node) => node.tagName === "select" && node.attributes?.get?.("aria-label") === "Interface language",
+  );
+  assert.ok(settingsLang, "the settings language switch exists");
+  settingsLang.dispatch("change", { target: { value: "zh-CN" } });
+  await tick();
+  assert.match(shell.textContent, /设置/, "the settings switch relabels the window immediately");
+  assert.doesNotMatch(shell.textContent, /Window settings/, "the English label is gone");
 
   // Nothing in the DOM is a credential: the shell only ever shows its path.
   assert.doesNotMatch(shell.textContent, /Bearer /, "no bearer header is rendered");
@@ -209,7 +343,7 @@ async function main() {
   assert.match(downText, /核心未运行/, "the header pill shows the core is off");
   down.restore();
 
-  console.log("app-smoke-ok: 6 panels, zh-CN + en, three data panels and the offline notice");
+  console.log("app-smoke-ok: 6 panels, zh-CN + en, six data panels and the offline notice");
   // The polling loops were deliberately left without timers; exit explicitly.
   process.exit(0);
 }
