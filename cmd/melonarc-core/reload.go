@@ -98,6 +98,9 @@ func (r *reloader) reload(ctx context.Context) (api.ReloadView, error) {
 	if err != nil {
 		return api.ReloadView{}, r.rejected(err)
 	}
+	// The configuration is accepted at this point, so the warning describes
+	// something the daemon will actually be running with.
+	warnUnusableProtocols(cfg, r.logger)
 	// The registry is built without the pins of the running one. Which member a
 	// manual group should start on is a fact about the state at the moment of
 	// the swap, not about the state when the rebuild began: the user may pin a

@@ -210,6 +210,12 @@ FINAL,manual
 	if inboundView.FailureLogCount != 2 {
 		t.Errorf("failure log holds %d records, want 2", inboundView.FailureLogCount)
 	}
+	// No TUN device here, so the pool counter must be present and zero: this is
+	// the wiring from the live metrics object, and it is the only value an HTTP
+	// only daemon can produce.
+	if inboundView.FakeIPPoolExhaustedQueriesTotal != 0 {
+		t.Errorf("pool counter = %d, want 0 without a TUN device", inboundView.FakeIPPoolExhaustedQueriesTotal)
+	}
 
 	failures := apiGet[api.FailureListView](t, srv, "/v1/failures")
 	if failures.Count != 2 || len(failures.Failures) != 2 {
@@ -277,6 +283,42 @@ FINAL,manual
 	}
 	if dnsView.Entries != 0 || dnsView.CacheHits != 0 || dnsView.CacheMisses != 0 {
 		t.Errorf("dns view = %+v, want an untouched cache for a [Host] answer", dnsView)
+	}
+}
+
+// TestInboundViewCarriesThePoolCounter covers the one field the assembled
+// daemon cannot produce on this machine: a TUN name address pool that ran out
+// needs a device and a saturated lease table. The mapping is a pure function,
+// so the snapshot is written by hand — and both states are checked, because a
+// counter that is only ever zero proves nothing about the wiring.
+func TestInboundViewCarriesThePoolCounter(t *testing.T) {
+	busy := inboundView(inbound.Snapshot{
+		Protocols: []inbound.ProtocolStats{
+			{Protocol: "http", Open: 2, Accepted: 5},
+			{Protocol: "socks5", Open: 1, Accepted: 3, Datagrams: 1, DatagramTotal: 4},
+		},
+		Failures:             1,
+		Rejected:             2,
+		NameAddressExhausted: 6,
+		FailureCapacity:      64,
+		FailureCount:         3,
+	})
+	if busy.FakeIPPoolExhaustedQueriesTotal != 6 {
+		t.Errorf("pool counter = %d, want 6", busy.FakeIPPoolExhaustedQueriesTotal)
+	}
+	if busy.Open != 3 || busy.Accepted != 8 {
+		t.Errorf("totals = %d open, %d accepted, want 3 and 8", busy.Open, busy.Accepted)
+	}
+	if busy.Failures != 1 || busy.Rejected != 2 || busy.FailureLogCount != 3 || busy.FailureLogCapacity != 64 {
+		t.Errorf("the other counters did not survive the mapping: %+v", busy)
+	}
+
+	quiet := inboundView(inbound.Snapshot{})
+	if quiet.FakeIPPoolExhaustedQueriesTotal != 0 {
+		t.Errorf("a quiet pool reports %d", quiet.FakeIPPoolExhaustedQueriesTotal)
+	}
+	if quiet.Inbounds == nil || len(quiet.Inbounds) != 0 {
+		t.Errorf("inbounds = %v, want an empty list the encoder writes as []", quiet.Inbounds)
 	}
 }
 

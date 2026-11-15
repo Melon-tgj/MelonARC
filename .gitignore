@@ -34,3 +34,6 @@ Thumbs.db
 # Local runtime artifacts
 *.log
 /tmp/
+
+# Release output
+/dist-release/

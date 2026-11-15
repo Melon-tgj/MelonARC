@@ -11,7 +11,7 @@ MelonARC (Adaptive Routing Core) is an open-source, cross-platform rule-based pr
 - **Verified** — an independent outbound client carried a payload through a pinned-version reference server to an independent echo endpoint, and the returned bytes were compared. The environment and the reference version are named in the row.
 - **Project record** — a pass recorded in `DEVLOG.md` with a pinned reference version, in this project's own test harness. Not independently re-run by the external review.
 - **Unit-tested only** — known-answer, negative and in-process tests pass, but no traffic has been carried to a reference server.
-- **Known failing** — repeated attempts against a real reference server failed. Excluded from any stable claim.
+- **Unusable** — defects found by the external review were repaired, but no traffic has been carried against a reference server since. The repair landing does not make the protocol usable: it is excluded from any stable claim and must not be offered in a stable package.
 - **Unverified** — no evidence of that combination in either environment.
 
 "TCP business" and "UDP business" mean the payload the proxy carried, not the transport underneath it. For QUIC outbounds the TCP business travels over a QUIC stream.
@@ -25,8 +25,8 @@ MelonARC (Adaptive Routing Core) is an open-source, cross-platform rule-based pr
 | VLESS + REALITY | **Project record** (stage 16 TCP, 16 KiB round trip) | **Unverified** | Stage 16 replaced the hand-written TLS 1.3 handshake with the pinned uTLS client (`v1.8.3-0.20261108164504-a13c59ffe98b`, the version Xray-core 26.11.9 locks) behind an adapter that only does the REALITY credential work. A scripted peer proves the server authentication segment cannot be skipped, duplicated or reordered, and that a wrong signature, a wrong credential, a trusted-site certificate or a wrong Finished each close the connection before a single VLESS byte. Interop was re-run against Xray-core 26.11.9 (binary SHA-256 `e87bce58…6a66d`): TCP 16 KiB round trip passes. UDP has no evidence yet. |
 | Snell v4 / v5 | **Project record** (stage 11 TCP, both versions) | **Unverified** | Stage 11 against a pinned Snell reference server. UDP needs a target machine able to run that reference endpoint. |
 | SOCKS5 (+TLS), HTTP / HTTPS outbounds | **Unit-tested only** | **Unverified** | Covered by this project's tests; not part of the external reference-server matrix. |
-| Hysteria2 | **Known failing — fix in progress** | **Known failing — fix in progress** | External review: three rounds, all echo attempts failed against pinned Hysteria 2.13.0; the HTTP/3 stage reported QPACK field-section decode failure (error 512). |
-| TUIC v5 | **Known failing — fix in progress** | **Known failing — fix in progress** | External review: three rounds, all echo attempts failed against pinned tuic-server 1.0.0; the server logged an authentication failure caused by a text-formatted UUID exporter label. |
+| Hysteria2 | **Unusable** — fix landed, interop not re-run | **Unusable** — fix landed, interop not re-run | External review: three rounds, all echo attempts failed against pinned Hysteria 2.13.0; the HTTP/3 stage reported QPACK field-section decode failure (error 512). Stage 15 repaired the HTTP/3 header blocks and added known-answer tests, but nothing has been carried against a reference server since. |
+| TUIC v5 | **Unusable** — fix landed, interop not re-run | **Unusable** — fix landed, interop not re-run | External review: three rounds, all echo attempts failed against pinned tuic-server 1.0.0; the server logged an authentication failure caused by a text-formatted UUID exporter label. Stage 15 repaired the label and added known-answer tests, but nothing has been carried against a reference server since. |
 
 Stage 15 repaired the QUIC test fixture, the TUIC exporter label and the HTTP/3 QPACK header blocks, and added known-answer tests for each. **Those fixes are not reported as interoperability passes.** The local sandbox rejects `sendto` on unconnected datagram sockets, so a QUIC first flight cannot leave this machine; local acceptance only proves that the dial path reaches that boundary. Re-running both protocols against the pinned reference servers on a suitable machine is still required. Until then both outbounds must be treated as unusable, and no stable package may offer them.
 
@@ -50,7 +50,7 @@ The development document's promise of a dual-platform installable build with a r
 | HTTP / SOCKS5 inbounds, local DNS, indexed rule engine, policy groups, reload, local API, CLI | Implemented and unit/integration tested in this workspace | Full inbound-to-outbound forwarding on a clean target installation has not been recorded. |
 | TUN inbound | Linux: implemented in source, IPv4 user-space TCP only; Windows: device session unimplemented | Zero-window, retransmission, reordering, half-close and long-connection behaviour are not validated. |
 | System proxy | Takes over and restores a persisted snapshot | Restore returns only fields still equal to what this program wrote, and deletes values that were absent before. No validation of a settings-refresh broadcast to already-running Windows applications; the Linux backend covers the gsettings desktop environments only. |
-| Observation history | Bounded local tables, self-written file writer | Unknown schema or corrupt files are preserved unchanged with writes suspended. A migration to a maintained database driver is planned. |
+| Observation history | Bounded local tables in SQLite, through a pure-Go driver (`modernc.org/sqlite` v1.62.0) | The three tables are rewritten whole on each flush. A file whose schema is unknown, or that cannot be read, is preserved unchanged with writes suspended, so a history this build does not understand is never replaced. |
 | Desktop frontend | Six registered panels, two locales, offline and live-core tests pass | Runs against a development preview bridge only; that bridge is development-only and must not ship in a production package. The panel that reports the core's process state reads it from the shell, so in the browser it shows either the bridge's own child (with `--core`) or a real probe of a core somebody else started — never a pid the bridge invented. |
 
 ### Performance
@@ -63,7 +63,8 @@ The five performance targets in the development document **have not been measure
 - No end-to-end evidence from a packaged installation through an inbound listener to an outbound protocol.
 - No long-run, public-network, multi-process or crash-recovery results.
 - The desktop shell's data directory and API address still require a restart of the GUI to take effect; the core binary path and core configuration take effect on the next core start (the settings panel can restart the core).
-- No fuzz corpus, no independent CI interop job, and no version-linked machine reports for release tags.
+- Fuzz targets and their seed corpora exist for the configuration parser, share links, subscription bodies and DNS responses. Each has only been run in bounded local sessions; no CI job runs them yet.
+- A CI workflow with a separate interop job is written, but it has never run on Actions: no run has yet checked the reference release asset names, and no release tag has machine reports behind it.
 
 ## Source-level scope
 
@@ -80,7 +81,7 @@ The following is what exists in the source tree. Its verification status is the 
 - VLESS (including REALITY; the XTLS-Vision flow is not accepted)
 - Trojan
 - Snell v4 / v5
-- Hysteria2, TUIC v5 — known failing, fix in progress
+- Hysteria2, TUIC v5 — implemented, but unusable until their real interoperability has been re-run
 - SOCKS5 (including the TLS variant)
 - HTTP / HTTPS
 
@@ -133,4 +134,4 @@ The second command is a cross-compile check only; it does not produce a validate
 
 MelonARC is licensed under the GNU General Public License, version 3. The full license text is in [LICENSE](LICENSE).
 
-Third-party components may only be added if their license is compatible with the GPLv3, and each one is registered with its version, license and purpose in `DEVLOG.md`. Before publishing binaries, the full transitive licence and notice obligations of the shipped artefacts still need to be audited.
+Third-party components may only be added if their license is compatible with the GPLv3, and each one is registered with its version, license and purpose in `DEVLOG.md`. [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) lists what reaches a shipped binary, with the licence read from each component's own copy, and names the one part still unaudited (the Rust shell). It ships in the release archive.

@@ -3,6 +3,7 @@ package share_test
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -25,11 +26,16 @@ func encode(text string) string { return base64.StdEncoding.EncodeToString([]byt
 
 func b64url(text string) string { return base64.RawURLEncoding.EncodeToString([]byte(text)) }
 
-// TestParseBuildsEveryLink is the contract that matters: every link that parses
-// must also produce a dialer. Parsing is where a provider's spelling is turned
-// into our option syntax, so a link that parses but cannot be built would be a
-// silent import of a node that never connects.
-func TestParseBuildsEveryLink(t *testing.T) {
+// TestParseAndBuildAgreeOnStaticParameters is the contract between the
+// importer and the dialer builder, and its direction matters.
+//
+// It used to be "every link that parses must also produce a dialer", checked by
+// building one afterwards. Now Parse runs the registry's static checks itself,
+// so that implication holds by construction — and the interesting assertion is
+// the reverse: the checks that would reject a [Proxy] line reject the link too,
+// at the earlier boundary with the link in hand. Calling Validate again below
+// is what keeps that guarantee visible if the shared check is ever removed.
+func TestParseAndBuildAgreeOnStaticParameters(t *testing.T) {
 	cases := []struct {
 		name string
 		link string
@@ -137,12 +143,142 @@ func TestParseBuildsEveryLink(t *testing.T) {
 					t.Fatalf("argument %q = %q, want %q (args %v)", key, got, want, proxy.Args)
 				}
 			}
-			// The parsed entry must be buildable through the same registry the
-			// daemon uses.
-			if _, err := outbound.New(specOf(proxy)); err != nil {
+			// The parsed entry must pass the same static checks the daemon would
+			// apply, and must produce a dialer through the same registry.
+			spec := specOf(proxy)
+			if err := outbound.Validate(spec); err != nil {
+				t.Fatalf("registry rejects a link that parsed: %v (args %v)", err, proxy.Args)
+			}
+			if _, err := outbound.New(spec); err != nil {
 				t.Fatalf("build %s dialer: %v (args %v)", proxy.Type, err, proxy.Args)
 			}
 		})
+	}
+}
+
+// TestParseRejectsInvalidStaticParameters holds one bad static parameter per
+// link scheme. Before the shared check these links parsed: the bad value was
+// only noticed when the daemon built the dialers, which for a subscription is a
+// startup failure with a line number rather than a rejected node.
+//
+// The reason in each case is the registry's wording, not the parser's, which is
+// how the test knows the check really came from outbound.New and was not
+// duplicated here. Trojan and TUIC have no protocol-specific static parameter
+// beyond their required credentials (which the parser already checks), so their
+// case uses the shared TLS option surface their builders validate.
+func TestParseRejectsInvalidStaticParameters(t *testing.T) {
+	cases := []struct {
+		name   string
+		link   string
+		scheme string
+		reason string
+		secret string
+	}{
+		{
+			name:   "ss unknown cipher",
+			link:   "ss://" + b64url("aes-999:pass-word") + "@h.example.com:8388",
+			scheme: "ss", reason: `unsupported cipher "aes-999"`, secret: "pass-word",
+		},
+		{
+			name:   "vmess unknown body cipher",
+			link:   "vmess://" + encode(fmt.Sprintf(`{"add":"h.example.com","port":"443","id":%q,"scy":"rc4"}`, testUUID)),
+			scheme: "vmess", reason: `unsupported security "rc4"`,
+		},
+		{
+			name:   "vless unimplemented flow",
+			link:   "vless://" + testUUID + "@h.example.com:443?security=tls&flow=xtls-rprx-vision",
+			scheme: "vless", reason: "needs record-level padding",
+		},
+		{
+			name:   "trojan malformed server name",
+			link:   "trojan://pass-word@h.example.com:443?sni=bad_host",
+			scheme: "trojan", reason: "sni:", secret: "pass-word",
+		},
+		{
+			name:   "hysteria2 obfuscation without its key",
+			link:   "hysteria2://pass-word@h.example.com:443?obfs=salamander",
+			scheme: "hysteria2", reason: "obfs-password is required", secret: "pass-word",
+		},
+		{
+			name:   "tuic malformed server name",
+			link:   "tuic://" + testUUID + ":pass-word@h.example.com:443?sni=bad_host",
+			scheme: "tuic", reason: "sni:", secret: "pass-word",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := share.Parse(tc.link)
+			if err == nil {
+				t.Fatal("parse accepted a link the dialer builder would refuse")
+			}
+			var linkErr *share.Error
+			if !asError(err, &linkErr) {
+				t.Fatalf("error %v is not a *share.Error", err)
+			}
+			if linkErr.Scheme != tc.scheme {
+				t.Fatalf("scheme = %q, want %q", linkErr.Scheme, tc.scheme)
+			}
+			if !strings.Contains(linkErr.Reason, tc.reason) {
+				t.Fatalf("reason %q does not carry the registry explanation %q", linkErr.Reason, tc.reason)
+			}
+			if !errors.Is(err, outbound.ErrInvalidOption) {
+				t.Errorf("the registry rejection lost its cause: %v", err)
+			}
+			// A static rejection must still obey the package's no-leak rule.
+			if tc.secret != "" && strings.Contains(err.Error(), tc.secret) {
+				t.Fatalf("error message leaks the link: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateRejectsProtocolsWithoutALinkSpelling covers the other side of the
+// shared check. Snell, SOCKS5 and HTTP have no share link in v1, so the only
+// place their static parameters can be refused is the registry entry point the
+// importer now uses.
+func TestValidateRejectsProtocolsWithoutALinkSpelling(t *testing.T) {
+	cases := []struct {
+		name   string
+		typ    string
+		args   []string
+		reason string
+	}{
+		{"snell bad version", "snell", []string{"h.example.com", "443", "psk=secret", "version=3"}, "version must be 4 or 5"},
+		{"snell unknown cipher", "snell", []string{"h.example.com", "443", "psk=secret", "cipher=aes-999"}, "unsupported cipher"},
+		{"socks5 half a credential", "socks5", []string{"h.example.com", "1080", "username=alice"}, "username needs a password"},
+		{"http half a credential", "http", []string{"h.example.com", "8080", "password=secret"}, "password without a username"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := outbound.Spec{
+				Name: "fixture", Type: tc.typ, Server: "h.example.com", Port: 443, Args: tc.args,
+			}
+			err := outbound.Validate(spec)
+			if err == nil {
+				t.Fatal("Validate accepted a spec the dialer builder would refuse")
+			}
+			if !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("reason %q does not mention %q", err, tc.reason)
+			}
+			if _, err := outbound.New(spec); err == nil {
+				t.Fatal("Validate and New disagree about the same spec")
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsTheSameSpecNewAccepts keeps the shared entry point honest
+// in the passing direction too: it must not reject a spec that builds.
+func TestValidateAcceptsTheSameSpecNewAccepts(t *testing.T) {
+	spec := outbound.Spec{
+		Name: "good", Type: "ss", Server: "h.example.com", Port: 8388,
+		Args: []string{"h.example.com", "8388", "method=aes-128-gcm", "password=secret"},
+	}
+	if err := outbound.Validate(spec); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if _, err := outbound.New(spec); err != nil {
+		t.Fatalf("New: %v", err)
 	}
 }
 
@@ -227,7 +363,9 @@ func TestParseRejectsWithTheTypeAndReason(t *testing.T) {
 }
 
 // TestParseAllReportsEveryBadLink checks that one bad line in a subscription
-// does not hide the next one.
+// does not hide the next one — and that the good lines still come back. A list
+// is not an all-or-nothing answer any more: the rejections carry positions and
+// reasons, and the caller decides whether a partly good list is usable.
 func TestParseAllReportsEveryBadLink(t *testing.T) {
 	links := []string{
 		"ss://" + b64url("aes-128-gcm:pw") + "@h.example.com:1#ok",
@@ -235,16 +373,23 @@ func TestParseAllReportsEveryBadLink(t *testing.T) {
 		"trojan://pw@h.example.com:443#ok2",
 		"wireguard://x@h.example.com:1",
 	}
-	proxies, err := share.ParseAll(links)
-	if err == nil {
-		t.Fatal("ParseAll accepted a list with bad links")
-	}
+	proxies, rejections := share.ParseAll(links)
 	if len(proxies) != 2 {
 		t.Fatalf("parsed %d links, want 2", len(proxies))
 	}
-	for _, want := range []string{"item 2", "item 4", "vmess", "wireguard"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not mention %q", err, want)
+	if len(rejections) != 2 {
+		t.Fatalf("rejections = %d, want 2: %+v", len(rejections), rejections)
+	}
+	if rejections[0].Item != 2 || !strings.Contains(rejections[0].Reason.Error(), "vmess") {
+		t.Errorf("first rejection = %+v, want item 2 from the vmess parser", rejections[0])
+	}
+	if rejections[1].Item != 4 || !strings.Contains(rejections[1].Reason.Error(), "wireguard") {
+		t.Errorf("second rejection = %+v, want item 4 with an unsupported type", rejections[1])
+	}
+	// No reason may quote a link: these errors go into logs and the local API.
+	for _, rejection := range rejections {
+		if strings.Contains(rejection.Reason.Error(), "h.example.com") {
+			t.Errorf("a rejection quotes the link: %v", rejection.Reason)
 		}
 	}
 }

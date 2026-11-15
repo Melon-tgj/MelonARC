@@ -21,6 +21,9 @@ func TestInboundEndpoint(t *testing.T) {
 		Rejected:           1,
 		FailureLogCapacity: 64,
 		FailureLogCount:    3,
+		// A non-zero pool counter: the field has to survive the wire even
+		// though nothing on this machine can fill a TUN pool.
+		FakeIPPoolExhaustedQueriesTotal: 4,
 	}}
 	s := newTestServer(t, p)
 	rec := request(t, s, http.MethodGet, "/v1/inbound", "test-token")
@@ -37,6 +40,9 @@ func TestInboundEndpoint(t *testing.T) {
 	if body.Open != 3 || body.Accepted != 13 || body.Failures != 2 || body.Rejected != 1 {
 		t.Fatalf("totals = %+v", body)
 	}
+	if body.FakeIPPoolExhaustedQueriesTotal != 4 {
+		t.Fatalf("pool counter = %d, want 4", body.FakeIPPoolExhaustedQueriesTotal)
+	}
 	if body.FailureLogCapacity != 64 || body.FailureLogCount != 3 {
 		t.Fatalf("failure log = %d/%d", body.FailureLogCount, body.FailureLogCapacity)
 	}
@@ -46,11 +52,43 @@ func TestInboundEndpoint(t *testing.T) {
 	for _, want := range []string{
 		`"inbounds"`, `"open"`, `"accepted"`, `"datagram_associations"`,
 		`"datagram_associations_total"`, `"failures"`, `"rejected"`,
+		`"fake_ip_pool_exhausted_queries_total":4`,
 		`"failure_log_capacity"`, `"failure_log_count"`,
 	} {
 		if !strings.Contains(raw, want) {
 			t.Errorf("response has no %s: %s", want, raw)
 		}
+	}
+}
+
+// TestInboundPoolCounterIsAlwaysPresent pins the zero state: the field is
+// reported as 0 rather than left out, so a client never has to decide whether a
+// missing key means "none" or "this core cannot tell".
+func TestInboundPoolCounterIsAlwaysPresent(t *testing.T) {
+	s := newTestServer(t, &fakeProvider{})
+	rec := request(t, s, http.MethodGet, "/v1/inbound", "test-token")
+	if got := rec.Body.String(); !strings.Contains(got, `"fake_ip_pool_exhausted_queries_total":0`) {
+		t.Fatalf("a quiet core reports %s", got)
+	}
+}
+
+// TestInboundViewReadsAnOlderCore covers the other direction of compatibility: a
+// core that predates the field sends no key, and the client's decoding must
+// produce zero rather than an error.
+func TestInboundViewReadsAnOlderCore(t *testing.T) {
+	const older = `{"inbounds":[{"protocol":"http","open":1,"accepted":2,` +
+		`"datagram_associations":0,"datagram_associations_total":0}],` +
+		`"open":1,"accepted":2,"failures":0,"rejected":0,` +
+		`"failure_log_capacity":64,"failure_log_count":0}`
+	var view InboundView
+	if err := json.Unmarshal([]byte(older), &view); err != nil {
+		t.Fatalf("decode an older core's answer: %v", err)
+	}
+	if view.FakeIPPoolExhaustedQueriesTotal != 0 {
+		t.Fatalf("pool counter = %d, want 0", view.FakeIPPoolExhaustedQueriesTotal)
+	}
+	if view.Accepted != 2 || len(view.Inbounds) != 1 {
+		t.Fatalf("the rest of the answer did not survive: %+v", view)
 	}
 }
 

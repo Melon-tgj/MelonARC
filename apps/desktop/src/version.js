@@ -8,4 +8,4 @@
 export const APP_VERSION = "0.1.0";
 
 /** Licence of the project, shown in the about block. */
-export const APP_LICENSE = "GPL-3.0-or-later";
+export const APP_LICENSE = "GPL-3.0-only";

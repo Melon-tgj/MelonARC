@@ -42,10 +42,8 @@ import (
 	"github.com/melon-tgj/melonarc/internal/store"
 	"github.com/melon-tgj/melonarc/internal/subscription"
 	"github.com/melon-tgj/melonarc/internal/sysproxy"
+	"github.com/melon-tgj/melonarc/internal/version"
 )
-
-// version is the build version placeholder, overridden at link time later on.
-const version = "0.1.0-dev"
 
 // shutdownTimeout bounds the graceful stop of the local API.
 const shutdownTimeout = 5 * time.Second
@@ -156,6 +154,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("outbound is not usable:\n%w", err)
 	}
+	warnUnusableProtocols(cfg, logger)
 	registry, err := buildRegistry(cfg, dialers)
 	if err != nil {
 		return fmt.Errorf("policy groups are not usable:\n%w", err)
@@ -227,7 +226,7 @@ func run(args []string) error {
 		resolver:  resolver,
 		dialers:   dialers,
 		resolvers: resolvers,
-		version:   version,
+		version:   version.Version,
 		startedAt: time.Now(),
 		baseline:  &baseline,
 		history:   history,
@@ -300,7 +299,7 @@ func run(args []string) error {
 		srv, err := api.New(api.Options{
 			Addr:     addr,
 			Provider: state,
-			Version:  version,
+			Version:  version.Version,
 			Logger:   logger,
 		})
 		if err != nil {
@@ -713,6 +712,10 @@ func announceAPI(srv *api.Server, tokenPath string, logger *slog.Logger) {
 
 // printSummary reports what a validated configuration would activate.
 func printSummary(cfg *config.Config, program *rules.Program, dataDir string) {
+	// The banner is the only place a validation run says which build it is:
+	// -check touches nothing else, and "which binary accepted this file" is the
+	// first question when a preview build and a source build disagree.
+	fmt.Printf("melonarc-core %s\n", version.Version)
 	stats := program.Stats()
 	fmt.Printf("configuration: %s\n", cfg.Path)
 	fmt.Printf("rules: %d (final: %v, rule sets: %v)\n", stats.Total, stats.Final, stats.RuleSets)

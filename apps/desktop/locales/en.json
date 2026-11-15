@@ -107,6 +107,7 @@
   "connections.totals.accepted": "Accepted in total",
   "connections.totals.failures": "Failed",
   "connections.totals.rejected": "Blocked by a rule",
+  "connections.totals.fake_ip_exhausted": "Fake-address pool exhausted",
   "connections.failures": "Recent failures",
   "connections.failures.capacity": "{count} of {capacity} records",
   "connections.table.time": "Time",

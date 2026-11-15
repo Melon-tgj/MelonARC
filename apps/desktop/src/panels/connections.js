@@ -41,6 +41,14 @@ export default {
         stat({ value: formatNumber(inbound.accepted, ctx.locale), label: ctx.t("connections.totals.accepted") }),
         stat({ value: formatNumber(inbound.failures, ctx.locale), label: ctx.t("connections.totals.failures") }),
         stat({ value: formatNumber(inbound.rejected, ctx.locale), label: ctx.t("connections.totals.rejected") }),
+        // A core older than this field sends no such key; the `?? 0` is what
+        // makes that read as zero instead of an unformattable value. Zero is
+        // also the truth for a daemon whose pool never ran out, so the two
+        // cases deliberately look the same.
+        stat({
+          value: formatNumber(inbound.fake_ip_pool_exhausted_queries_total ?? 0, ctx.locale),
+          label: ctx.t("connections.totals.fake_ip_exhausted"),
+        }),
       ]);
 
       const listeners = card({

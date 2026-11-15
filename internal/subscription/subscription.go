@@ -10,8 +10,11 @@
 //   - The result outlives the process. The last successful body is cached on
 //     disk, so a restart on a network that is down still produces the nodes the
 //     routes and groups refer to.
-//   - A body is either understood or reported. A subscription that yields no
-//     usable link is an error naming the subscription, not an empty group.
+//   - A body keeps its good links and reports every bad one by position and
+//     reason. Only a body with nothing usable is a failed refresh; a mixed body
+//     is a successful refresh of its valid nodes. A first import that has
+//     neither a previous result nor a cache is an error naming the
+//     subscription, never an empty group.
 package subscription
 
 import (
@@ -56,6 +59,7 @@ type Options struct {
 type state struct {
 	entry     config.Subscription
 	nodes     []config.Proxy
+	skipped   []Skip
 	signature string
 	fetchedAt time.Time
 	lastErr   error
@@ -155,15 +159,17 @@ func (m *Manager) refresh(ctx context.Context, sub config.Subscription) ([]confi
 	now := m.opts.Now()
 	body, fetchErr := m.fetch(ctx, sub.URL)
 	var proxies []config.Proxy
+	var skips []Skip
 	var err error
 	if fetchErr == nil {
-		proxies, err = parseBody(body)
-		if err == nil && len(proxies) == 0 {
-			err = fmt.Errorf("%w: the subscription lists no usable node", ErrEmpty)
-		}
+		proxies, skips, err = parseBody(body)
 	} else {
 		err = fetchErr
 	}
+	// The reasons are reported per entry whether the body was adopted or not:
+	// on a total failure they are the only explanation of what the provider
+	// served.
+	m.reportSkips(sub.Name, skips)
 	if err == nil {
 		if len(body) > 0 {
 			m.writeCache(sub.Name, body)
@@ -173,11 +179,12 @@ func (m *Manager) refresh(ctx context.Context, sub config.Subscription) ([]confi
 		previous := m.state[sub.Name]
 		changed := previous == nil || previous.signature != signature
 		m.state[sub.Name] = &state{
-			entry: sub, nodes: proxies, signature: signature,
+			entry: sub, nodes: proxies, skipped: copySkips(skips), signature: signature,
 			fetchedAt: now, next: now.Add(sub.Interval),
 		}
 		m.mu.Unlock()
-		m.log().Info("subscription refreshed", "subscription", sub.Name, "nodes", len(proxies))
+		m.log().Info("subscription refreshed", "subscription", sub.Name,
+			"nodes", len(proxies), "skipped", len(skips))
 		return proxies, changed, nil
 	}
 
@@ -199,7 +206,7 @@ func (m *Manager) refresh(ctx context.Context, sub config.Subscription) ([]confi
 
 	if cached == nil {
 		if body, cacheErr := m.readCache(sub.Name); cacheErr == nil {
-			if parsed, parseErr := parseBody(body); parseErr == nil && len(parsed) > 0 {
+			if parsed, _, parseErr := parseBody(body); parseErr == nil && len(parsed) > 0 {
 				cached = parsed
 				m.mu.Lock()
 				m.state[sub.Name].nodes = parsed
@@ -216,6 +223,29 @@ func (m *Manager) refresh(ctx context.Context, sub config.Subscription) ([]confi
 	m.log().Warn("subscription refresh failed, keeping the previous nodes",
 		"subscription", sub.Name, "nodes", len(cached), "error", err, "retry_in", delay.Round(time.Second))
 	return cached, false, nil
+}
+
+// maxReportedSkips bounds the log lines of one refresh. A provider can serve a
+// thousand bad links; the first few reasons are enough to diagnose it, and the
+// rest are counted. Every reason, including those past the bound, is still
+// available in Status.Skipped.
+const maxReportedSkips = 8
+
+// reportSkips is the per-entry answer to a link that could not be imported.
+// The reasons come from the share importer and never quote the link.
+func (m *Manager) reportSkips(subscription string, skips []Skip) {
+	if len(skips) == 0 {
+		return
+	}
+	for i, skip := range skips {
+		if i == maxReportedSkips {
+			m.log().Warn("more subscription entries were skipped",
+				"subscription", subscription, "count", len(skips)-i)
+			break
+		}
+		m.log().Warn("subscription entry skipped",
+			"subscription", subscription, "item", skip.Item, "reason", skip.Reason)
+	}
 }
 
 // Run refreshes subscriptions as their intervals come due and calls onChange
@@ -271,6 +301,7 @@ func (m *Manager) Snapshot() []Status {
 			Name:      st.entry.Name,
 			URL:       st.entry.URL,
 			Nodes:     len(st.nodes),
+			Skipped:   copySkips(st.skipped),
 			FetchedAt: st.fetchedAt,
 			NextAt:    st.next,
 			Attempts:  st.attempts,
@@ -280,11 +311,22 @@ func (m *Manager) Snapshot() []Status {
 	return out
 }
 
+// Skip is one entry of a subscription body that was not imported.
+//
+// Item is the 1-based position among the links the body carried, and Reason
+// says why without quoting the link. Skips describe the body that is currently
+// in force; a refresh that failed and kept older nodes keeps their skips too.
+type Skip struct {
+	Item   int
+	Reason string
+}
+
 // Status is one subscription's state, without the nodes themselves.
 type Status struct {
 	Name      string
 	URL       string
 	Nodes     int
+	Skipped   []Skip
 	FetchedAt time.Time
 	NextAt    time.Time
 	Attempts  int
@@ -344,6 +386,13 @@ func copyProxies(proxies []config.Proxy) []config.Proxy {
 	return out
 }
 
+func copySkips(skips []Skip) []Skip {
+	if skips == nil {
+		return nil
+	}
+	return append([]Skip(nil), skips...)
+}
+
 func errorText(err error) string {
 	if err == nil {
 		return ""
@@ -362,9 +411,15 @@ func (m *Manager) log() *slog.Logger {
 var ErrEmpty = errors.New("empty subscription")
 
 // parseBody reads a subscription body: either base64 of a list of links or the
-// list itself, one link per line. Blank lines and comments are skipped; a link
-// that cannot be imported is reported with its position.
-func parseBody(body []byte) ([]config.Proxy, error) {
+// list itself, one link per line. Blank lines and comments are skipped.
+//
+// It returns the entries that were understood completely and one Skip per
+// rejected link. Only a body with nothing usable is an error: a mixed body is a
+// successful refresh of its valid nodes, and the caller reports each skipped
+// entry by position. That is what keeps one bad node from taking a whole
+// subscription away, while still refusing to replace a working list with an
+// empty one.
+func parseBody(body []byte) ([]config.Proxy, []Skip, error) {
 	text := decodeSubscription(body)
 	lines := make([]string, 0, 16)
 	for _, line := range splitLines(text) {
@@ -375,7 +430,15 @@ func parseBody(body []byte) ([]config.Proxy, error) {
 		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
-		return nil, fmt.Errorf("%w: the subscription body holds no link", ErrEmpty)
+		return nil, nil, fmt.Errorf("%w: the subscription body holds no link", ErrEmpty)
 	}
-	return share.ParseAll(lines)
+	proxies, rejections := share.ParseAll(lines)
+	skips := make([]Skip, 0, len(rejections))
+	for _, rejection := range rejections {
+		skips = append(skips, Skip{Item: rejection.Item, Reason: rejection.Reason.Error()})
+	}
+	if len(proxies) == 0 {
+		return nil, skips, fmt.Errorf("%w: all %d links in the subscription body were rejected", ErrEmpty, len(lines))
+	}
+	return proxies, skips, nil
 }

@@ -46,12 +46,17 @@ func FuzzParseBody(f *testing.F) {
 		f.Add([]byte(seed))
 	}
 	f.Fuzz(func(t *testing.T, body []byte) {
-		proxies, err := parseBody(body)
+		proxies, skips, err := parseBody(body)
 		if err != nil {
 			return
 		}
 		if len(proxies) == 0 {
 			t.Fatal("parseBody reported success with no proxy")
+		}
+		for _, skip := range skips {
+			if skip.Item < 1 || skip.Reason == "" {
+				t.Fatalf("parseBody reported an unusable skip: %+v", skip)
+			}
 		}
 		for _, proxy := range proxies {
 			if proxy.Type == "" || proxy.Server == "" || proxy.Port < 1 || proxy.Port > 65535 {

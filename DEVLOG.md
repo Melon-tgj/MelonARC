@@ -31,6 +31,8 @@
 | 18 | 核心加固批 A：fake-IP 租约保留、重载统一提交点、TUN resolver 随重载 | 完成（Go 1155 / 1134 / 21 / 0） |
 | 19 | 换库批：BLAKE3 与 SQLite 换成熟第三方库 | 完成（Go 1166 / 1145 / 21 / 0，二进制 +6.39 MiB） |
 | 20 | 测试加固：规则 oracle 对照、四个 fuzz 入口、互通文档与 CI | 完成（Go 1251 / 1230 / 21 / 0，纯测试批 + 一处解析缺陷修复） |
+| 21 | 0.x 预览发版准备：支持矩阵统一、发布工程、公开前检查 | 完成（Go 1266 / 1245 / 21 / 0，前端 77 / 75 / 2 / 0，发布 tar 已产出） |
+| 22 | GPT 决策收尾批：`/v1/inbound` 枯竭计数出口、夹具用例改名、解析期静态校验 | 完成（Go 1292 / 1271 / 21 / 0，前端离线 79 / 77 / 2 / 0、实时 79 / 79 / 0 / 0） |
 
 ---
 
@@ -4218,3 +4220,643 @@ MELONARC_INTEROP_DIR=/home/hatch/interop-bin scripts/check-interop.sh
    若选后者，`outbound` 需要导出一个套件清单。
 5. 回到核心侧的两条既有决策项：阶段 18 的枯竭计数是否进 `/v1`、名字地址池扩容与 LRU；
    阶段 19 的 `-s -w` + `-trimpath` 与 Flush 成本拆分。
+
+## 阶段 21 — 0.x 预览发版准备：支持矩阵统一、发布工程、公开前检查（2026-11-15）
+
+范围：四件事——让 README 的支持矩阵与代码事实对齐、把版本/构建/声明做成一条可复现的发布
+链路、把公开前该挂账的东西逐项列清、把许可证口径的差异汇总（**只汇总不改**）。产品行为只
+动一处（配置含已知不可用协议时打 warn），其余是文档、脚本与构建参数。`spikes/` 未动；
+`docs/development-doc-v1.md` 按任务书要求在开头加了一段状态说明，其余一字未改。
+
+开工前：`HEAD = 96238a1`，工作区干净，协调者复跑基线 **1251 条目 / 1230 过 / 21 跳 / 0 败**，
+前端离线 **75 / 73 / 2 / 0**。开工前重跑一遍确认基线一致（条目 1251、通过 1230、跳过 21、
+失败 0），21 条跳过与阶段 20 记录的集合逐名相同。
+
+### 范围一：支持矩阵统一
+
+README 的逐协议证据矩阵是唯一事实源。本阶段核对的六处，逐处列明改了什么：
+
+**1. `README.md` · Components 表 · Observation history 行（阶段 19 脱节）**
+
+原文把状态写成「Bounded local tables, self-written file writer」，边界里还写着「迁到维护中
+的驱动是计划」。阶段 19 已经换成 `modernc.org/sqlite`，这两句都过期了。改为：
+状态「Bounded local tables in SQLite, through a pure-Go driver (`modernc.org/sqlite` v1.62.0)」，
+边界保留保全语义并写清代价——「三张表每次整表重写；schema 不认识或读不开的文件原样保全、
+写入挂起」。没有再写「迁移计划」，因为它已经不是计划。
+
+**2. `README.md` · Other known gaps · 最后一条（阶段 20 脱节）**
+
+原文「No fuzz corpus, no independent CI interop job, and no version-linked machine reports for
+release tags.」三件事里前两件已经变了。拆成两条，按事实分述：
+
+- fuzz 目标与种子语料已在树里，但**只跑过限时的本地会话**，CI 还没有定时任务；
+- CI 工作流带独立 interop job，**从未在 Actions 上跑过**，所以资产名没核对过 404，也没有
+  任何 tag 背后的机器报告。
+
+「已定义」不写成「已运行」：两条都用了完成时描述文件存在、用「has never run」描述执行。
+
+**3. `README.md` · Hysteria2 / TUIC 两行的状态标签**
+
+原文「Known failing — fix in progress」，但修复阶段 15 就落码了。标签改成
+「**Unusable** — fix landed, interop not re-run」，一句话同时承载三件事：修复已落码、真实
+互通未复验、按不可用对待。图例里「Known failing」那条同步换成「Unusable」并写明后果
+（不进任何稳定声明、不得出现在稳定包里），因为表里已经没有行再用旧标签。两行的「证据与边界」
+补上「Stage 15 repaired … but nothing has been carried against a reference server since」。
+「Source-level scope」里的「Hysteria2, TUIC v5 — known failing, fix in progress」同批改成
+「implemented, but unusable until their real interoperability has been re-run」——同一份 README
+里两处说法不能不一样。
+
+**VLESS + REALITY 行未动**：仍是「Project record」（TCP，阶段 16 的 16 KiB 往返），UDP 仍是
+「Unverified」。没有升级成「Verified」。
+
+**4. 配置期警告（新代码，`internal/outbound/unusable.go` + `cmd/melonarc-core/unusable.go`）**
+
+配置里写 `hysteria2` / `tuic` 节点原来会被静默接受，与矩阵「按不可用对待」不一致。现在：
+
+- `outbound.UnusableProtocols()` / `IsUnusable(typ)` 是纯函数，列出「已知不可用」的协议与
+  一句原因；类型匹配与 `outbound.New` 同规则（小写 + 去空白）。
+- `warnUnusableProtocols(cfg, logger)` 在**装配点**逐条打结构化 warn：
+  `msg="outbound protocol is known to be unusable in this build"`，带 `proxy` / `type` / `reason`。
+  只警告不拒绝：拒绝会让一份订阅里有一个坏节点就整份配置起不来。
+- 调用点两处：`run()` 在 `buildDialers` 之后（此时订阅已导入，所以订阅带进来的节点也会被
+  点到），`reloader.reload` 在 `buildDialers` 之后（配置已被接受才警告）。
+- 已用真进程验：一份含 `hysteria2` + `tuic` 各一个节点的配置启动后 stderr 有 2 条 warn，
+  文案含协议名与原因，**不含**口令（`TestUnusableProtocolWarningCarriesNoCredentials` 守着）。
+- `-check` 不警告：它不走 `buildDialers`，是纯校验路径，输出到 stdout 的摘要里也不该混日志。
+  这是有意的，记在这里免得被当成漏掉。
+
+**5. CLI 与 GUI 的核对结果（无改动）**
+
+- **CLI**：通读 `internal/cli` 的 usage 与全部子命令输出，没有一句协议级支持表述（`status`
+  只转述核心的 `/healthz`、`/v1/*`），与矩阵不冲突。除版本字符串随范围二统一外，没有加任何
+  命令、没有加支持矩阵文案。
+- **GUI 关于区**：`settings.js` 的 `aboutBlock` 只有四样东西——Logo、`APP_VERSION`、
+  `APP_LICENSE`、一条 Logo 说明（`settings.about.body`）。**已核对、无协议级表述**，locales
+  文案未动。
+- 「两个版本号」的问题按范围二处理：发布构建用同一个版本参数同时注入核心与前端，而不是让
+  UI 去读核心的版本。本阶段 tar 只含核心 + CLI，前端同源是给后续桌面包预备的。
+
+**6. `docs/development-doc-v1.md` · 开头状态说明**
+
+§2.3 把 XTLS-Vision flow 列在 VLESS 范围内，而实现是配置期拒绝、矩阵写明不支持。在文档头部
+（元信息之后、`---` 之前）加了一段「状态说明（2026-11-15，阶段 21）」：本文是 v1 **目标规格**，
+当前实现状态以 README 支持矩阵为准，两处不一致时以 README 为准，并点名 Vision 就是这类差异。
+**只加说明段，§2 的范围条目一字未改。**
+
+### 范围二：发布工程
+
+**1. 版本注入：`internal/version` 成为唯一来源**
+
+- 新包 `internal/version`：`const Default = "0.1.0-dev"` 与 `var Version = Default`。是变量而
+  不是常量，因为链接器只能写变量。
+- 删掉两处各自的常量：`cmd/melonarc-core/main.go` 的 `const version`、
+  `internal/cli/cli.go` 的 `const Version`（对外可见的 `cli.Version` 一并消失，仓库里没有第二
+  个引用点）。API status、`/healthz`、CLI `version` 命令全部读 `version.Version`。
+- 构建注入：`-ldflags "-X github.com/melon-tgj/melonarc/internal/version.Version=<v>"`。不带注入
+  的 `go build` 仍报 `0.1.0-dev`（实测 `/tmp/s21/cli-plain version` → `melonarc-cli 0.1.0-dev`）。
+- **顺手加了一行 `-check` 横幅**：`printSummary` 的第一行现在是 `melonarc-core <version>`。理由
+  不是好看，而是它让「注入是否生效」在不启动守护进程的前提下可观测、可测（`TestCheckReports…`），
+  也让「哪个构建校验了这份配置」有答案。这是本阶段唯一一处核心输出格式变化。
+- 测试：`internal/version` 3 条（单行可打印、可被链接器写、占位符是 0.1.0-dev）、`internal/cli`
+  1 条（version 命令报的是同一个变量）、`cmd/melonarc-core` 1 条（-check 报注入值）。
+
+**2. 前端同源：`MELONARC_VERSION`**
+
+- `apps/desktop/scripts/build.mjs` 读 `MELONARC_VERSION`；给出时**只改 `dist/src/version.js`**
+  里那一行 `APP_VERSION`（`stampVersion`），源码模块的缺省值一字不动。值先按
+  `^[0-9A-Za-z][0-9A-Za-z._+-]*$` 校验——它要进 JS 字符串字面量，也要进 shell 参数。
+- 缺省行为与现状完全一致：输出仍是 `melonarc-desktop 0.1.0` / `output` / `files` / `size` 四行，
+  产物里 `APP_VERSION` 仍是 `0.1.0`。带变量时多打一行 `version: <v> (MELONARC_VERSION overrides …)`。
+- 测试 `test/build.test.mjs`（2 条）：不设变量 → dist 的 `APP_VERSION` 等于源码值、输出里没有
+  `MELONARC_VERSION`；设变量 → dist 是注入值、`APP_LICENSE` 不变、**源码文件仍是 `0.1.0`**。
+  测试用 `--root` 指向临时目录（readdir/readFile/writeFile 复制，不用 `fs.cp`），不碰真实 `dist/`。
+- `test/version.test.mjs` 的三方一致性检查**未改**，仍然通过（源码值没变）。
+
+**3. `scripts/build-release.sh`（POSIX sh，与 `check-interop.sh` 同风格）**
+
+`scripts/build-release.sh <version>` 做三件事，与任务书一致：
+
+- `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X …=<version>"` 出
+  `melonarc-core` 与 `melonarc-cli`，打印两者字节数；
+- 组 `dist-release/melonarc-<version>-linux-amd64/`：两个二进制 + `melonarc.conf`（示例配置）+
+  `LICENSE` + `README.md` + `THIRD-PARTY-NOTICES.md` + `SECURITY.md`；
+- 打 `dist-release/melonarc-<version>-linux-amd64.tar.gz` 并打印 sha256（`sha256sum`，没有则
+  `shasum -a 256`）。
+
+可重复运行：每次先删自己的 staging 与同名 tar。版本参数先校验（只允许
+`[0-9A-Za-z._+-]`、首字符必须是字母数字），因为那个字符串会进被 `rm -rf` 的路径和 `-o` 参数；
+`1.0/../x` 与 `-1.0` 都被拒（实测退出码 1，无参数退出码 2）。脚本**自检**：在 linux/x86_64 上
+运行构建出的 CLI 并要求它报 `melonarc-cli <version>`，不一致就失败；非 linux 主机跳过这一步
+（交叉编译的产物在那台机器上跑不了）。不打 tag、不建 release、不推送。
+`/dist-release/` 补进 `.gitignore`（`git check-ignore` 确认命中）。
+
+实测（本机）：`melonarc-core` 16,400,544 B、`melonarc-cli` 6,852,768 B；tar 在最终提交上重跑为
+9,765,940 B、`sha256 110cf2f0a370adb69bfa3b59e3402cc75a8136be6cf9cd583ccf1864e9acb423`
+（同一棵树前后两次是 9,765,930 / 9,765,928 / 9,765,940 B、三个不同 sha）。**大小与 sha 每次
+重跑都会变**：tar 记 mtime、gzip 记时间，脚本注释里写明**不声称**可复现构建——首发若要写校验和，
+以实际发布那一次的脚本输出为准。
+
+**4. 示例配置 `examples/melonarc.conf`**
+
+仓库原来没有示例配置。新增一份，随 tar 以 `melonarc.conf` 名字发布（打成 `melonarc.conf`
+而不是带 `examples/` 前缀，因为收包的人只想要一个能改的文件）。内容最小可跑：`[General]`
+回环 http/socks5 + api-listen + 相对 `data-dir`；一个 `socks5` 出站（口令是
+`username=example, password=change-me`）；`select`/`url-test`/`fallback` 各一（成员里用内置
+`DIRECT`）；7 条规则以 `FINAL` 收尾；`[Host]` 一条。地址只用文档段（`192.0.2.0/24`、
+`198.51.100.0/24`、`203.0.113.0/24`）与 RFC 2606 保留域名，没有任何真实服务器或真实凭据。
+**自验**：先在本机构建的核心上 `-check` 通过；再在**发布 tar 里的**核心上对**tar 里的**
+配置 `-check` 通过（7 规则 / 1 代理 / 3 组 / 1 host，`-check` 未创建 `melonarc-data`）。
+
+**5. `THIRD-PARTY-NOTICES.md`（仓库根，同时进 tar）**
+
+- **全集怎么来的**：`go list -m all` 在本机不可用（`GOPROXY=off` 下缺 `.info`，阶段 16 已记），
+  文件里如实写了这一点，并列出替代办法：`go mod graph`（109 条边）算 MVS + 两个发布二进制的
+  `go version -m` 的 `dep` 行（产物里到底有什么，以它为准）+ `go.mod` 的 `require`。三者一致，
+  共 **45 个模块**，其中 **17 个进二进制**。
+- **许可证怎么核对**：逐个读模块缓存里**该版本自带**的 `LICENSE` / `LICENCE` / `COPYING` /
+  `NOTICE` 原文，多许可证文件的（`modernc.org/sqlite`、`modernc.org/libc`、
+  `modernc.org/memory`、`klauspost/compress`）逐个点名，不从网页或印象写。
+- 结构：① 17 个进二进制的模块（含 `what it does in this product`）；② 28 个只在模块图里的
+  模块，逐条写「为什么不进二进制」；③ 驱动带进来的 C（SQLite 3.54.1 公有领域、musl MIT、
+  go-netdb/nixpkgs MIT、Go BSD-3，`sqlite-vec` 与 `test_demovfs` **未链接**）；④ 前端一节
+  （零 npm 依赖，`package-lock.json` 里没有 `node_modules/` 条目，美术资源原创）；⑤ Rust 一节
+  （`tauri-build` 2 / `tauri` 2 / `serde` 1，**本地没有 Cargo.lock 也没有 registry，许可证未核**，
+  原文标注「传递依赖待首次联网构建生成 Cargo.lock 后复核」）；⑥ 这个文件不做什么。
+- **四个模块核不了**：`davecgh/go-spew`、`pmezard/go-difflib`、`quic-go/qpack`、
+  `jordanlewis/gcassert` 在模块缓存里没有副本。表格里写「not verified here — no copy in the
+  local module cache」，**不猜**。四个都不进二进制。
+
+### 范围三：公开前检查
+
+**1. `SECURITY.md`**
+
+私密渠道写 GitHub Security Advisories（仓库页 → Security → Report a vulnerability）；若账号用
+不了该表单，就开一个**不含任何细节**的公开 issue 请求私密渠道。要求附版本（`-check` 横幅、
+`melonarc-cli version`、`/healthz`）、平台、最小复现、**脱敏后的**配置；明说公开 issue 里不要
+贴凭据、订阅链接、访问历史，并写明「已贴出的凭据先轮换，删评论不等于撤回」。响应预期按实际写：
+个人项目、尽力而为、**不承诺固定时限**，但承诺三件事（确认收到、给出受理/需信息/超范围的决定、
+受理则下一预览修并记 DEVLOG）。
+
+**2. 全仓脱敏扫描（工作区 + 全部 50 个可达提交）**
+
+方法：`git grep -n -I -E <pattern> $(git rev-list --all)`（50 个提交、单分支 `master`、无 tag、
+无 remote），命中逐条人工复核。结果：
+
+| 检查项 | 命中 | 分类与结论 |
+|---|---|---|
+| `BEGIN … PRIVATE KEY` 块 | 0 | — |
+| `Bearer <16+ 字符>` | 0 | — |
+| 带凭据 URL（`://user:pass@`） | 155 处（去重后 24 行） | **文档示例 / 测试夹具**：`ss://method:pass@host:port` 等六种分享链接语法（`internal/share` 注释与 DEVLOG）、`share_test.go`/`fuzz_test.go` 里的 `hy2://user:pass@hy.example.com`、`tuic://<uuid>:secret@tu.example.com`。主机全是 `example.com` 系，名称全是占位值 |
+| 带 `token=`/`key=`/`password=` 的 https 链接 | 37 处（去重后 2 行） | **测试夹具**：`https://example.com/sub?token=abc`（订阅解析用例） |
+| 私钥文件扩展名（`.pem`/`.key`/`id_rsa`/`.p12`/`.pfx`/`.jks`/`.kdbx`/`.gpg` …） | 0 | 从无此类文件被跟踪 |
+| `.env` / `credentials` / `secret` 文件名 | 0 | — |
+| `/home/<name>/` | `/home/melon/` 196 处、`/home/hatch/` 56 处（跨提交计数） | **测试夹具 + 本机环境路径**：前者是 `paths.test.mjs`/`settings.rs` 的 home 目录夹具（`melon` 是开发机账号）；后者是 DEVLOG 与 `docs/interop-testing.md` 里互通二进制的位置。无凭据，但确实写了账号名——列入清单 A7 待所有者决定是否改成 `$HOME` |
+| `/Users/<name>/` | `/Users/melon/` 34 处 | **测试夹具**（macOS 配置目录用例） |
+| `C:\Users\<name>` | `paths.test.mjs` 2 行 | **测试夹具** |
+| 非保留段 IPv4 | 历史里 89 个唯一地址，17 个不在保留/文档段 | 全部**夹具或刻意的近邻值**：`1.0.1.x`（geoip mmdb 夹具）、`8.8.8.8`/`1.1.1.1`/`9.9.9.9`（解析器入参，只解析不连接）、`128.0.0.1`（回环判定反例）、`198.51.101.1`/`203.0.114.x`/`2001:db9|dba|dbb`（文档段外一位，证明规则不外溢）、`4.5.1.2` 是 RFC 章节号误报 |
+| 全局 IPv6 | 仅 `2001:db8::/32` 与上述近邻、`2606:4700::/32`（ASN 夹具） | 同上 |
+| 长 hex / base64（≥32） | 全部是 64 字符 SHA-256 | **测试向量与文档里的校验和**（BLAKE3 known-answer、参考实现二进制哈希） |
+| JWT 形状（`eyJ…`） | 0 | — |
+| `rules.test`（仓库根的 5 MB 二进制） | 1 个文件 | 阶段 1 遗留的 `go test -c` 产物，**未被跟踪**（`*.test` 在 `.gitignore`），不在提交里 |
+
+**没有发现疑似真凭据或真订阅 URL。** 测试夹具里的假口令（`alice` / `s3cret`，阶段 2 起就在
+测试文件里）按夹具登记，不算泄漏。
+
+一处**没做完**：用于找「字面量 `password=<值>`」的那条 `git grep` 被环境拦下（敏感内容审批
+超时，输出被扣下），没有结果可分类。按要求不重试、不绕过，记进清单 A6，公开前必须补跑。
+
+**3. `docs/pre-release-checklist.md`**
+
+逐项挂账，每条写「卡住什么、谁能解、怎么解」，分四组：A 转公开前（六个图标资产未随快照推送、
+Cargo.lock、CI 三 job 未实跑、私密报告入口未开启、许可证 only/or-later、脱敏扫描两个尾巴、
+DEVLOG 里的私人路径）、B 发二进制前（tar 已可产出、第三方许可证**全文**未随包、四个模块许可
+未核、Rust 壳未编译、Hysteria2/TUIC 互通未复验）、C 发布目标前（Windows 未实机、五项性能未测、
+打包安装未端到端）、D 预览可接受的代价（Flush ~40ms、整表重写、fuzz 只跑限时会话）。
+
+### 范围四：许可证口径差异（**只汇总，不改**）
+
+本阶段**没有改动任何一处许可证文本与元数据字段**。现状差异如下，待所有者决定：
+
+| 文件 | 位置 | 现值 |
+|---|---|---|
+| `LICENSE` | 全文 | GNU GPL v3 全文（未写 only / or-later） |
+| `README.md` | 末节 License | 「GNU General Public License, **version 3**」 |
+| `apps/desktop/src-tauri/Cargo.toml` | `[package] license` | `GPL-3.0-or-later` |
+| `apps/desktop/package.json` | `license` | `GPL-3.0-or-later` |
+| `apps/desktop/src-tauri/tauri.conf.json` | `bundle.license` | `GPL-3.0-or-later` |
+| `apps/desktop/src/version.js` | `APP_LICENSE` | `GPL-3.0-or-later` |
+
+六处的差异只有两类：根 LICENSE/README 说「v3」（不限定），四个前端/打包元数据说「or-later」。
+选 only 还是 or-later 是版权所有者的决定，不是工程决定；决定后要改的是同一批文件的同一批字段
+（清单 A5）。
+
+### 关键决策及理由
+
+1. **新造 `Unusable` 标签，而不是继续用「Known failing」。** 旧标签描述的是「试过，失败」，
+   而现在的状态是「修过，但没再试」——两句话对读者的含义完全不同（前者说别用，后者容易被读成
+   「快好了」）。标签必须自己把三件事说完，因为有人只看表不看正文。
+2. **配置期警告只警告、不拒绝。** 拒绝会让一份订阅里一个坏节点带走整份配置——正是订阅导入
+   路径最常见的形态。警告的落点是装配点（`buildDialers` 之后）而不是 `config.Validate`：校验
+   层不该知道「哪个协议目前不可信」，那是出站层的事实；而且 `-check` 与测试不该被日志污染。
+3. **警告的文案带上「修复已落码、互通未复验」，并且不带口令。** 前者防止读者以为实现缺失，
+   后者是因为守护进程的日志会被粘进 issue（`TestUnusableProtocolWarningCarriesNoCredentials`）。
+4. **版本做成变量 + 单一包，而不是给两个 main 各留一个 `-X` 目标。** 两处 `-X` 就是两个可以
+   各写一半的注入点；一个包 + 一个变量，`status`/`healthz`/`version`/`-check` 不可能互相不一致。
+5. **`-check` 加一行横幅。** 这是本阶段唯一的核心输出变化，换来的是「注入生效」可在不启守护
+   进程的情况下被断言。风险是有人按行解析 `-check`，但仓库内没有这样的调用方（CI 与测试都用
+   `Contains`）。
+6. **前端只改 `dist` 的副本，不改源码模块。** `test/version.test.mjs` 拿 `src/version.js` 与
+   三个清单比对；让发布版本写进源码，等于让「源码 checkout 自称的版本」随每次发布变化，下一次
+   `npm test` 就会在干净 checkout 上红。
+7. **发布脚本自己校验版本，并且在 linux 上回读注入值。** 版本字符串会进 `rm -rf` 的路径、
+   `-o` 的参数和文件名；回读则是唯一能证明 `-ldflags` 那条路真的通的办法（比读构建元数据稳）。
+8. **`THIRD-PARTY-NOTICES.md` 用「进没进二进制」分组，而不是按直接/间接依赖分组。** 许可证
+   义务跟的是「分发出去的字节」，不是 `go.mod` 的写法。17 vs 28 的分界就是义务的分界，四个
+   核不了许可证的模块正好都在 28 那一侧。
+9. **四个没有本地副本的模块写「未核」，不写猜的值。** 任务书要求许可证必须从模块缓存原文
+   核对；做不到就明说，并给出补法（联网机器 `go mod download` 后重读）。
+10. **`docs/development-doc-v1.md` 只加状态说明段。** 这份文档此前各阶段都是只读；本阶段任务
+    书明确要求加说明段，所以加了，但**没有动 §2 的范围条目**——那是目标规格，改了就不是
+    「目标 vs 现状」的对照了。
+11. **清单里把「本阶段自己留下的两个尾巴」也列成条目**（第三方许可证全文、被拦下的脱敏子检查）。
+    清单如果只列别人的活，它就变成了免责声明而不是工作单。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链 `~/sdks/go/bin` 的 Go 1.27.4，Linux/x86_64：
+
+```
+go build ./...                                              通过
+go vet ./...                                                通过
+gofmt -l .                                                  无输出
+go test ./... -count=1 -v                                   1266 条目 / 1245 通过 / 21 跳过 / 0 失败
+GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...  通过
+scripts/build-release.sh 0.1.0-preview.1                    通过，产出 tar 并打印 sha256
+<h>melonarc-<v>-linux-amd64/melonarc-core -config …/melonarc.conf -check   通过
+```
+
+- **逐项对基线**（`96238a1`，1251/1230/21/0）：**条目 +15、通过 +15、跳过 ±0、失败 0**。
+  增量拆解：`internal/outbound` +4（unusable 列表与匹配）、`cmd/melonarc-core` +7（警告
+  1 父 + 4 子 + 不带凭据 1 + `-check` 版本 1）、`internal/version` +3、`internal/cli` +1。
+- **21 条跳过与基线逐名 `diff` 完全一致**（同一份命令输出对比，无新增）。
+- **前端**（系统 Node 24.22.1，清代理，`--test-concurrency=1`）：
+  **77 条目 / 75 通过 / 2 跳过 / 0 失败**（基线 75 / 73 / 2 / 0；+2 来自 `build.test.mjs`）。
+  2 条跳过仍是「需真实核心」的既有用例。`npm run build` 缺省输出与尺寸未变（28 文件 / 208.3 KiB）。
+  注：托管 Node 22 在本沙箱跑整套离线套件时，5 条 `bridge-contract` 用例因 undici Wasm
+  分配失败（vmemory 上限，阶段 14 起已知的环境瑕疵）红掉——**同一棵树在系统 Node 24 上全绿**，
+  与本次改动无关，记录在此以免下次误判为回归。
+- **二进制体积**（同机同工具链）：
+
+  | 产物 | 大小 | 相对 |
+  |---|---|---|
+  | `melonarc-core`（默认构建，未 strip） | 24,301,446 B | 阶段 19 记录的 24,287,933 B **+13,513 B** |
+  | `melonarc-core`（发布构建：`-trimpath -s -w`） | 16,400,544 B | **-32.5%** |
+  | `melonarc-cli`（默认构建） | 10,186,969 B | 首次测量 |
+  | `melonarc-cli`（发布构建） | 6,852,768 B | -32.7% |
+  | `…-linux-amd64.tar.gz` | 9,765,940 B | 最终提交上测（每次打包略有出入，见上） |
+
+  +13,513 B 是 `internal/version` + 警告代码 + `-check` 横幅的代价；`-s -w` + `-trimpath`
+  把核心从 24.30 MB 压到 16.40 MB，与阶段 19「下一步计划」的预估（-25%~-30%）一致。
+- 命名红线：本阶段新增/修改的源码、脚本、文档、配置与六笔提交信息（含本条记录）已按已知清单扫描
+  （`clash|surge|quantumult|shadowrocket|stash|loon|kitsunebi|mellow|surfboard|nekobox|v2ray|
+  sing-box|mihomo|…`），零命中。新文件里出现的第三方名字都是开源项目（`modernc.org`、
+  `quic-go`、`uTLS`、`tauri`、`serde`、SQLite、musl 等），不涉及红线。
+- 提交（本地，未推送，每笔单独 checkout 都绿）：
+  `54badd4`（矩阵统一 + 配置期警告）→ `974f9f2`（版本注入 + 前端同源）→
+  `5139668`（THIRD-PARTY-NOTICES + SECURITY + README 许可指向）→
+  `4de221f`（发布脚本 + 示例配置 + gitignore）→ `6932b65`（公开前清单）→ 本条目。
+
+### 遗留问题
+
+- **第三方许可证全文未随 tar。** `THIRD-PARTY-NOTICES.md` 列了组件、版本与许可证名，但 tar 里
+  只有项目自己的 `LICENSE` 与这份声明。GPLv3 §6 关于「随二进制提供声明」的具体做法需要所有者
+  拍板（补全文，或在发布说明里给源码获取方式）——清单 B2。
+- **四个模块的许可证未核**（没有本地副本，均不进二进制）——清单 B3。
+- **脱敏扫描有一条子检查被环境拦下**（字面量 `password=<值>`），公开前必须补跑——清单 A6。
+- **DEVLOG 与 `docs/interop-testing.md` 里有本机账号路径**（`/home/hatch/interop-bin`），
+  `paths.test.mjs` 等夹具里有 `/home/melon`、`/Users/melon`。不是凭据，但确实是账号名；
+  改不改（日志是记录，不该当草稿改）留给所有者——清单 A7。
+- **CI 仍未实跑**，且阶段 20 留下的 `TestInteropQUICFixtureReachesSendtoBoundary` 在宽松
+  runner 上会把 interop job 判红；本阶段按任务书**未动**（改名与判定口径都属明确排除项）。
+- **前端同源只是预备**：本阶段 tar 不含桌面包，`MELONARC_VERSION` 在真实打包链里还没跑过。
+- 阶段 8–20 的既有挂账照旧：Windows 实机、Rust 壳编译、QUIC/UDP 真实互通、REALITY UDP 证据、
+  预览桥 query string、`core.log` 无轮转、用户态 TCP 的 IPv6/乱序/窗口缩放、枯竭计数的对外出口、
+  Flush 成本与整表重写。
+
+### 下一步计划
+
+1. 让所有者处理清单 A 组：推图标资产、开私密报告入口、定 only/or-later、补跑那条被拦下的扫描。
+2. 在能出网的机器上跑一次 CI（先补 Snell 两个仓库变量、核对三个资产 glob），并决定
+   `TestInteropQUICFixtureReachesSendtoBoundary` 的去留。
+3. 在允许 UDP 的环境复验 Hysteria2 / TUIC，通过后才把 README 那两行从「Unusable」移走。
+4. 补第三方许可证全文进 tar（或在发布说明给源码获取方式），并把四个未核模块补上。
+5. 桌面包：联网生成 `Cargo.lock`、`cargo build --release --locked`、把 `MELONARC_VERSION`
+   接进真实打包链，然后按清单 B4/C3 验收。
+
+---
+
+## 阶段 22 — GPT 决策收尾批：枯竭计数对外出口、夹具改名、解析期静态校验（2026-11-15）
+
+范围：三项已定案决策的落地。决策原文在仓库外
+`~/workspace/projects/melonarc-gpt-answers-20261115.md`（可回读）：① `/v1/inbound` 加可选字段
+`fake_ip_pool_exhausted_queries_total`（选 a）；② 两条 `TestInteropQUICFixture*` 改名
+`TestQUICFixture*`（选 a）；③ `share.Parse` 与 `outbound.New` 共用静态参数校验、混合订阅采用
+有效节点（选 b）。硬约束逐条照办：**只本地提交，没有 push、没有改仓库可见性、没有打 tag**；
+命名红线照旧；**许可证 only vs or-later 仍是所有者待决事项，本阶段没有碰任何许可证文本与
+元数据文件**——`LICENSE`、`README.md` 的许可段、`apps/desktop/package.json`、
+`src-tauri/Cargo.toml`、`tauri.conf.json`、`src/version.js` 全部未改。`spikes/` 未动，
+`docs/development-doc-v1.md` 未动。
+
+开工前：`HEAD = 6ab0a4b`，工作区干净。按任务书先读 `DEVLOG.md` 与
+`docs/development-doc-v1.md`（后者是 v1 目标规格，头部状态说明要求当前状态以 README 支持矩阵
+为准）。阶段 21 末状态核对：Go 1266 条目 / 1245 过 / 21 跳 / 0 败，前端离线 77 条目 /
+75 过 / 2 跳 / 0 败、实时 77/77。本机重跑确认：`go build ./...`、`go vet ./...`、
+`gofmt -l .` 全过，`go test ./... -count=1 -v` 1266 条目 / 21 跳 / 0 败，21 条跳过与阶段 20
+记录的集合逐名一致。基线输出存 `/tmp/s22-baseline-v.txt`（仓库外的临时证据）。
+
+### 任务一：`/v1/inbound` 暴露 fake-IP 枯竭计数（选 a）
+
+- `internal/api/views.go`：`InboundView` 新增
+  `FakeIPPoolExhaustedQueriesTotal uint64`，JSON 名
+  `fake_ip_pool_exhausted_queries_total`，**不带 `omitempty`**——零次也发 `0`。语义是「因
+  fake-IP 池满而回 SERVFAIL 的 DNS 查询累计次数」。
+- `cmd/melonarc-core/state.go`：把 `snap.NameAddressExhausted` 映到该字段。顺手把
+  snapshot → view 的转换抽成纯函数 `inboundView(snap inbound.Snapshot)`：本机没有真 TUN 设备，
+  真进程里跑不出「池满」这一态，纯函数才能让测试把手写的非 0 快照喂进去。
+  `internal/inbound/metrics.go` 只改注释——原注释写着「刻意不进 /v1 视图，契约已冻结」，
+  现在改成「日志一行 + /v1 字段」两个出口；计数器本身一字未动。
+- `internal/cli/cli.go`：`describeInbound` 一行尾部追加 `, %d fake-IP pool exhausted`，
+  零也打印，不新增命令、不新增支持矩阵文案。
+- GUI **已有**入站统计展示位（`apps/desktop/src/panels/connections.js` 的四个 stat tile），
+  所以按要求同步加第五个 tile，两个语言包各加一个键
+  `connections.totals.fake_ip_exhausted`（zh「假地址池耗尽」/ en「Fake-address pool
+  exhausted」）。**没有新造页面**。tile 写 `?? 0`：旧核心不送这个键时
+  `formatNumber(undefined)` 会画成「—」，而契约要求按 0 处理。
+- 兼容与测试：Go 侧 `encoding/json` 缺键即零值，`TestInboundViewReadsAnOlderCore` 用一份
+  不含字段的旧响应解码断言 0；`TestInboundPoolCounterIsAlwaysPresent` 钉住零态仍发字段；
+  `TestInboundEndpoint` 改成非零 4 并断言 JSON 名。CLI 侧
+  `TestStatusShowsTheExhaustedPoolCounter` 用两份手写 JSON（新核心 / 旧核心）各跑文本与
+  `-json` 两种输出，断言 4 / 0 且退出码 0；`TestDescribeInboundAlwaysNamesThePool` 钉住零态
+  文案。`cmd/melonarc-core` 新增 `TestInboundViewCarriesThePoolCounter`（0 与 6 两态 + 其它
+  计数器不丢），并在既有的 `TestAPIShowsInboundMetricsAndFailures` 加一条真 daemon 的 0 态断言。
+  GUI 侧 `test/panels.test.mjs` 加两条用例（有键 1234 → 「1,234」、无键 → 「0」），用
+  fake DOM 直接读 tile 的数字；`test/live-core.test.mjs` 加一条真核心断言。
+  **真进程实测**：挂临时演示核心后 `/v1/inbound` 输出含
+  `"fake_ip_pool_exhausted_queries_total":0`。
+
+### 任务二：夹具用例改名（选 a）
+
+- `internal/outbound/interop_quic_test.go`：
+  `TestInteropQUICFixtureInjectsTrustAtConstruction` →
+  `TestQUICFixtureInjectsTrustAtConstruction`，
+  `TestInteropQUICFixtureReachesSendtoBoundary` →
+  `TestQUICFixtureReachesSendtoBoundary`，两条都**保留在常规 `go test ./...` 里**。文件头补了
+  一段说明为什么不带 `TestInterop` 前缀：判定门把 `TestInterop*` 的 Skip 当成「这次没验证」，
+  而这两条在任何装了 TLS 栈的机器上都能跑，不该有能力把一个真正的互通结论弄错。
+- `scripts/check-interop.sh` **一字未改**（`git diff` 为空），真正与参考实现通信的
+  `TestInterop*` 继续执行「设置参考目录后，任何 Skip 都失败」。
+- 现行文档同步改净：`docs/interop-testing.md` §8 第 2 条从「冲突未解、只记账」改写成改名后的
+  判定说明；`docs/pre-release-checklist.md` A3 原本写「预计两处修复」，现在写明第二处已由
+  改名消掉、资产 glob 仍需首跑核对。全仓 grep 旧名：代码 / 脚本 / 现行文档零命中；只剩
+  DEVLOG 历史条目与 `.workbuddy/memory/` 的私有记忆（不跟踪、被 `.gitignore` 命中），
+  按任务书「历史记录不改」保留，新条目在此注明改名即可。
+- `go test ./internal/outbound/ -run TestQUICFixture -v`：两条父用例 PASS（各带 2 个子用例），
+  都不在 21 条跳过集合里。
+
+### 任务三：解析期静态校验（选 b）
+
+- **`internal/outbound/validate.go`（新）**：`Validate(spec)` = 清掉 `Name` 后调 `New(spec)`、
+  丢弃拨号器（QUIC 的 `Disown`）、只回 error。理由见「关键决策」1：不在 share 里复制一份规则
+  表，也不把每个构造函数拆成两半；唯一能保证两端永不漂移的做法，是让共用校验真的调用同一段
+  构建代码。构造阶段只读 options，不开 socket、不起 goroutine；一个本构建未实现的类型在这里
+  也**不是**错误，与 `New` 返回 `Unsupported` 的语义一致。
+- **`internal/share/share.go`**：`Parse` 在 switch 之后统一调 `validateStaticParameters`，六种链接
+  都过这一关；单条链接的非法静态参数（`ss://aes-999:…`）现在 Parse 直接报错。
+  `registryReason` 去掉 `typ: ` / `outbound: invalid proxy option: ` 这些前缀，让 reason 保持本包
+  的措辞风格且不重复协议名；`Error` 增加私有 `cause` + `Unwrap()`，只供
+  `errors.Is(err, outbound.ErrInvalidOption)` 分类，`Error()` 永不渲染 cause。**对外契约不变**：
+  错误仍只带 `Scheme` + `Reason`，绝不回显链接（新用例逐条断言假口令没出现在错误里）。
+- **`ParseAll` 签名改为 `([]config.Proxy, []Rejection)`**：不再把拒绝塞进一个 joined error。
+  `Rejection{Item, Reason}` 带 1-based 位置。理由：订阅要按条目报告，joined error 的文本不能被
+  结构化消费；同时保留「部分结果」语义，由调用方决定一份部分可用的列表算不算成功。
+- **契约方向反转（任务书要求写明）**：原契约是「能解析必能构建」——`TestParseBuildsEveryLink`
+  在 Parse 之后手工调 `outbound.New` 兜底，防的是解析器吐出一个建不起来的节点。现在 Parse
+  自己就跑构建期的静态校验，那个蕴含由**构造**保证、再测就是同义反复；契约反过来变成
+  「构建会拒的，解析期就拒」，失败面从启动期前移到导入期。测试随之重命名为
+  `TestParseAndBuildAgreeOnStaticParameters` 并重写说明（每个通过夹具同时断言
+  `Validate` 与 `New`），新增 `TestParseRejectsInvalidStaticParameters` 逐协议断言 reason 是
+  registry 的措辞且保留 `ErrInvalidOption` 因由；`fuzz_test.go` 的注释同步改掉（原注释写
+  「构建拨号器是更强的契约，fuzz 里不做以省预算」，现在 Parse 已经做了）。包注释从「两条规则」
+  改成三条，把这条写进去。
+- **六种链接各一条非法静态参数**：ss 未知套件 `aes-999`、vmess `scy=rc4`、vless Vision flow、
+  trojan `sni=bad_host`、hysteria2 `obfs=salamander` 缺 `obfs-password`、tuic `sni=bad_host`。
+  Trojan / TUIC 的静态参数面除必填口令外只有共享 TLS 键，所以这两条用 SNI——那是它们的
+  builder 真正校验的东西，不是凑数。**Snell / SOCKS5 / HTTP 在 v1 没有分享链接拼法**
+  （`snell://` 会先被 `unsupported link type` 拒），因此它们的校验在
+  `TestValidateRejectsProtocolsWithoutALinkSpelling` 里从 `outbound.Validate` 这一侧验：
+  snell 的 version / cipher、SOCKS5 与 HTTP 的半对凭据；再加
+  `TestValidateAcceptsTheSameSpecNewAccepts` 钉住通过方向两端一致。
+- **`internal/subscription/subscription.go`**：`parseBody` 改签名
+  `([]config.Proxy, []Skip, error)`。混合体返回有效节点 + 每条跳过的原因，**error 只在没有任何
+  可用节点时非 nil**（空 body 仍是 `ErrEmpty`；全坏是新的 `ErrEmpty`：「all N links … were
+  rejected」）。`refresh` 成功路径写缓存、把 skips 记进 `state.skipped`、INFO 行带
+  `nodes` / `skipped`；失败路径原样走「保留上次结果 → 读缓存 → 都没有就返回错误」，所以全坏
+  刷新**不覆盖缓存**。`reportSkips` 每条打一条 warn（带 item 与 reason），超过 8 条改成一条计数
+  行以避免一份千行坏订阅刷屏，完整列表仍在 `Status.Skipped`（新增字段，`Snapshot` 返回副本）。
+  理由：一份订阅里混着坏节点是最常见的形态，一个坏节点不该带走整份；但一份全坏的东西也
+  不能把在跑的节点换成空列表。
+- 测试：混合体保留有效节点 / 逐条原因与日志 / 全坏保留旧节点并退避 / 全坏回退缓存且缓存字节
+  不变 / 首次导入全坏报错且没有节点被合并 / parseBody 全坏仍是 `ErrEmpty`；
+  `FuzzParseBody` 同步改成三返回值并校验 skip 的形状。
+
+### 关键决策及理由
+
+1. **`Validate` 直接调 `New`，而不是把校验逻辑复制进 share，也不是把九个构造函数拆成
+   「解析 options」+「构造」两半。** 两处各自的规则表就是两份会漂移的表；拆构造函数则要动
+   九个文件、给每个协议新增一个导出函数，收益只是避免一次没有 I/O 的对象构造。让共用校验
+   真的走同一段构建代码，是这三者里唯一从结构上排除漂移的做法。
+2. **字段不带 `omitempty`，零也发。** 「池没满过」和「这个核心不会数」对读数是同一件事，
+   客户端不该靠缺键来判断版本；反过来，旧核心缺键时 Go 侧零值、CLI 打 0、GUI `?? 0`，
+   三条路都按 0 处理且不报错。
+3. **快照转换抽成纯函数 `inboundView`。** 非 0 态需要一个真 TUN 设备和饱和的租约表，本机
+   `TestTUNLinuxLoopback` 因缺 `CAP_NET_ADMIN` 跳过；把映射做成纯函数，是让这一态在本机
+   也可被断言而不伪造进程状态的唯一低成本办法。
+4. **改名不改判定口径。** `scripts/check-interop.sh` 把 Skip 当失败是对的——对真正与参考实现
+   通信的用例，Skip 就是「这次没验证」。错的只是把一条不需要参考实现的夹具用例算进那扇门。
+   改名只移动用例的归属，严格规则、脚本、七个槽位都未动。
+5. **`ParseAll` 变成结构化的拒绝列表，而不是继续返回 joined error。** 「采用有效节点 + 按条目
+   报告原因」要求调用方能拿到位置与原因；字符串解析既脆弱也会把链接带进日志。
+6. **契约方向反转后把「反向」写进测试。** Parse 调了构建期校验之后，「能解析必能构建」是
+   构造性成立的同义反复；真正需要守的是反方向：构建会拒的参数，Parse 必须也拒，并且 reason
+   得是 registry 的措辞（否则说明有人又在 share 里复制了一份规则）。
+7. **订阅只在「一个可用节点都没有」时判失败。** 部分可用就替换成部分列表是可用的；全部不可用
+   还替换，等于把正在路由的组清空。失败路径不写缓存，是「保留上次有效结果与缓存」的落点。
+8. **跳过原因逐条打 warn，但日志有上限 8 条、完整列表进 `Status.Skipped`。** 日志既要能查
+   「第几条为什么坏」，也不能被一份坏订阅刷爆；结构化状态留给以后接 /v1 用，本阶段不新造端点。
+9. **GUI 用已有的 connections 面板，不新造页面。** 任务书明确「没有则在 DEVLOG 注明留待后续」；
+   这里有现成的入站统计位，加一个 tile 和一对 locale 键就是最小改动，且不碰壳、不碰令牌路径。
+10. **许可证口径只挂账、不改。** only / or-later 是版权所有者的决定，不是工程决定；清单 A5
+    与阶段 21 的汇总表保持原样，本阶段连 `README.md` 的许可段都没碰。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链 `~/sdks/go/bin` 的 Go 1.27.4，Linux/x86_64：
+
+```
+go build ./...                                              通过
+go vet ./...                                                通过
+gofmt -l .                                                  无输出
+go test ./... -count=1 -v                                    1292 条目 / 1271 通过 / 21 跳过 / 0 失败
+GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...  通过
+go test ./internal/outbound/ -run TestQUICFixture -v          2 条 PASS（各 2 个子用例），无 Skip
+```
+
+- **逐项对基线**（`6ab0a4b`，1266/1245/21/0）：**条目 +26、通过 +26、跳过 ±0、失败 0**。
+  按 `=== RUN` 名单逐行拆：`internal/api` +2、`internal/cli` +4（2 条新用例，其中 1 条带
+  2 个子用例）、`cmd/melonarc-core` +1、`internal/share` 净 +13
+  （新契约/非法参数/无链接拼法三族共 13 行；原 `TestParseBuildsEveryLink` 的 13 行整体
+  改名，净 0）、`internal/subscription` 净 +6（7 条新用例减去删掉的
+  `TestParseBodyReportsABadLink`）、两条 QUIC 夹具用例改名的 6 行同名替换净 0。
+  `TestSOCKS5Connect/<随机端口>` 两行在两次 -v 输出里名字不同，是端口夹具而非用例增删。
+- **21 条跳过与基线逐名 `diff` 完全一致**（`comm` 比对 `--- SKIP` 名单，输出 IDENTICAL），
+  改名后的 `TestQUICFixture*` 都在通过侧。
+- **前端**（系统 Node 24.22.1，清代理，`--test-concurrency=1`）：离线
+  **79 条目 / 77 通过 / 2 跳过 / 0 失败**（基线 77/75/2/0，+2 条来自 `panels.test.mjs`）；
+  实时（挂 `/tmp/s22-live/demo.conf` 起的真核心 + 真实令牌文件，
+  `MELONARC_TEST_API` / `MELONARC_TEST_DATA_DIR`）：**79 / 79 / 0 / 0**（基线 77/77）。
+  实时核心用的是 17890/17891 两个空闲入站端口：7890/7891 被上一阶段留下的演示核心占着，
+  没有动那个进程。两条跳过的实时用例在真核心上都跑了。`npm run build` 未改源码模块，
+  三方一致性检查仍通过。
+- 命名红线：本阶段新增/修改的源码、注释、文档、配置与四笔提交信息按阶段 21 条目里记录的
+  同一份已知清单扫描**零命中**（这里不复写清单本身，避免把被禁名称再抄一遍）；新出现的
+  第三方名字都是公开协议名或开源项目。许可证文本与元数据文件在
+  `git diff --name-only` 里零命中。
+- 提交（本地，未推送）：`aa9862f`（任务一）→ `0a695eb`（任务二）→
+  `b8cad6a`（任务三）→ 本条目。前三笔各用干净的临时 `git worktree` 单独 checkout，
+  逐笔跑 `go build ./...` / `go vet ./...` / `go test ./... -count=1`，
+  每笔都是 17 个包 `ok`、0 失败。没有 push、没有 tag、没有改可见性。
+
+### 遗留问题
+
+- **许可证 only vs or-later 仍待所有者**（清单 A5）；阶段 22 按任务书一字未动。
+- **枯竭计数的非零态只有映射层与传输层证据**：`inboundView` 的手写快照 + fakeProvider 的
+  API 用例 + GUI 的数字用例。要让真进程把池跑满仍需真 TUN 与饱和租约表
+  （`TestTUNLinuxLoopback` 因缺 `CAP_NET_ADMIN` 仍是 21 条跳过之一）。
+- **`Status.Skipped` 与逐条 warn 没有 /v1 出口**：契约冻结，本阶段不新造端点；要让 GUI 看到
+  「第几条为什么被跳过」得等下一次 API 决策。
+- **第五个 GUI tile 未在真窗口里目视验收**：证据是 fake DOM 面板用例与真核心的应答；
+  Rust 壳至今只交付源码（清单 B4）。
+- **CI 仍未实跑**；A3 里「第二个预期修复」已由改名消掉，但三个资产 glob 从未联网核对过
+  404。`TestQUICFixtureReachesSendtoBoundary` 在允许 `sendto` 的 runner 上仍会 `t.Skip`
+  ——只是现在它属于常规套件，不再让 interop job 判红；严格门本身没有放宽。
+- 阶段 8–21 的既有挂账照旧：Windows 实机、Rust 壳编译、QUIC/UDP 真实互通、REALITY UDP
+  证据、预览桥 query string、`core.log` 无轮转、用户态 TCP 的 IPv6/乱序/窗口缩放、
+  Flush 成本与整表重写、第三方许可证全文与四个未核模块、脱敏扫描被拦下的那条子检查。
+
+### 下一步计划
+
+1. 等所有者定 only / or-later 后统一六处字段；再按清单 A 处理图标资产、私密报告入口、
+   被拦下的脱敏子检查。
+2. 在能出网的机器上首跑 CI：核对三个资产 glob 与 Snell 两个仓库变量；改名后 interop job
+   的判定面已经收窄到真正与参考实现通信的用例。
+3. 在允许真 TUN 的环境验一次枯竭计数的非零端到端（池满 → SERVFAIL → `/v1/inbound` → GUI
+   tile）；本机 `TestTUNLinuxLoopback` 仍是跳过态。
+4. 决定 `Status.Skipped` 要不要有 `/v1` 出口（若要，先定分页与保留窗口），让 GUI 能展示
+   每条订阅节点的跳过理由。
+5. 桌面包：联网生成 `Cargo.lock`、真窗口里目视验第五个 tile、把 `MELONARC_VERSION` 接进
+   真实打包链，再按清单 B4/C3 验收。
+
+## 阶段 23 — 许可证口径统一：全仓 GPL-3.0-only（2026-11-15）
+
+范围：小批次，只统一许可证口径的**元数据字段与文档状态**，不动产品行为、Go 代码、构建脚本
+逻辑与根许可证正文。硬约束：只本地提交，**没有 push、没有改仓库可见性、没有打 tag**；
+`spikes/` 只读，`docs/development-doc-v1.md` 未动。开工前 `HEAD = 8d4092e`、工作区干净；
+按任务书先读 `DEVLOG.md` 阶段 21「范围四：许可证口径差异」表（六处现值）、阶段 22 条目
+（写明 only / or-later 仍是所有者待决事项、该阶段一字未碰）与 `docs/pre-release-checklist.md`
+A5（**owner decision**，写着「pick one and make the other five places say it」）。
+
+### 决策与边界
+
+版权所有者已于 **2026-11-15 本人定夺：全仓统一为 `GPL-3.0-only`**。根 `LICENSE` 是 GPLv3
+全文、README 的 License 节写「GNU General Public License, version 3」，两者都属 only 口径，
+按任务书**保持原样、全文不动**；`LICENSE` 正文里两处「or any later version」是 GPLv3 标准
+条款文字（解释版本号机制），不是本项目的授权声明，同样不动。四处前端/打包元数据统一改为
+SPDX 写法 `GPL-3.0-only`。`.workbuddy/` 私有记忆不算产品文件、不碰；`apps/desktop/dist`
+是 gitignore 的构建产物，不手改（测试构建时自然刷新）。
+
+### 全仓 grep 逐处核对（`or-later` 及变体）
+
+开工前对全部 git 跟踪文件跑 `or[- ]?later`、`any later version`、`GPLv3+`、`GPL-3.0+`、
+`either version 3` 的并集扫描，现行文件共 **7 处命中**，逐处处理如下：
+
+| # | 文件 | 位置 | 处理 |
+|---|---|---|---|
+| 1 | `apps/desktop/src-tauri/Cargo.toml` | `[package] license` | `GPL-3.0-or-later` → `GPL-3.0-only` |
+| 2 | `apps/desktop/package.json` | `license` | 同上 |
+| 3 | `apps/desktop/package-lock.json` | `packages[""].license`（镜像 package.json） | 同上，保持一致 |
+| 4 | `apps/desktop/src-tauri/tauri.conf.json` | `bundle.license` | 同上 |
+| 5 | `apps/desktop/src/version.js` | `APP_LICENSE` | 同上 |
+| 6 | `apps/desktop/test/build.test.mjs` | 第 100 行写死 `APP_LICENSE` 的断言 | 正则同步改为 `GPL-3\.0-only`，否则构建用例必红 |
+| 7 | `docs/pre-release-checklist.md` | A5 标题里的 `-or-later` 与状态 | 标题改为「Licence scope: `GPL-3.0-only` (decision closed)」，状态 `owner decision` → `ready (resolved)` |
+
+第 6 处是任务书点名的连带项：`build.test.mjs` 用 scratch root 复制 `src/version.js` 后断言
+dist 里的 `APP_LICENSE` 字面量，源码一改断言必须跟着改。第 3 处（lockfile 镜像）与第 7 处
+（清单标题里的 `-or-later` 表述）是本次额外发现并一并改齐的现行文件。改完后**现行产品
+文件里 `or-later` 零命中**；仅剩的两类保留项是 `DEVLOG.md` 历史条目 13 处（记录当时状态，
+任务书明确不改）与根 `LICENSE` 正文 2 处（GPLv3 标准条款，任务书明确不动）。
+
+逐处核对后**判定不改**的相邻表述（都不是 or-later、与 only 不冲突）：README License 节只有
+「version 3」；`apps/desktop/locales/{en,zh-CN}.json` 的 `settings.about.license` 是
+「Released under the GPLv3 license」/「按 GPLv3 许可证发布」；`docs/development-doc-v1.md`
+的「GPLv3」；`app-smoke-run.mjs` / `panels.test.mjs` 里 about 块的 `/GPLv3/` 断言来自上述
+locale 文案、不读 `APP_LICENSE`，因此不受本阶段影响；`version.test.mjs` 的三方一致性检查
+（`pkg.license`、`tauri.bundle.license` 对 `APP_LICENSE`）随四处同改继续通过。
+
+### 清单 A5 关闭
+
+`docs/pre-release-checklist.md` A5 从 **owner decision** 改为 **ready (resolved)**（沿用 D 组
+`ready (accepted)` / `ready (noted)` 的带括号状态写法，没有新增状态词），正文注明所有者
+2026-11-15 定夺 GPL-3.0-only、四处元数据已改齐、`package-lock.json` 与构建断言同步、
+阶段 21 差异表就此关闭，并指向本条目。README 的 License 节按任务书第 3 条**一字未动**。
+
+### 验证
+
+```
+go build ./...                                     通过（go1.27.4，Go 侧零代码改动）
+前端离线（系统 Node 24.22.1，清代理，--test-concurrency=1）
+                                                    79 条目 / 77 通过 / 2 跳过 / 0 失败
+前端实时（真核心 + 真实令牌文件）                  79 条目 / 79 通过 / 0 跳过 / 0 失败
+node scripts/build.mjs                             通过，28 文件 / 208.8 KiB
+全仓 git grep 复核                                现行产品文件零 or-later
+```
+
+- 离线与实时**均与阶段 22 基线持平**（79/77/2/0 与 79/79/0/0），没有回退。离线 2 条跳过
+  仍是 `live-core.test.mjs` 的两条，实时下在真核心上全部跑过。
+- 实时装置：临时目录 `/tmp/s23-live/`（仓库外），`go build` 出核心、`-check` 通过后后台起
+  真核心、带令牌轮询 `/healthz` 到 `{"status":"ok",...}`，再带 `MELONARC_TEST_API=127.0.0.1:7946`
+  与 `MELONARC_TEST_DATA_DIR=/tmp/s23-live/data` 跑同一套；入站用 17890/17891 两个空闲端口，
+  **没有动** 7890/7891 上阶段 21 留下的演示核心（pid 5058），核心在用例结束后已停。
+- `apps/desktop/dist` 由 `node scripts/build.mjs` 自然刷新，回读 `dist/src/version.js` 的
+  `APP_LICENSE` 已是 `GPL-3.0-only`；该目录仍被 `apps/desktop/.gitignore` 忽略，未进提交。
+- `git status --porcelain`：7 个修改文件全部在上表范围内，**无本任务之外的意外改动**；
+  加上本条目共 8 个文件进提交。命名红线：本阶段只写 SPDX 字符串、清单与文档文案，未引入
+  任何新第三方名称。
+
+### 遗留问题
+
+- **清单 A5 已关闭**，但 LICENSE 正文与 README 仍是「GPLv3 / version 3」的自然语言口径，
+  没有写机器可读的 `GPL-3.0-only` SPDX 字样——这是任务书要求保持的状态；若发布环节需要
+  在打包元数据之外再补一处显式声明，需所有者另定，不属本阶段范围。
+- 阶段 8–22 的既有挂账照旧：A1 图标资产、A2 `Cargo.lock`、A3 CI 首跑、A4 私密报告入口、
+  A6 脱敏子检查、A7 私有路径、B2 第三方许可证全文、B3 四个未核模块、B4 Rust 壳未编译、
+  B5 QUIC/UDP 真实互通、C1 Windows 实机、C2 性能实测、C3 端到端安装、真 TUN 枯竭计数
+  非零态、`Status.Skipped` 的 `/v1` 出口、第五个 GUI tile 的真窗口目视验收。
+- 本阶段未新增功能性缺陷；许可证口径差异不再是公开前挂账项。
+
+### 下一步计划
+
+1. 按清单 A 剩余项推进（A1 图标资产、A4 私密报告入口、A6 脱敏子检查、A7 私有路径），
+   A2/A3 等一台能出网的机器首跑 CI 并生成 `Cargo.lock`。
+2. 二进制发布前处理 B2（第三方许可证全文或源码获取方式）与 B3（四个未核模块）。
+3. 沿用阶段 22 的下一步 3/4/5：允许真 TUN 的环境验枯竭计数端到端、`Status.Skipped`
+   出口决策、桌面包 `MELONARC_VERSION` 接进真实打包链与 B4/C3 验收。

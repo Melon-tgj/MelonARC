@@ -13,6 +13,7 @@ import (
 
 	"github.com/melon-tgj/melonarc/internal/api"
 	"github.com/melon-tgj/melonarc/internal/datadir"
+	"github.com/melon-tgj/melonarc/internal/version"
 )
 
 const testToken = "test-token"
@@ -147,6 +148,73 @@ func TestStatusSummarizesTheReadOnlyEndpoints(t *testing.T) {
 	}
 	if report.Health.Version != "9.9.9" || report.Inbound.Accepted != 4 {
 		t.Errorf("report = %+v", report)
+	}
+}
+
+// TestStatusShowsTheExhaustedPoolCounter drives the counter through the client.
+// The two payloads are written as JSON on purpose: one is what this build's
+// core sends, the other is what a core that predates the field sends, and both
+// have to print a number and exit zero.
+func TestStatusShowsTheExhaustedPoolCounter(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  string
+		want  string
+		value uint64
+	}{
+		{
+			name: "this build's core",
+			body: `{"inbounds":[{"protocol":"http"}],"open":1,"accepted":2,"failures":0,"rejected":0,` +
+				`"fake_ip_pool_exhausted_queries_total":4,"failure_log_capacity":64,"failure_log_count":0}`,
+			want:  "4 fake-IP pool exhausted",
+			value: 4,
+		},
+		{
+			name: "a core without the field",
+			body: `{"inbounds":[{"protocol":"http"}],"open":1,"accepted":2,"failures":0,"rejected":0,` +
+				`"failure_log_capacity":64,"failure_log_count":0}`,
+			want:  "0 fake-IP pool exhausted",
+			value: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			core := startCore(t, testToken, map[string]http.HandlerFunc{
+				"/healthz":    func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, api.HealthView{Version: "1"}) },
+				"/v1/status":  func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, api.StatusView{}) },
+				"/v1/inbound": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.body)) },
+				"/v1/dns":     func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, api.DNSView{}) },
+			})
+
+			code, stdout, stderr := runCLI("-api", core.URL, "-token", testToken, "status")
+			if code != exitOK {
+				t.Fatalf("exit code = %d (stderr %q)", code, stderr)
+			}
+			if !strings.Contains(stdout, tc.want) {
+				t.Errorf("stdout does not mention %q:\n%s", tc.want, stdout)
+			}
+
+			code, stdout, stderr = runCLI("-api", core.URL, "-token", testToken, "-json", "status")
+			if code != exitOK {
+				t.Fatalf("json exit code = %d (stderr %q)", code, stderr)
+			}
+			var report statusReport
+			if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+				t.Fatalf("decode %q: %v", stdout, err)
+			}
+			if got := report.Inbound.FakeIPPoolExhaustedQueriesTotal; got != tc.value {
+				t.Errorf("json pool counter = %d, want %d", got, tc.value)
+			}
+		})
+	}
+}
+
+// TestDescribeInboundAlwaysNamesThePool keeps the line self-describing: the
+// number is meaningless without the word that says what ran out.
+func TestDescribeInboundAlwaysNamesThePool(t *testing.T) {
+	line := describeInbound(api.InboundView{})
+	if !strings.Contains(line, "none;") || !strings.Contains(line, "0 fake-IP pool exhausted") {
+		t.Fatalf("line = %q", line)
 	}
 }
 
@@ -773,5 +841,22 @@ func TestUsageDocumentsHistory(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("the usage text does not mention %q", want)
 		}
+	}
+}
+
+// The client reports the same string the core does. One package holds it, so a
+// release build cannot have `version` and `status` disagree about which build
+// is running.
+func TestVersionCommandReportsTheSharedVersion(t *testing.T) {
+	original := version.Version
+	version.Version = "9.9.9-test"
+	t.Cleanup(func() { version.Version = original })
+
+	code, stdout, stderr := runCLI("version")
+	if code != exitOK {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr)
+	}
+	if want := "melonarc-cli 9.9.9-test\n"; stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 }

@@ -71,9 +71,9 @@ type Snapshot struct {
 	//
 	// It is its own counter rather than a Failure: a failure record describes a
 	// request the daemon could not carry, while this is a DNS answer that says
-	// "no address right now". It is deliberately not part of the /v1 view
-	// either — the wire contract of this stage is fixed — so it reaches the
-	// operator through the log line the responder writes once per episode.
+	// "no address right now". It reaches the operator twice: as the log line
+	// the responder writes once per episode, and as
+	// fake_ip_pool_exhausted_queries_total on /v1/inbound.
 	NameAddressExhausted uint64
 	// FailureCapacity and FailureCount describe the failure record: how many
 	// entries it holds and how many it can hold.

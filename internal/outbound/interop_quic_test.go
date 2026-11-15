@@ -24,6 +24,14 @@ import (
 // they still prove that the fixture reaches the production dial path and stops
 // at the sandbox boundary rather than aborting inside the fixture.
 //
+// Two of the tests below need no reference server at all, and they are named
+// TestQUICFixture* rather than TestInterop* for that reason. The gate in
+// scripts/check-interop.sh counts a skipped TestInterop* case as a failure,
+// because a skip there means "this protocol was not verified"; a test that
+// passes on any machine with a TLS stack must not be able to make that
+// judgement wrong. The TestInterop* names stay reserved for the tests that
+// carry a real server's traffic.
+//
 // A QUIC outbound compiles its TLS options into a *tls.Config while it is
 // built, so the trust roots of a locally issued certificate must be supplied
 // on the spec. An older fixture changed a dialer field afterwards (which only
@@ -65,10 +73,10 @@ func quicFixtureSpecs(port int) []Spec {
 	}
 }
 
-// TestInteropQUICFixtureInjectsTrustAtConstruction proves that the roots a
-// fixture supplies on the spec arrive in the *tls.Config the product dial
-// function receives. It needs no reference server.
-func TestInteropQUICFixtureInjectsTrustAtConstruction(t *testing.T) {
+// TestQUICFixtureInjectsTrustAtConstruction proves that the roots a fixture
+// supplies on the spec arrive in the *tls.Config the product dial function
+// receives. It needs no reference server.
+func TestQUICFixtureInjectsTrustAtConstruction(t *testing.T) {
 	dir := t.TempDir()
 	_, _, pool := interopCertificate(t, dir)
 	for _, spec := range quicFixtureSpecs(4443) {
@@ -129,10 +137,10 @@ func assertQUICDialReachesSendtoBoundary(t *testing.T, d Dialer, target string) 
 	return err
 }
 
-// TestInteropQUICFixtureReachesSendtoBoundary is the local, binary-free
-// evidence that the fixture is wired: with the product dial path restored, a
-// dial fails at sendto EPERM instead of at trustDialer.
-func TestInteropQUICFixtureReachesSendtoBoundary(t *testing.T) {
+// TestQUICFixtureReachesSendtoBoundary is the local, binary-free evidence that
+// the fixture is wired: with the product dial path restored, a dial fails at
+// sendto EPERM instead of at trustDialer.
+func TestQUICFixtureReachesSendtoBoundary(t *testing.T) {
 	if datagramSendAllowed(t) {
 		t.Skip("this environment permits unconnected sendto, so the sandbox boundary does not apply")
 	}

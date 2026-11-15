@@ -10,6 +10,12 @@
  * The layout is preserved on purpose: `index.html` loads `./src/main.js` and the
  * language packs sit next to it, so relative imports and `new URL(...,
  * import.meta.url)` resolve identically from source and from `dist/`.
+ *
+ * `MELONARC_VERSION` overrides the version string the built tree reports. It is
+ * applied to the copy in `dist/src/version.js` only: `src/version.js` keeps the
+ * number the three manifests agree on, so the source tree and the manifests stay
+ * in sync and a release build still carries its own number. Without it the build
+ * is byte for byte what it was before this option existed.
  */
 
 import { mkdir, readdir, readFile, rmdir, stat, unlink, writeFile } from "node:fs/promises";
@@ -26,7 +32,19 @@ const outDir = path.join(appRoot, "dist");
 
 const COPY = ["src", "locales"];
 
+/**
+ * The version a release build stamps into the tree, or "" when the build should
+ * report the one `src/version.js` declares.
+ *
+ * Validated rather than trusted: the value ends up inside a JavaScript string
+ * literal and, before that, in a shell argument of scripts/build-release.sh.
+ */
+const versionOverride = (process.env.MELONARC_VERSION ?? "").trim();
+
 async function main() {
+  if (versionOverride && !/^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(versionOverride)) {
+    throw new Error(`MELONARC_VERSION is not a version string: ${JSON.stringify(versionOverride)}`);
+  }
   if (!outDir.startsWith(appRoot + path.sep)) {
     throw new Error(`refusing to clean ${outDir}: it is outside the app directory`);
   }
@@ -42,12 +60,39 @@ async function main() {
 
   await checkLocales(path.join(outDir, "locales"));
   await checkLocalReferences(path.join(outDir, "index.html"));
+  if (versionOverride) {
+    await stampVersion(path.join(outDir, "src", "version.js"), versionOverride);
+  }
 
   const { files, bytes } = await measure(outDir);
-  console.log(`melonarc-desktop ${pkg.version}`);
+  console.log(`melonarc-desktop ${versionOverride || pkg.version}`);
+  if (versionOverride) {
+    console.log(`  version: ${versionOverride} (MELONARC_VERSION overrides dist/src/version.js)`);
+  }
   console.log(`  output : ${path.relative(appRoot, outDir)}/`);
   console.log(`  files  : ${files}`);
   console.log(`  size   : ${(bytes / 1024).toFixed(1)} KiB`);
+}
+
+/**
+ * Rewrite the APP_VERSION declaration of a copied version module.
+ *
+ * Only the copy is touched: `src/version.js` is what the three manifests are
+ * checked against, and a release number must not become the number a source
+ * checkout claims to be. A missing declaration is an error rather than a silent
+ * no-op, because "the build says 0.1.0" is exactly the failure this option is
+ * meant to prevent.
+ *
+ * @param {string} file
+ * @param {string} value
+ */
+async function stampVersion(file, value) {
+  const source = await readFile(file, "utf8");
+  const pattern = /(export const APP_VERSION = )"[^"]*";/;
+  if (!pattern.test(source)) {
+    throw new Error(`no APP_VERSION declaration in ${file}`);
+  }
+  await writeFile(file, source.replace(pattern, `$1${JSON.stringify(value)};`));
 }
 
 /**

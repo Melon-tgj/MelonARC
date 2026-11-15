@@ -61,6 +61,10 @@ test("every panel's endpoints answer a real core", { skip }, async () => {
     assert.equal(typeof listener.accepted, "number");
   }
   assert.equal(typeof inbound.failure_log_capacity, "number");
+  // The core always sends the pool counter, even when no TUN device exists: a
+  // missing key would make the panel's zero default indistinguishable from a
+  // core that cannot count the answers at all.
+  assert.equal(typeof inbound.fake_ip_pool_exhausted_queries_total, "number");
 
   const failures = await client.failures(5);
   assert.ok(Array.isArray(failures.failures));

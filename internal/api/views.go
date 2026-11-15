@@ -159,6 +159,12 @@ type InboundView struct {
 	// Rejected counts the ones a rule blocked on purpose.
 	Failures uint64 `json:"failures"`
 	Rejected uint64 `json:"rejected"`
+	// FakeIPPoolExhaustedQueriesTotal counts the TUN DNS questions that were
+	// answered with SERVFAIL because every name address was leased or still in
+	// use. It is always reported, so a client reads a number rather than a
+	// missing field: zero means "none yet", and it is also what a client of an
+	// older core gets, since a field the core does not send decodes as zero.
+	FakeIPPoolExhaustedQueriesTotal uint64 `json:"fake_ip_pool_exhausted_queries_total"`
 	// FailureLogCapacity and FailureLogCount describe the failure record, not
 	// its content: the records themselves are served by /v1/failures.
 	FailureLogCapacity int `json:"failure_log_capacity"`

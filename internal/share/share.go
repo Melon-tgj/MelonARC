@@ -5,16 +5,19 @@
 // the shape a [Proxy] line has, so an imported node and a hand-written node are
 // built by the same code and cannot drift apart.
 //
-// Two rules shape every function here. A link is either understood completely or
-// rejected with the reason, because a node that silently loses its transport or
-// its TLS setting would fail much later, at dial time, looking like a server
-// problem. And an error never quotes the link: links carry passwords, and these
-// messages end up in logs and in the local API.
+// Three rules shape every function here. A link is either understood completely
+// or rejected with the reason, because a node that silently loses its transport
+// or its TLS setting would fail much later, at dial time, looking like a server
+// problem. Parse also runs the outbound registry's static checks, so "this link
+// parses" and "this entry can be built" are the same statement: an unknown
+// cipher, an unsupported flow or a malformed account identifier is rejected at
+// the importer's boundary rather than at startup. And an error never quotes the
+// link: links carry passwords, and these messages end up in logs and in the
+// local API.
 package share
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -22,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/melon-tgj/melonarc/internal/config"
+	"github.com/melon-tgj/melonarc/internal/outbound"
 )
 
 // Error is one rejected link: the type it claimed to be and why it was
@@ -30,6 +34,10 @@ import (
 type Error struct {
 	Scheme string
 	Reason string
+	// cause is the underlying registry error when the rejection came from a
+	// static parameter check. It is kept only so errors.Is can classify the
+	// failure; Error.Error never renders it.
+	cause error
 }
 
 // Error implements error.
@@ -40,12 +48,25 @@ func (e *Error) Error() string {
 	return e.Scheme + " link: " + e.Reason
 }
 
+// Unwrap returns the cause of a static rejection, if it had one.
+func (e *Error) Unwrap() error { return e.cause }
+
 func fail(scheme, format string, args ...interface{}) error {
 	return &Error{Scheme: scheme, Reason: fmt.Sprintf(format, args...)}
 }
 
+// failCause reports a rejection that came from the outbound registry. The
+// reason is this package's own wording; the cause is kept out of the message.
+func failCause(scheme string, cause error, reason string) error {
+	return &Error{Scheme: scheme, Reason: reason, cause: cause}
+}
+
 // Parse turns one share link into a [Proxy] entry. The returned entry has no
 // line number: it did not come from a file.
+//
+// A link that parses is a link the outbound registry can build: the last step
+// runs the same static checks the daemon will run, so a bad parameter is
+// reported against the link instead of failing a startup build.
 func Parse(raw string) (config.Proxy, error) {
 	link := strings.TrimSpace(raw)
 	if link == "" {
@@ -56,42 +77,94 @@ func Parse(raw string) (config.Proxy, error) {
 		return config.Proxy{}, fail("", "a share link starts with <type>://")
 	}
 	scheme = strings.ToLower(strings.TrimSpace(scheme))
+	var (
+		entry config.Proxy
+		err   error
+	)
 	switch scheme {
 	case "ss":
-		return parseShadowsocks(rest)
+		entry, err = parseShadowsocks(rest)
 	case "vmess":
-		return parseVMess(rest)
+		entry, err = parseVMess(rest)
 	case "vless":
-		return parseVLESS(link)
+		entry, err = parseVLESS(link)
 	case "trojan":
-		return parseTrojan(link)
+		entry, err = parseTrojan(link)
 	case "hysteria2", "hy2":
-		return parseHysteria2(link, scheme)
+		entry, err = parseHysteria2(link, scheme)
 	case "tuic":
-		return parseTUIC(link)
+		entry, err = parseTUIC(link)
 	default:
 		return config.Proxy{}, fail(scheme, "unsupported link type")
 	}
+	if err != nil {
+		return config.Proxy{}, err
+	}
+	if err := validateStaticParameters(scheme, entry); err != nil {
+		return config.Proxy{}, err
+	}
+	return entry, nil
+}
+
+// validateStaticParameters is where the importer and the dialer builder meet.
+// Both produce the same [Proxy] entry, so the registry that will build the
+// dialer is the only place that knows what each protocol accepts; running it
+// here keeps a bad link out of a subscription instead of leaving it for
+// startup to refuse with a line number.
+func validateStaticParameters(scheme string, entry config.Proxy) error {
+	spec := outbound.Spec{
+		Type: entry.Type, Server: entry.Server, Port: entry.Port, Args: entry.Args,
+	}
+	if err := outbound.Validate(spec); err != nil {
+		return failCause(scheme, err, registryReason(entry.Type, err))
+	}
+	return nil
+}
+
+// registryReason keeps the registry's explanation — it names the option and the
+// value that was refused — while dropping the prefixes that would otherwise
+// repeat the protocol and the package sentinel in a share error ("ss link: ss:
+// outbound: invalid proxy option: ..."). Every option the parser writes is a
+// key=value pair, so the values a static rejection quotes are protocol
+// parameters (a cipher name, a server name, a rate), never a positional secret.
+func registryReason(typ string, err error) string {
+	text := err.Error()
+	for _, prefix := range []string{typ + ": ", "outbound: invalid proxy option: ", "outbound: "} {
+		text = strings.TrimPrefix(text, prefix)
+	}
+	return text
+}
+
+// Rejection is one link in a list that could not be imported.
+//
+// Item is the 1-based position in the list, so a caller can point at the line a
+// provider served. Reason is the *Error the parser produced and never quotes
+// the link.
+type Rejection struct {
+	Item   int
+	Reason error
 }
 
 // ParseAll parses a list of links and reports every rejection instead of
-// stopping at the first one. The indexes in the error let the caller point at
-// the offending line.
-func ParseAll(links []string) ([]config.Proxy, error) {
+// stopping at the first one. The returned entries are the ones that were
+// understood completely.
+//
+// A rejection is never silently dropped: the caller decides whether a partly
+// good list is usable and reports each bad item by its position. One bad node
+// in a subscription must not take the other fifty away, while a list with
+// nothing good in it is still a failure to the caller that asked for nodes.
+func ParseAll(links []string) ([]config.Proxy, []Rejection) {
 	proxies := make([]config.Proxy, 0, len(links))
-	var issues []error
+	var rejections []Rejection
 	for i, link := range links {
-		proxy, err := Parse(link)
+		entry, err := Parse(link)
 		if err != nil {
-			issues = append(issues, fmt.Errorf("item %d: %w", i+1, err))
+			rejections = append(rejections, Rejection{Item: i + 1, Reason: err})
 			continue
 		}
-		proxies = append(proxies, proxy)
+		proxies = append(proxies, entry)
 	}
-	if len(issues) > 0 {
-		return proxies, errors.Join(issues...)
-	}
-	return proxies, nil
+	return proxies, rejections
 }
 
 // splitFragment separates the #name suffix, which is the only part of a link

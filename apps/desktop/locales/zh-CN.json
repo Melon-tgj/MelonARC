@@ -107,6 +107,7 @@
   "connections.totals.accepted": "累计接受",
   "connections.totals.failures": "失败",
   "connections.totals.rejected": "规则拦截",
+  "connections.totals.fake_ip_exhausted": "假地址池耗尽",
   "connections.failures": "最近的失败记录",
   "connections.failures.capacity": "{count} / {capacity} 条",
   "connections.table.time": "时间",

@@ -22,10 +22,8 @@ import (
 	"time"
 
 	"github.com/melon-tgj/melonarc/internal/api"
+	"github.com/melon-tgj/melonarc/internal/version"
 )
-
-// Version is the build version placeholder, overridden at link time later on.
-const Version = "0.1.0-dev"
 
 // Exit codes. A usage error is kept apart from a failure so a script can tell a
 // mistyped command from a core that refuses to answer.
@@ -129,7 +127,7 @@ func (o *options) dispatch(name string, args []string) int {
 		_, _ = io.WriteString(o.stdout, usage)
 		return exitOK
 	case "version":
-		fmt.Fprintf(o.stdout, "melonarc-cli %s\n", Version)
+		fmt.Fprintf(o.stdout, "melonarc-cli %s\n", version.Version)
 		return exitOK
 	case "status":
 		return o.status(args)
@@ -203,6 +201,11 @@ type statusReport struct {
 }
 
 // describeInbound renders the listener counters in one line.
+//
+// The last number is the TUN name address pool: how many DNS questions were
+// answered with SERVFAIL because every fake address was leased. It is printed
+// even when it is zero, and it reads as zero against a core that predates the
+// field, because that is what a missing field decodes to.
 func describeInbound(view api.InboundView) string {
 	protocols := make([]string, 0, len(view.Inbounds))
 	for _, in := range view.Inbounds {
@@ -211,8 +214,9 @@ func describeInbound(view api.InboundView) string {
 	if len(protocols) == 0 {
 		protocols = append(protocols, "none")
 	}
-	return fmt.Sprintf("%s; %d open, %d accepted, %d failed, %d rejected",
-		strings.Join(protocols, " + "), view.Open, view.Accepted, view.Failures, view.Rejected)
+	return fmt.Sprintf("%s; %d open, %d accepted, %d failed, %d rejected, %d fake-IP pool exhausted",
+		strings.Join(protocols, " + "), view.Open, view.Accepted, view.Failures, view.Rejected,
+		view.FakeIPPoolExhaustedQueriesTotal)
 }
 
 // policies lists the groups and their members.

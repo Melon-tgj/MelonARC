@@ -14,6 +14,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createTranslator } from "../src/i18n/index.js";
+import connectionsPanel from "../src/panels/connections.js";
 import logsPanel from "../src/panels/logs.js";
 import overviewPanel from "../src/panels/overview.js";
 import rulesPanel from "../src/panels/rules.js";
@@ -56,6 +57,16 @@ const failures = {
     { time: "2026-11-14T11:05:00Z", target: "example.invalid:80", network: "tcp", stage: "dial", category: "refused", policy: "manual" },
     { time: "2026-11-14T11:08:00Z", target: "blocked.test:80", network: "tcp", stage: "route", category: "rejected", policy: "" },
   ],
+};
+const inbound = {
+  inbounds: [{ protocol: "http", open: 1, accepted: 9, datagram_associations: 0 }],
+  open: 1,
+  accepted: 9,
+  failures: 0,
+  rejected: 0,
+  fake_ip_pool_exhausted_queries_total: 1234,
+  failure_log_capacity: 64,
+  failure_log_count: 0,
 };
 const runtime = {
   mode: "preview",
@@ -406,6 +417,42 @@ test("a transport that cannot report the process hides the whole section", async
     }
   });
 });
+
+test("the connections panel shows the exhausted-pool counter as a number", async () => {
+  await inDom(async () => {
+    const ctx = context({ inbound: async () => inbound });
+    const mounted = connectionsPanel.mount(ctx);
+    try {
+      await settle();
+      assert.equal(statValue(ctx.root, "Fake-address pool exhausted"), "1,234");
+    } finally {
+      mounted.dispose();
+    }
+  });
+});
+
+// A core older than the field sends no key at all. The tile still draws, and it
+// reads zero rather than a dash: "this core does not count them" and "none ran
+// out" are the same answer for the person reading it.
+test("the connections panel reads a missing exhausted-pool counter as zero", async () => {
+  await inDom(async () => {
+    const { fake_ip_pool_exhausted_queries_total: _, ...olderCore } = inbound;
+    const ctx = context({ inbound: async () => olderCore });
+    const mounted = connectionsPanel.mount(ctx);
+    try {
+      await settle();
+      assert.equal(statValue(ctx.root, "Fake-address pool exhausted"), "0");
+    } finally {
+      mounted.dispose();
+    }
+  });
+});
+
+/** Read the figure above one stat tile's label. */
+function statValue(root, label) {
+  const labelNode = find(root, (node) => node.textContent === label);
+  return labelNode?.parentNode?.firstChild?.textContent ?? null;
+}
 
 /** Let every pending promise from a panel's first load settle. */
 async function settle() {

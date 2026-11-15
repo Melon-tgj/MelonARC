@@ -3,7 +3,7 @@ name = "melonarc-desktop"
 version = "0.1.0"
 description = "Desktop shell for the MelonARC core"
 authors = ["MelonARC contributors"]
-license = "GPL-3.0-or-later"
+license = "GPL-3.0-only"
 edition = "2021"
 # Raised from 1.77 for the standard library file lock (`File::try_lock`, stable
 # since 1.89). The alternative was a lock crate, and this stage adds none.

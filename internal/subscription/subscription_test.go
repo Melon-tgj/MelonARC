@@ -1,12 +1,15 @@
 package subscription
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +18,23 @@ import (
 )
 
 const testLink = "ss://" + "YWVzLTI1Ni1nY206c2VjcmV0" + "@example.com:8388#Node" // aes-256-gcm:secret
+
+// badStaticLink has the shape of a good ss link but names a cipher the outbound
+// registry does not implement. It is the kind of node that used to parse and
+// then break startup; now the importer rejects it with a reason.
+const badStaticLink = "ss://aes-999:pw@bad.example.com:8388#Bad"
+
+const unsupportedLink = "wireguard://key@host:1"
+
+// mixedBody is a provider's list with two good nodes, one bad static parameter
+// and one link type the importer does not know.
+func mixedBody() string {
+	return strings.Join([]string{testLink, badStaticLink, unsupportedLink, testLink}, "\n") + "\n"
+}
+
+func allBadBody() string {
+	return badStaticLink + "\n" + unsupportedLink + "\n"
+}
 
 // testConfig is the smallest configuration that declares a subscription and
 // points a rule at it.
@@ -275,21 +295,211 @@ func TestRetryDelayBacksOffAndStopsAtTheInterval(t *testing.T) {
 
 func TestParseBodySkipsNoise(t *testing.T) {
 	body := "\ufeff" + testLink + "\r\n\r\n// provider notice\r\n  \r\n" + testLink + "\r\n"
-	proxies, err := parseBody([]byte(body))
+	proxies, skips, err := parseBody([]byte(body))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if len(proxies) != 2 {
 		t.Fatalf("proxies = %d, want 2", len(proxies))
 	}
+	if len(skips) != 0 {
+		t.Fatalf("skips = %+v, want none", skips)
+	}
 }
 
-func TestParseBodyReportsABadLink(t *testing.T) {
-	_, err := parseBody([]byte(testLink + "\nwireguard://key@host:1\n"))
-	if err == nil {
-		t.Fatal("parse accepted an unsupported link")
+// TestParseBodyKeepsTheValidEntriesAndReportsEachSkip is the mixed-body rule:
+// the good nodes survive, every bad item is named by its position and reason,
+// and the body as a whole is not a failure.
+func TestParseBodyKeepsTheValidEntriesAndReportsEachSkip(t *testing.T) {
+	proxies, skips, err := parseBody([]byte(mixedBody()))
+	if err != nil {
+		t.Fatalf("a mixed body is not a failed refresh: %v", err)
 	}
-	if !strings.Contains(err.Error(), "wireguard") {
-		t.Fatalf("error = %v", err)
+	if len(proxies) != 2 {
+		t.Fatalf("proxies = %d, want the 2 valid nodes", len(proxies))
+	}
+	if len(skips) != 2 {
+		t.Fatalf("skips = %+v, want 2", skips)
+	}
+	if skips[0].Item != 2 || !strings.Contains(skips[0].Reason, "unsupported cipher") {
+		t.Errorf("first skip = %+v, want item 2 with the registry's cipher reason", skips[0])
+	}
+	if skips[1].Item != 3 || !strings.Contains(skips[1].Reason, "wireguard") {
+		t.Errorf("second skip = %+v, want item 3 with an unsupported type", skips[1])
+	}
+	for _, skip := range skips {
+		if strings.Contains(skip.Reason, "bad.example.com") || strings.Contains(skip.Reason, "pw@") {
+			t.Errorf("a skip reason quotes the link: %q", skip.Reason)
+		}
+	}
+}
+
+func TestParseBodyFailsWhenEveryLinkIsInvalid(t *testing.T) {
+	proxies, skips, err := parseBody([]byte(allBadBody()))
+	if !errors.Is(err, ErrEmpty) {
+		t.Fatalf("error = %v, want an empty-subscription failure", err)
+	}
+	if len(proxies) != 0 {
+		t.Fatalf("proxies = %d, want none", len(proxies))
+	}
+	if len(skips) != 2 {
+		t.Fatalf("skips = %+v, want a reason per entry", skips)
+	}
+}
+
+// TestImportUsesTheValidNodesOfAMixedBody drives the same rule through Import:
+// a provider that mixes good and bad links still produces a usable
+// configuration, and the skipped entries are visible in the manager's status.
+func TestImportUsesTheValidNodesOfAMixedBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(mixedBody()))
+	}))
+	defer server.Close()
+
+	mgr := New(Options{})
+	cfg := testConfig(t, server.URL)
+	if err := mgr.Import(context.Background(), cfg); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(cfg.Proxies) != 2 {
+		t.Fatalf("proxies = %d, want the 2 valid nodes", len(cfg.Proxies))
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("the imported configuration does not validate: %v", err)
+	}
+	status := mgr.Snapshot()[0]
+	if status.Nodes != 2 || status.Error != "" {
+		t.Fatalf("status = %+v, want a successful refresh of 2 nodes", status)
+	}
+	if len(status.Skipped) != 2 || status.Skipped[0].Item != 2 || status.Skipped[1].Item != 3 {
+		t.Fatalf("skipped = %+v, want items 2 and 3", status.Skipped)
+	}
+}
+
+// TestRefreshReportsEachSkippedEntry checks the operator's view: one log line
+// per skipped entry, carrying the item number and the reason, and no link.
+func TestRefreshReportsEachSkippedEntry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(mixedBody()))
+	}))
+	defer server.Close()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	mgr := New(Options{Logger: logger})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	for _, want := range []string{
+		"subscription entry skipped", "item=2", "item=3",
+		"unsupported cipher", "unsupported link type",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("the log does not mention %q:\n%s", want, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), "bad.example.com") {
+		t.Errorf("the log quotes a rejected link:\n%s", logs.String())
+	}
+}
+
+// TestImportKeepsThePreviousNodesWhenEveryLinkIsInvalid is the retention rule
+// for a refresh where nothing is usable: the nodes in force stay, the cache is
+// left alone, and the attempt is counted and backed off.
+func TestImportKeepsThePreviousNodesWhenEveryLinkIsInvalid(t *testing.T) {
+	bad := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if bad {
+			_, _ = w.Write([]byte(allBadBody()))
+			return
+		}
+		fmt.Fprintln(w, testLink)
+	}))
+	defer server.Close()
+
+	now := time.Unix(1700000000, 0)
+	mgr := New(Options{Now: func() time.Time { return now }})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+
+	bad = true
+	now = now.Add(7 * time.Hour) // past the interval, so a refresh is due
+	cfg := testConfig(t, server.URL)
+	if err := mgr.Import(context.Background(), cfg); err != nil {
+		t.Fatalf("import after an all-invalid refresh: %v", err)
+	}
+	if len(cfg.Proxies) != 1 {
+		t.Fatalf("proxies = %d, want the previous node to be kept", len(cfg.Proxies))
+	}
+	status := mgr.Snapshot()[0]
+	if status.Attempts != 1 || !strings.Contains(status.Error, "rejected") {
+		t.Fatalf("status = %+v, want one failed attempt with a reason", status)
+	}
+	if !status.NextAt.After(now) || status.NextAt.Sub(now) != retryBaseDelay {
+		t.Fatalf("next attempt = %s, want a %s backoff", status.NextAt, retryBaseDelay)
+	}
+}
+
+// TestImportFallsBackToTheCacheWhenEveryLinkIsInvalid covers a restart whose
+// first refresh is entirely bad: the body from the last good run is still on
+// disk, and the bad body must not overwrite it.
+func TestImportFallsBackToTheCacheWhenEveryLinkIsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	good := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !good {
+			_, _ = w.Write([]byte(allBadBody()))
+			return
+		}
+		fmt.Fprintln(w, testLink)
+	}))
+	defer server.Close()
+
+	if err := New(Options{CacheDir: dir}).Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	cachePath := New(Options{CacheDir: dir}).cachePath("airport")
+	before, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("read the cache: %v", err)
+	}
+
+	good = false
+	cfg := testConfig(t, server.URL)
+	if err := New(Options{CacheDir: dir}).Import(context.Background(), cfg); err != nil {
+		t.Fatalf("import from the cache: %v", err)
+	}
+	if len(cfg.Proxies) != 1 {
+		t.Fatalf("proxies = %d, want 1 from the cache", len(cfg.Proxies))
+	}
+	after, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("read the cache again: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("the all-invalid body overwrote the cache:\nbefore %q\nafter  %q", before, after)
+	}
+}
+
+// TestImportWithoutAnyUsableLinkOnFirstImportFails is the case with nothing to
+// fall back to: no previous nodes and no cache, so the error names the
+// subscription and no group is left pointing at an empty list.
+func TestImportWithoutAnyUsableLinkOnFirstImportFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(allBadBody()))
+	}))
+	defer server.Close()
+
+	cfg := testConfig(t, server.URL)
+	err := New(Options{}).Import(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("import succeeded with a body that has no usable node")
+	}
+	if !strings.Contains(err.Error(), "airport") || !strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("error %q does not name the subscription and the reason", err)
+	}
+	if len(cfg.Proxies) != 0 {
+		t.Fatalf("proxies = %d, want none", len(cfg.Proxies))
 	}
 }

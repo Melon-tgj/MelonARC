@@ -328,13 +328,23 @@ func (s *daemonState) ReloadConfig(ctx context.Context) (api.ReloadView, error) 
 
 // Inbound implements api.Provider.
 func (s *daemonState) Inbound(context.Context) api.InboundView {
-	snap := s.metrics.Snapshot()
+	return inboundView(s.metrics.Snapshot())
+}
+
+// inboundView turns an inbound snapshot into the wire view.
+//
+// It is a function of its argument rather than a method because one field it
+// carries cannot be produced on this machine: a TUN name address pool that ran
+// out needs a device and a saturated lease table. Keeping the mapping pure is
+// what lets the test feed it a snapshot with that counter set.
+func inboundView(snap inbound.Snapshot) api.InboundView {
 	view := api.InboundView{
-		Inbounds:           make([]api.InboundStatsView, 0, len(snap.Protocols)),
-		Failures:           snap.Failures,
-		Rejected:           snap.Rejected,
-		FailureLogCapacity: snap.FailureCapacity,
-		FailureLogCount:    snap.FailureCount,
+		Inbounds:                        make([]api.InboundStatsView, 0, len(snap.Protocols)),
+		Failures:                        snap.Failures,
+		Rejected:                        snap.Rejected,
+		FakeIPPoolExhaustedQueriesTotal: snap.NameAddressExhausted,
+		FailureLogCapacity:              snap.FailureCapacity,
+		FailureLogCount:                 snap.FailureCount,
 	}
 	for _, p := range snap.Protocols {
 		view.Inbounds = append(view.Inbounds, api.InboundStatsView{

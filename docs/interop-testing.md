@@ -166,10 +166,12 @@ scripts/check-interop.sh
 1. **Snell 没有机器可读的校验清单。** 只有下载页给出的一个哈希，所以 CI 里这一步的期望值
    由仓库变量 `SNELL_ZIP_SHA256` 承载；变量为空时那一步**明确失败**而不是跳过——宁可红，
    也不要一个"看起来校验过了"的分支。
-2. **`TestInteropQUICFixtureReachesSendtoBoundary` 在宽松环境里会跳过。** 它断言的是
-   "沙箱把 `sendto` 挡住了"，而一个允许 `sendto` 的机器上这条性质根本不存在，于是它
-   `t.Skip`。它的名字以 `TestInterop` 开头，因此会被第 6 节的判定当成"这次没验证"。
-   两者是冲突的：在允许 `sendto` 的 runner 上（CI 就是），互通 job 会因为这个跳过而红。
-   本阶段**没有**用改名或放宽判定来绕开它，只把冲突记在这里与 DEVLOG 阶段 20 的遗留问题里。
+2. **两条只验夹具接线的用例不在互通门里。** `TestQUICFixtureInjectsTrustAtConstruction`
+   与 `TestQUICFixtureReachesSendtoBoundary` 不需要参考实现：前者证明本地签发的根证书在构建期
+   进了 TLS 配置，后者证明生产拨号路径走到了 `sendto` 边界。后者在允许未连接套接字 `sendto`
+   的机器上会 `t.Skip`——它断言的性质在那里根本不存在。阶段 22 把这两条从 `TestInterop*`
+   前缀里移出，保留在常规 `go test ./...` 中：第 6 节的判定只统计 `TestInterop*`，所以宽松
+   runner 上的这个跳过不再让互通 job 判红，而真正与参考实现通信的用例仍严格执行"设置参考
+   目录后 Skip 即失败"。`scripts/check-interop.sh` 与判定口径都未改动。
 3. **本机没有 QUIC 与 UDP 的互通证据**（第 5 节第 2 条），到本文档为止仍然成立。
 4. **`$MELONARC_INTEROP_DIR` 只接受一个目录**：多套实现并存要自己换软链接，没有"优先级列表"。

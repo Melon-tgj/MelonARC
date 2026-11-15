@@ -41,6 +41,6 @@
     "category": "Utility",
     "shortDescription": "Adaptive routing core",
     "longDescription": "Desktop shell for the MelonARC core: it reads the core's loopback API and never holds the proxy credentials itself.",
-    "license": "GPL-3.0-or-later"
+    "license": "GPL-3.0-only"
   }
 }

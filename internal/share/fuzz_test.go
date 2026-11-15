@@ -20,9 +20,10 @@ import (
 // On success the result is checked for the properties a configuration would rely
 // on: a type, a server and a port that can be dialled, and arguments that keep
 // the key=value shape. Those are cheap statements about what Parse promises, not
-// a second implementation of it. Building a dialer from the result is the
-// stronger contract, and TestParseBuildsEveryLink already holds every link shape
-// to it; doing it here would spend the fuzzing budget on key generation.
+// a second implementation of it. Parse already runs the outbound registry's
+// static checks, so building a dialer here would repeat that work and spend the
+// fuzzing budget on key generation; the contract test is the place that holds
+// every link shape to it.
 func FuzzParse(f *testing.F) {
 	seeds := []string{
 		// The six link schemes, in the spellings share_test.go uses.
