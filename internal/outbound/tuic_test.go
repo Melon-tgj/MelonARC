@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +21,85 @@ const (
 	testTUICUUID     = "b831381d-6324-4d53-ad4f-8cda48b30811"
 	testTUICPassword = "tuic shared secret"
 )
+
+// TestTUICExporterLabelKnownAnswer pins the exporter label to the raw 16 bytes
+// of a fixed account identifier. The hyphenated spelling of that identifier is
+// 36 bytes and is deliberately not the label.
+func TestTUICExporterLabelKnownAnswer(t *testing.T) {
+	id, err := parseVMessUUID(testTUICUUID)
+	if err != nil {
+		t.Fatalf("parse the vector identifier: %v", err)
+	}
+	want := []byte{
+		0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53,
+		0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3, 0x08, 0x11,
+	}
+	got := []byte(tuicExporterLabel(id))
+	if !bytes.Equal(got, want) {
+		t.Fatalf("exporter label = %x, want %x", got, want)
+	}
+	if bytes.Equal(got, []byte(testTUICUUID)) {
+		t.Fatal("the exporter label is the formatted identifier text")
+	}
+}
+
+// TestTUICAuthenticationTokenKnownAnswer derives a token from a real TLS 1.3
+// session and checks it byte for byte against the exporter call a peer makes
+// with the raw UUID label. It also checks the token differs from the one a
+// text-label exporter would have produced, so the old behaviour cannot return.
+func TestTUICAuthenticationTokenKnownAnswer(t *testing.T) {
+	cert, pool := testCertificate(t)
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	_ = left.SetDeadline(deadline)
+	_ = right.SetDeadline(deadline)
+
+	server := tls.Server(right, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+	})
+	client := tls.Client(left, &tls.Config{
+		RootCAs:    pool,
+		ServerName: "127.0.0.1",
+		MinVersion: tls.VersionTLS13,
+	})
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.Handshake() }()
+	if err := client.Handshake(); err != nil {
+		t.Fatalf("client TLS handshake: %v", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server TLS handshake: %v", err)
+	}
+	state := client.ConnectionState()
+	if state.Version != tls.VersionTLS13 {
+		t.Fatalf("TLS version = %d, want TLS 1.3", state.Version)
+	}
+	id, err := parseVMessUUID(testTUICUUID)
+	if err != nil {
+		t.Fatalf("parse the vector identifier: %v", err)
+	}
+	token, err := tuicAuthenticationToken(state, id, testTUICPassword)
+	if err != nil {
+		t.Fatalf("derive the token: %v", err)
+	}
+	want, err := state.ExportKeyingMaterial(string(id[:]), []byte(testTUICPassword), tuicTokenLen)
+	if err != nil {
+		t.Fatalf("export with the raw label: %v", err)
+	}
+	if len(token) != tuicTokenLen || !bytes.Equal(token, want) {
+		t.Fatalf("token = %x, want %x", token, want)
+	}
+	formatted, err := state.ExportKeyingMaterial(testTUICUUID, []byte(testTUICPassword), tuicTokenLen)
+	if err != nil {
+		t.Fatalf("export with the formatted label: %v", err)
+	}
+	if bytes.Equal(token, formatted) {
+		t.Fatal("the raw-label token and the text-label token are identical")
+	}
+}
 
 // tuicTestServer is a self-written TUIC peer: it checks the derived token,
 // echoes Connect streams and returns datagrams to their association.
@@ -82,7 +163,9 @@ func (s *tuicTestServer) acceptUniStreams(conn *quic.Conn, password string, auth
 		return
 	}
 	state := conn.ConnectionState()
-	want, err := state.TLS.ExportKeyingMaterial(testTUICUUID, []byte(password), tuicTokenLen)
+	// The peer computes the token from the raw UUID bytes, not from the
+	// hyphenated text, so a client that formats the label would be rejected.
+	want, err := state.TLS.ExportKeyingMaterial(string(id[:]), []byte(password), tuicTokenLen)
 	if err != nil {
 		s.fail(err)
 		return

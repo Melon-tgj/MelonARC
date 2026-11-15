@@ -11,10 +11,10 @@
 //! is needed instead is strictness — a short allow list of methods, one
 //! validated request target, `Connection: close`, bounded reads.
 
-use crate::settings::Settings;
+use crate::settings::{is_loopback_ip, Settings};
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -150,19 +150,18 @@ fn read_token(settings: &Settings) -> Result<String, ApiError> {
     Ok(token)
 }
 
+/// Dial only the loopback addresses verified when the settings were read.
+/// A raw `TcpStream` cannot use an environment proxy or follow a redirect, so
+/// the bearer token stays on the one connection this function opens; the raw
+/// status (including a 3xx) is handed back to the UI without being followed.
 fn connect(settings: &Settings) -> Result<TcpStream, ApiError> {
-    let addresses = (settings.api_host.as_str(), settings.api_port)
-        .to_socket_addrs()
-        .map_err(|error| {
-            ApiError::new(
-                "core_unreachable",
-                format!("cannot resolve {}: {error}", settings.api_label),
-            )
-        })?;
-
-    let mut last = String::from("no address resolved");
-    for address in addresses {
-        match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
+    let mut last = String::from("no verified loopback address");
+    for address in &settings.api_addrs {
+        // Defensive re-check: nothing may dial an address that was not checked.
+        if !is_loopback_ip(address.ip()) {
+            continue;
+        }
+        match TcpStream::connect_timeout(address, CONNECT_TIMEOUT) {
             Ok(stream) => {
                 let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
                 let _ = stream.set_write_timeout(Some(IO_TIMEOUT));

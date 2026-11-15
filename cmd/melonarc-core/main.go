@@ -194,7 +194,7 @@ func run(args []string) error {
 	// listener goes away. A failure here is a startup failure with rollback,
 	// like a device that cannot be opened — a machine whose proxy setting was
 	// half written would look configured and break half its traffic.
-	proxy := sysproxy.New(logger)
+	proxy := sysproxy.New(logger, filepath.Join(dataDir, sysproxy.SnapshotFile))
 	if err := applySystemProxy(ctx, cfg.General, proxy, logger); err != nil {
 		if tunSrv != nil {
 			tunCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -308,8 +308,7 @@ func run(args []string) error {
 			return fmt.Errorf("the api token cannot be distributed:\n%w\nset data-dir to a writable directory", err)
 		}
 		srv.Start()
-		fmt.Printf("api: %s\napi token: %s\napi token file: %s\n", srv.URL(), srv.Token(), tokenPath)
-		logger.Info("api listening", "addr", srv.Addr(), "token_file", tokenPath)
+		announceAPI(srv, tokenPath, logger)
 	} else {
 		logger.Warn("no api-listen address, the local API stays off")
 	}
@@ -659,6 +658,9 @@ func droppedSelections(carry map[string]string, reg *policy.Registry) []string {
 type systemProxy interface {
 	Enable(ctx context.Context, s sysproxy.Settings) error
 	Release(ctx context.Context) error
+	// Recover puts back a takeover a previous process did not release. It runs
+	// even when the new configuration does not ask for a system proxy.
+	Recover(ctx context.Context) error
 }
 
 // sysproxySettings renders the desktop proxy setting a configuration asks for.
@@ -682,6 +684,12 @@ func sysproxySettings(g config.General) sysproxy.Settings {
 // logged because a daemon that was told to configure the machine and could not
 // must not report itself as running.
 func applySystemProxy(ctx context.Context, g config.General, p systemProxy, logger *slog.Logger) error {
+	// A hard kill can leave the machine pointing at a listener that is gone.
+	// This runs before the configuration is consulted, so turning system-proxy
+	// off after such a kill still puts the user's settings back.
+	if err := p.Recover(ctx); err != nil {
+		return fmt.Errorf("a system proxy takeover from a previous run could not be restored:\n%w", err)
+	}
 	if !g.SystemProxy {
 		return nil
 	}
@@ -701,6 +709,15 @@ func startGroups(ctx context.Context, reg *policy.Registry, logger *slog.Logger)
 		g.Start(ctx)
 		logger.Debug("group probing started", "group", g.Name(), "kind", g.Kind())
 	}
+}
+
+// announceAPI tells the operator where the local API is and where its token
+// lives. The token value itself is deliberately never printed or logged:
+// terminal output, crash reports and diagnostic bundles are routinely copied,
+// and a copied token is a stolen credential. Only the file path is published.
+func announceAPI(srv *api.Server, tokenPath string, logger *slog.Logger) {
+	fmt.Printf("api: %s\napi token file: %s\n", srv.URL(), tokenPath)
+	logger.Info("api listening", "addr", srv.Addr(), "token_file", tokenPath)
 }
 
 // printSummary reports what a validated configuration would activate.

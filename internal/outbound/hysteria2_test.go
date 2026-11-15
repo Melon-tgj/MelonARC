@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
@@ -226,7 +227,7 @@ func (s *hysteria2TestServer) handleAuth(stream *quic.Stream, reader *bufio.Read
 	if auth != password {
 		status = "404"
 	}
-	block := h3AppendField(nil, ":status", status)
+	block := h3AppendField(h3AppendFieldSectionPrefix(nil), ":status", status)
 	if _, err := stream.Write(appendH3Frame(nil, h3FrameHeaders, block)); err != nil {
 		return err
 	}
@@ -507,15 +508,48 @@ func TestHysteria2HeaderBlockRoundTrip(t *testing.T) {
 	}
 }
 
+// TestHysteria2AuthHeadersAreValidFields fixes an incompatibility with mature
+// HTTP/3 peers: padding built from raw random bytes is not a valid field value,
+// and a whole request block carrying it can be rejected before QPACK decoding.
+func TestHysteria2AuthHeadersAreValidFields(t *testing.T) {
+	headers := hysteria2AuthHeaders(testHysteria2Password, 1024)
+	if len(headers) != 3 {
+		t.Fatalf("auth headers = %v, want three fields", headers)
+	}
+	for _, field := range headers {
+		for i := 0; i < len(field[1]); i++ {
+			c := field[1][i]
+			if (c < 0x20 && c != '\t') || c == 0x7f {
+				t.Fatalf("field %q has a control byte at %d: %x", field[0], i, field[1])
+			}
+		}
+	}
+	if headers[2][0] != "hysteria-padding" {
+		t.Fatalf("third field = %q, want hysteria-padding", headers[2][0])
+	}
+	if _, err := hex.DecodeString(headers[2][1]); err != nil {
+		t.Fatalf("padding %q is not hex: %v", headers[2][1], err)
+	}
+	// The complete request block must still be a spec-conformant QPACK section.
+	block := h3EncodeRequestHeaders(hysteria2AuthHost, hysteria2AuthPath, headers)
+	fields, err := h3DecodeHeaderBlock(block)
+	if err != nil {
+		t.Fatalf("decode the auth request block: %v", err)
+	}
+	if fields[len(fields)-1] != headers[2] {
+		t.Fatalf("last decoded field = %v, want %v", fields[len(fields)-1], headers[2])
+	}
+}
+
 func TestH3DecodeIndexedStatus(t *testing.T) {
 	// A peer that answers with a static-table status sends one indexed field
 	// line; the decoder has to resolve it without any literal bytes.
-	if status, err := h3ReadStatus(strings.NewReader(string(appendH3Frame(nil, h3FrameHeaders, []byte{0xd9})))); err != nil || status != 200 {
+	if status, err := h3ReadStatus(strings.NewReader(string(appendH3Frame(nil, h3FrameHeaders, []byte{0x00, 0x00, 0xd9})))); err != nil || status != 200 {
 		t.Fatalf("status = %d, %v, want 200", status, err)
 	}
 	// 0x50 is a literal field line whose name refers to the static table entry
 	// for :authority (index 0), with the value that follows inline.
-	fields, err := h3DecodeHeaderBlock([]byte{0xd9, 0x50, 0x03, 'a', 'b', 'c'})
+	fields, err := h3DecodeHeaderBlock([]byte{0x00, 0x00, 0xd9, 0x50, 0x03, 'a', 'b', 'c'})
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}

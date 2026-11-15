@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -227,44 +229,99 @@ func TestStoreSurvivesAWriteFailure(t *testing.T) {
 	}
 }
 
-// TestStoreReplacesAFileItCannotRead covers a corrupt or foreign database: the
-// daemon keeps serving with an empty history, says so, and the next flush writes a
-// file this build owns.
-func TestStoreReplacesAFileItCannotRead(t *testing.T) {
+// TestStorePreservesACorruptFile is the review regression: a file this build
+// cannot decode must survive byte for byte. The old behaviour continued with
+// empty tables and overwrote the original on the next flush, losing history
+// that another reader might still have been able to recover.
+func TestStorePreservesACorruptFile(t *testing.T) {
+	original := []byte("this is not a database, but it is long enough")
 	path := filepath.Join(t.TempDir(), FileName)
-	if err := os.WriteFile(path, []byte("this is not a database, but it is long enough"), 0o600); err != nil {
+	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatalf("write the corrupt file: %v", err)
 	}
 	s, err := Open(Options{Path: path, FlushInterval: time.Hour})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
-	if status := s.Status(); !strings.Contains(status.Notice, "not usable") {
+	if status := s.Status(); !strings.Contains(status.Notice, "not usable") || !strings.Contains(status.Notice, "preserved") {
 		t.Fatalf("a corrupt file was accepted silently: %+v", status)
 	}
 	if conns := s.Connections(0, time.Time{}); len(conns) != 0 {
 		t.Errorf("a corrupt file produced %d connections", len(conns))
 	}
 
+	// Records are still served from memory, but no write may replace the file.
 	s.RecordConnection(Connection{At: time.Now(), Host: "example.com"})
-	if err := s.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
+	if err := s.Flush(); !errors.Is(err, ErrHistoryPreserved) {
+		t.Fatalf("Flush = %v, want ErrHistoryPreserved", err)
 	}
-	if status := s.Status(); status.Notice != "" {
-		t.Errorf("the notice survived a successful write: %q", status.Notice)
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close reported a preservation refusal as a shutdown failure: %v", err)
 	}
-	// The replacement is a real database, which the next start reads.
+	assertUnchanged(t, path, original)
+
+	// A restart reaches the same decision; it must not quietly adopt the file.
 	reopened, err := Open(Options{Path: path, FlushInterval: time.Hour})
 	if err != nil {
-		t.Fatalf("Open after the replacement: %v", err)
+		t.Fatalf("Open again: %v", err)
 	}
-	defer reopened.Close()
-	if conns := reopened.Connections(0, time.Time{}); len(conns) != 1 {
-		t.Fatalf("the replacement holds %d connections, want 1", len(conns))
+	if err := reopened.Flush(); !errors.Is(err, ErrHistoryPreserved) {
+		t.Errorf("the second run tried to write: %v", err)
 	}
-	if notice := reopened.Status().Notice; notice != "" {
-		t.Errorf("the replacement was reported as unusable: %q", notice)
+	if err := reopened.Close(); err != nil {
+		t.Errorf("Close again: %v", err)
+	}
+	assertUnchanged(t, path, original)
+}
+
+// TestStorePreservesAFileFromAnotherVersion builds a real database image, then
+// changes only its user_version header. openImage accepts the file, so this is
+// the "known layout, unknown schema" case rather than a corrupt file.
+func TestStorePreservesAFileFromAnotherVersion(t *testing.T) {
+	seed := &Store{now: time.Now, retention: DefaultRetention}
+	seed.RecordConnection(Connection{At: time.Date(2026, 11, 14, 8, 0, 0, 0, time.UTC), Host: "example.com"})
+	image, err := buildImage(seed.tables())
+	if err != nil {
+		t.Fatalf("build a valid image: %v", err)
+	}
+	if getU32(image[60:]) != userVersion {
+		t.Fatalf("the fixture does not start at schema %d", userVersion)
+	}
+	putU32(image[60:], userVersion+1)
+	original := append([]byte(nil), image...)
+
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write the future-version file: %v", err)
+	}
+	s, err := Open(Options{Path: path, FlushInterval: time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	status := s.Status()
+	if !strings.Contains(status.Notice, "another version") || !strings.Contains(status.Notice, "preserved") {
+		t.Fatalf("a foreign schema was accepted silently: %+v", status)
+	}
+	s.RecordEvent(Event{At: time.Now(), Kind: KindReload, OK: true})
+	if err := s.Flush(); !errors.Is(err, ErrHistoryPreserved) {
+		t.Fatalf("Flush = %v, want ErrHistoryPreserved", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	assertUnchanged(t, path, original)
+}
+
+// assertUnchanged is the assertion the whole fix exists for: the bytes on disk
+// are exactly the bytes the operator's previous build left behind.
+func assertUnchanged(t *testing.T, path string, original []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("the history file changed: %d bytes on disk, %d originally", len(got), len(original))
 	}
 }
 

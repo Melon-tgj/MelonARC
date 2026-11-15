@@ -7,6 +7,7 @@
  * `test/paths.test.mjs` pins the rule; the Go side is the source of truth.
  */
 
+import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -52,18 +53,30 @@ export function tokenPath(dataDir) {
 }
 
 /**
- * Split `host:port`, rejecting anything that is not plain loopback input.
+ * Split `host:port` into its parts. IPv6 must be bracketed and is canonicalised
+ * through the URL parser (so `0:0:0:0:0:0:0:1` becomes `::1`); the label is
+ * always the canonical bracket form. Loopback validation lives in
+ * `address.mjs`, which also decides whether the host may be used at all.
  *
  * @param {string} address
  * @returns {{ host: string, port: number, label: string }}
  */
 export function parseAddress(address) {
   const value = String(address ?? "").trim();
-  const match = /^\[?([^\]]+?)\]?:(\d+)$/.exec(value);
+  const match = /^(\[[^\]]+\]|[^:\[\]]+):(\d+)$/.exec(value);
   if (!match) throw new Error(`not an address: ${value}`);
   const port = Number(match[2]);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error(`not a port: ${value}`);
-  const host = match[1];
-  const label = host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+
+  const bracketed = match[1].startsWith("[");
+  let host = bracketed ? match[1].slice(1, -1) : match[1];
+  const family = isIP(host);
+  if (family === 6) {
+    if (!bracketed) throw new Error(`not an address: ${value}`);
+    host = new URL(`http://[${host}]:${port}/`).hostname.slice(1, -1);
+  } else if (bracketed) {
+    throw new Error(`not an address: ${value}`);
+  }
+  const label = family === 6 ? `[${host}]:${port}` : `${host}:${port}`;
   return { host, port, label };
 }

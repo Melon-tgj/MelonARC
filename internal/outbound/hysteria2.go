@@ -3,6 +3,7 @@ package outbound
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -127,14 +128,7 @@ func (h *Hysteria2) newSession(tlsOpts TLSOptions) (*quicSession, error) {
 			_ = conn.CloseWithError(0, "no http3")
 			return nil, fmt.Errorf("hysteria2: %w", err)
 		}
-		headers := [][2]string{
-			{"hysteria-auth", h.auth},
-			{"hysteria-cc-rx", strconv.FormatUint(h.rx, 10)},
-		}
-		if padding, err := randomBytes(8 + len(h.auth)); err == nil {
-			headers = append(headers, [2]string{"hysteria-padding", string(padding)})
-		}
-		status, err := client.do(ctx, hysteria2AuthHost, hysteria2AuthPath, headers)
+		status, err := client.do(ctx, hysteria2AuthHost, hysteria2AuthPath, hysteria2AuthHeaders(h.auth, h.rx))
 		if err != nil {
 			_ = conn.CloseWithError(0, "no auth")
 			return nil, fmt.Errorf("hysteria2: %w", err)
@@ -146,6 +140,21 @@ func (h *Hysteria2) newSession(tlsOpts TLSOptions) (*quicSession, error) {
 		return conn, nil
 	}
 	return newQUICSession(dial, newDatagramMux(hysteria2DatagramKey), DefaultQUICIdleTimeout), nil
+}
+
+// hysteria2AuthHeaders builds the request fields of the authentication call.
+// A header value has to be a valid HTTP field value: raw random bytes carry
+// control characters often enough for a conforming HTTP/3 peer to reject the
+// whole request, so the padding is an ASCII encoding of the random bytes.
+func hysteria2AuthHeaders(auth string, rx uint64) [][2]string {
+	headers := [][2]string{
+		{"hysteria-auth", auth},
+		{"hysteria-cc-rx", strconv.FormatUint(rx, 10)},
+	}
+	if padding, err := randomBytes(8 + len(auth)); err == nil {
+		headers = append(headers, [2]string{"hysteria-padding", hex.EncodeToString(padding)})
+	}
+	return headers
 }
 
 // newHysteria2FromSpec reads a [Proxy] line.
@@ -178,6 +187,9 @@ func newHysteria2FromSpec(spec Spec) (Dialer, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The QUIC session is built inside NewHysteria2, so a fixture's trust
+	// roots have to be on the options before that call.
+	tlsOpts.Config = spec.TLSConfig
 	return NewHysteria2(Hysteria2Options{
 		Server: spec.Server, Port: spec.Port, Password: secret,
 		Up: up, Down: down,

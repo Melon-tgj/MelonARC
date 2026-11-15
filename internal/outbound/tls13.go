@@ -3,13 +3,19 @@ package outbound
 import (
 	"bufio"
 	"context"
+	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/mlkem"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -30,6 +36,12 @@ import (
 // authenticates through exactly that field. Keeping the code here small and
 // option-free is what makes it reviewable: every deviation from RFC 8446 is a
 // line somebody can point at.
+//
+// The server CertificateVerify signature is checked against the leaf
+// certificate's public key before the handshake finishes. The check is not a
+// substitute for chaining to a trust anchor — the caller still decides what a
+// certificate means — but skipping it would mean accepting a Finished message
+// from a peer that never proved it holds the key in the certificate it sent.
 const (
 	tls13Version       = 0x0304
 	tls13LegacyVersion = 0x0303
@@ -99,9 +111,10 @@ type tls13ClientConfig struct {
 	// is zero when it is called, so a caller that authenticates through it can
 	// use the hello itself as additional data.
 	SessionID func(hello []byte, offset int, random, shared []byte) [tls13SessionIDLen]byte
-	// VerifyPeer receives the raw certificate chain. It runs after the server
-	// finished message verifies, so the chain belongs to the peer that proved
-	// possession of the handshake keys.
+	// VerifyPeer receives the raw certificate chain. It runs after the
+	// CertificateVerify signature and the server finished message both verify,
+	// so the chain belongs to the peer that proved it holds the leaf key and
+	// the handshake keys.
 	VerifyPeer func(certs [][]byte) error
 }
 
@@ -270,6 +283,7 @@ func tls13Client(ctx context.Context, conn net.Conn, cfg tls13ClientConfig) (*tl
 	client.writeAEAD, client.writeIV = hs.clientAEAD, hs.clientIV
 
 	var certs [][]byte
+	sawCertVerify := false
 	sawFinished := false
 	for !sawFinished {
 		message, err := client.nextMessage(ctx)
@@ -278,27 +292,37 @@ func tls13Client(ctx context.Context, conn net.Conn, cfg tls13ClientConfig) (*tl
 		}
 		switch message[0] {
 		case tls13MsgEncExts:
+			if certs != nil {
+				return nil, errors.New("tls13: encrypted extensions arrived after the certificate")
+			}
 			transcript = append(transcript, message...)
 		case tls13MsgCertRequest:
 			return nil, errors.New("tls13: the server asked for a client certificate, which this client cannot present")
 		case tls13MsgCertificate:
-			if certs != nil {
-				return nil, errors.New("tls13: the server sent two certificate messages")
+			if certs != nil || sawCertVerify {
+				return nil, errors.New("tls13: the server sent a certificate out of order")
 			}
 			if certs, err = tls13ParseCertificate(message); err != nil {
 				return nil, err
 			}
 			transcript = append(transcript, message...)
 		case tls13MsgCertVerify:
-			// The signature is not checked here. The handshake is
-			// authenticated by the finished message that follows, and the
-			// caller's certificate check decides whether the chain is
-			// acceptable; this client is for a caller that does not rely on a
-			// certificate chain at all.
+			if certs == nil || sawCertVerify {
+				return nil, errors.New("tls13: the server sent a certificate verify out of order")
+			}
+			// The transcript hash covers everything up to and including the
+			// Certificate message, but not the CertificateVerify itself.
+			if err := tls13VerifyCertificateVerify(certs, message, transcript); err != nil {
+				return nil, err
+			}
+			sawCertVerify = true
 			transcript = append(transcript, message...)
 		case tls13MsgFinished:
 			if certs == nil {
 				return nil, errors.New("tls13: the server finished without a certificate")
+			}
+			if !sawCertVerify {
+				return nil, errors.New("tls13: the server finished without a certificate verify")
 			}
 			if !hmac.Equal(tls13FinishedMAC(hs.serverFinishedKey, transcript), message[4:]) {
 				return nil, errors.New("tls13: the server finished message does not verify")
@@ -562,6 +586,91 @@ func tls13ParseCertificate(message []byte) ([][]byte, error) {
 		return nil, errors.New("tls13: the certificate list is empty")
 	}
 	return certs, nil
+}
+
+// tls13CertVerifyContext is the RFC 8446 §4.4.3 context string for a server
+// CertificateVerify. The trailing NUL is part of the signed message.
+const tls13CertVerifyContext = "TLS 1.3, server CertificateVerify\x00"
+
+// tls13CertificateVerifyInput builds the bytes a TLS 1.3 server signs: 64
+// spaces, the context string and Transcript-Hash(Handshake Context,
+// Certificate). All schemes this client offers use SHA-256, so the transcript
+// hash is always a SHA-256 digest.
+func tls13CertificateVerifyInput(transcript []byte) []byte {
+	hash := sha256.Sum256(transcript)
+	out := make([]byte, 0, 64+len(tls13CertVerifyContext)+sha256.Size)
+	for i := 0; i < 64; i++ {
+		out = append(out, 0x20)
+	}
+	out = append(out, tls13CertVerifyContext...)
+	return append(out, hash[:]...)
+}
+
+// tls13VerifyCertificateVerify proves the peer holds the private key of the
+// leaf certificate it just sent. It must be called with the transcript that
+// ends with the Certificate message, before the CertificateVerify message is
+// appended and before any application traffic secret exists.
+//
+// Only the four schemes the ClientHello offers are accepted. In particular
+// rsa_pkcs1_sha256 is advertised for the certificate chain but is forbidden in
+// a TLS 1.3 CertificateVerify, so it is rejected by name rather than verified.
+func tls13VerifyCertificateVerify(certs [][]byte, message, transcript []byte) error {
+	if len(certs) == 0 {
+		return errors.New("tls13: certificate verify arrived without a certificate")
+	}
+	if len(message) < 4 {
+		return errors.New("tls13: truncated certificate verify")
+	}
+	body := message[4:]
+	if len(body) < 4 {
+		return errors.New("tls13: truncated certificate verify signature scheme")
+	}
+	scheme := binary.BigEndian.Uint16(body)
+	sigLen := int(binary.BigEndian.Uint16(body[2:]))
+	signature := body[4:]
+	if sigLen == 0 || len(signature) != sigLen {
+		return fmt.Errorf("tls13: certificate verify signature is %d bytes, want %d", len(signature), sigLen)
+	}
+	leaf, err := x509.ParseCertificate(certs[0])
+	if err != nil {
+		return fmt.Errorf("tls13: parse the leaf certificate: %w", err)
+	}
+	input := tls13CertificateVerifyInput(transcript)
+	digest := sha256.Sum256(input)
+	failure := errors.New("tls13: the server certificate verify signature does not verify")
+
+	switch scheme {
+	case tls13SigEd25519:
+		key, ok := leaf.PublicKey.(ed25519.PublicKey)
+		if !ok {
+			return fmt.Errorf("tls13: ed25519 was chosen but the leaf carries a %T key", leaf.PublicKey)
+		}
+		if !ed25519.Verify(key, input, signature) {
+			return failure
+		}
+	case tls13SigECDSAP256SHA256:
+		key, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+		if !ok || key.Curve != elliptic.P256() {
+			return fmt.Errorf("tls13: ecdsa_secp256r1_sha256 was chosen but the leaf carries a %T key", leaf.PublicKey)
+		}
+		if !ecdsa.VerifyASN1(key, digest[:], signature) {
+			return failure
+		}
+	case tls13SigRSAPSSRSAE256:
+		key, ok := leaf.PublicKey.(*rsa.PublicKey)
+		if !ok {
+			return fmt.Errorf("tls13: rsa_pss_rsae_sha256 was chosen but the leaf carries a %T key", leaf.PublicKey)
+		}
+		if err := rsa.VerifyPSS(key, crypto.SHA256, digest[:], signature,
+			&rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash}); err != nil {
+			return failure
+		}
+	case tls13SigRSAPKCS1SHA256:
+		return errors.New("tls13: rsa_pkcs1_sha256 is not allowed in a TLS 1.3 certificate verify")
+	default:
+		return fmt.Errorf("tls13: the server used signature scheme %#04x, which this client did not offer", scheme)
+	}
+	return nil
 }
 
 // tls13Secrets holds the traffic keys of one epoch.

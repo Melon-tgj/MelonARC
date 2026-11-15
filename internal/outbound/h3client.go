@@ -8,6 +8,8 @@ import (
 	"io"
 	"strings"
 
+	"golang.org/x/net/http2/hpack"
+
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/quicvarint"
 )
@@ -22,6 +24,11 @@ import (
 // block down to its field lines. SETTINGS is sent with no settings at all,
 // which is a valid HTTP/3 client that supports neither pushes nor the dynamic
 // table.
+//
+// Every header block, on either side, starts with the encoded field section
+// prefix of RFC 9204, Section 4.5.1. Leaving it out makes a conforming peer
+// read the first field line as the Required Insert Count and fail the whole
+// section with QPACK_DECOMPRESSION_FAILED.
 const (
 	h3FrameData     = 0x00
 	h3FrameHeaders  = 0x01
@@ -33,51 +40,111 @@ const (
 	h3StreamQpackDec = 0x03
 )
 
-// h3StaticEntry is one row of the QPACK static table. Only the rows this client
-// can meet are listed: the request encoder writes literal names, so it needs no
-// row at all, and the response decoder only has to recognise a status, whether
-// it arrives as an indexed line or as a literal that refers to the table.
+// h3StaticEntry is one row of the QPACK static table of RFC 9204, Appendix A.
+// All 99 rows are present: a peer may reference any of them, and a decoder
+// that keeps only the rows it expects would silently drop field lines.
 type h3StaticEntry struct{ name, value string }
 
 var h3StaticTable = [...]h3StaticEntry{
-	0:  {":authority", ""},
-	1:  {":path", "/"},
-	2:  {"age", "0"},
-	3:  {"content-disposition", ""},
-	4:  {"content-length", "0"},
-	5:  {"cookie", ""},
-	6:  {"date", ""},
-	7:  {"etag", ""},
-	8:  {"if-modified-since", ""},
-	9:  {"if-none-match", ""},
-	10: {"last-modified", ""},
-	11: {"link", ""},
-	12: {"location", ""},
-	13: {"referer", ""},
-	14: {"set-cookie", ""},
-	15: {":method", "CONNECT"},
-	16: {":method", "DELETE"},
-	17: {":method", "GET"},
-	18: {":method", "HEAD"},
-	19: {":method", "OPTIONS"},
-	20: {":method", "POST"},
-	21: {":method", "PUT"},
-	22: {":scheme", "http"},
-	23: {":scheme", "https"},
-	24: {":status", "103"},
-	25: {":status", "200"},
-	26: {":status", "304"},
-	27: {":status", "404"},
-	28: {":status", "503"},
-	63: {":status", "100"},
-	64: {":status", "204"},
-	65: {":status", "206"},
-	66: {":status", "302"},
-	67: {":status", "400"},
-	68: {":status", "403"},
-	69: {":status", "421"},
-	70: {":status", "425"},
-	71: {":status", "500"},
+	{":authority", ""},                       // 0
+	{":path", "/"},                           // 1
+	{"age", "0"},                             // 2
+	{"content-disposition", ""},              // 3
+	{"content-length", "0"},                  // 4
+	{"cookie", ""},                           // 5
+	{"date", ""},                             // 6
+	{"etag", ""},                             // 7
+	{"if-modified-since", ""},                // 8
+	{"if-none-match", ""},                    // 9
+	{"last-modified", ""},                    // 10
+	{"link", ""},                             // 11
+	{"location", ""},                         // 12
+	{"referer", ""},                          // 13
+	{"set-cookie", ""},                       // 14
+	{":method", "CONNECT"},                   // 15
+	{":method", "DELETE"},                    // 16
+	{":method", "GET"},                       // 17
+	{":method", "HEAD"},                      // 18
+	{":method", "OPTIONS"},                   // 19
+	{":method", "POST"},                      // 20
+	{":method", "PUT"},                       // 21
+	{":scheme", "http"},                      // 22
+	{":scheme", "https"},                     // 23
+	{":status", "103"},                       // 24
+	{":status", "200"},                       // 25
+	{":status", "304"},                       // 26
+	{":status", "404"},                       // 27
+	{":status", "503"},                       // 28
+	{"accept", "*/*"},                        // 29
+	{"accept", "application/dns-message"},    // 30
+	{"accept-encoding", "gzip, deflate, br"}, // 31
+	{"accept-ranges", "bytes"},               // 32
+	{"access-control-allow-headers", "cache-control"},                             // 33
+	{"access-control-allow-headers", "content-type"},                              // 34
+	{"access-control-allow-origin", "*"},                                          // 35
+	{"cache-control", "max-age=0"},                                                // 36
+	{"cache-control", "max-age=2592000"},                                          // 37
+	{"cache-control", "max-age=604800"},                                           // 38
+	{"cache-control", "no-cache"},                                                 // 39
+	{"cache-control", "no-store"},                                                 // 40
+	{"cache-control", "public, max-age=31536000"},                                 // 41
+	{"content-encoding", "br"},                                                    // 42
+	{"content-encoding", "gzip"},                                                  // 43
+	{"content-type", "application/dns-message"},                                   // 44
+	{"content-type", "application/javascript"},                                    // 45
+	{"content-type", "application/json"},                                          // 46
+	{"content-type", "application/x-www-form-urlencoded"},                         // 47
+	{"content-type", "image/gif"},                                                 // 48
+	{"content-type", "image/jpeg"},                                                // 49
+	{"content-type", "image/png"},                                                 // 50
+	{"content-type", "text/css"},                                                  // 51
+	{"content-type", "text/html; charset=utf-8"},                                  // 52
+	{"content-type", "text/plain"},                                                // 53
+	{"content-type", "text/plain;charset=utf-8"},                                  // 54
+	{"range", "bytes=0-"},                                                         // 55
+	{"strict-transport-security", "max-age=31536000"},                             // 56
+	{"strict-transport-security", "max-age=31536000; includesubdomains"},          // 57
+	{"strict-transport-security", "max-age=31536000; includesubdomains; preload"}, // 58
+	{"vary", "accept-encoding"},                                                   // 59
+	{"vary", "origin"},                                                            // 60
+	{"x-content-type-options", "nosniff"},                                         // 61
+	{"x-xss-protection", "1; mode=block"},                                         // 62
+	{":status", "100"},                                                            // 63
+	{":status", "204"},                                                            // 64
+	{":status", "206"},                                                            // 65
+	{":status", "302"},                                                            // 66
+	{":status", "400"},                                                            // 67
+	{":status", "403"},                                                            // 68
+	{":status", "421"},                                                            // 69
+	{":status", "425"},                                                            // 70
+	{":status", "500"},                                                            // 71
+	{"accept-language", ""},                                                       // 72
+	{"access-control-allow-credentials", "FALSE"},                                 // 73
+	{"access-control-allow-credentials", "TRUE"},                                  // 74
+	{"access-control-allow-headers", "*"},                                         // 75
+	{"access-control-allow-methods", "get"},                                       // 76
+	{"access-control-allow-methods", "get, post, options"},                        // 77
+	{"access-control-allow-methods", "options"},                                   // 78
+	{"access-control-expose-headers", "content-length"},                           // 79
+	{"access-control-request-headers", "content-type"},                            // 80
+	{"access-control-request-method", "get"},                                      // 81
+	{"access-control-request-method", "post"},                                     // 82
+	{"alt-svc", "clear"},                                                          // 83
+	{"authorization", ""},                                                         // 84
+	{"content-security-policy", "script-src 'none'; object-src 'none'; base-uri 'none'"}, // 85
+	{"early-data", "1"},                // 86
+	{"expect-ct", ""},                  // 87
+	{"forwarded", ""},                  // 88
+	{"if-range", ""},                   // 89
+	{"origin", ""},                     // 90
+	{"purpose", "prefetch"},            // 91
+	{"server", ""},                     // 92
+	{"timing-allow-origin", "*"},       // 93
+	{"upgrade-insecure-requests", "1"}, // 94
+	{"user-agent", ""},                 // 95
+	{"x-forwarded-for", ""},            // 96
+	{"x-frame-options", "deny"},        // 97
+	{"x-frame-options", "sameorigin"},  // 98
 }
 
 // h3Client sends requests on one QUIC connection.
@@ -199,12 +266,50 @@ func readH3Frame(r *bufio.Reader) (uint64, []byte, error) {
 	return typ, payload, nil
 }
 
-// h3EncodeRequestHeaders writes the request header block. Every field is a
-// literal with a literal name: the encoder is then independent of the static
-// table's numbering, and a field the table happens to contain costs a few bytes
-// more rather than being wrong.
+// h3AppendFieldSectionPrefix writes the prefix of RFC 9204, Section 4.5.1:
+// a Required Insert Count of zero (8-bit prefix) and a Base of zero (Sign bit
+// clear, Delta Base zero with a 7-bit prefix). This client advertises no
+// dynamic table, so no other value is possible.
+func h3AppendFieldSectionPrefix(dst []byte) []byte {
+	return append(dst, 0x00, 0x00)
+}
+
+// h3ReadFieldSectionPrefix consumes the prefix and returns the encoded field
+// lines. A nonzero Required Insert Count would need dynamic table inserts this
+// client never receives; a Sign bit with a zero Required Insert Count would
+// make the Base negative, which Section 4.5.1.2 forbids. Both are refused
+// explicitly so a peer's dynamic-table section cannot be misread.
+func h3ReadFieldSectionPrefix(block []byte) ([]byte, error) {
+	if len(block) < 2 {
+		return nil, errors.New("http3: truncated encoded field section prefix")
+	}
+	encInsertCount, rest, err := h3ReadPrefixedInt(block, 8)
+	if err != nil {
+		return nil, fmt.Errorf("http3: read the required insert count: %w", err)
+	}
+	if encInsertCount != 0 {
+		return nil, fmt.Errorf("http3: the field section needs %d dynamic table inserts, but this client has none", encInsertCount)
+	}
+	if len(rest) == 0 {
+		return nil, errors.New("http3: truncated encoded field section prefix")
+	}
+	sign := rest[0]&0x80 != 0
+	_, rest, err = h3ReadPrefixedInt(rest, 7)
+	if err != nil {
+		return nil, fmt.Errorf("http3: read the delta base: %w", err)
+	}
+	if sign {
+		return nil, errors.New("http3: a zero required insert count cannot have a negative base")
+	}
+	return rest, nil
+}
+
+// h3EncodeRequestHeaders writes the request header block, prefix included.
+// Every field is a literal with a literal name: the encoder is then
+// independent of the static table's numbering, and a field the table happens
+// to contain costs a few bytes more rather than being wrong.
 func h3EncodeRequestHeaders(authority, path string, headers [][2]string) []byte {
-	var block []byte
+	block := h3AppendFieldSectionPrefix(nil)
 	block = h3AppendField(block, ":method", "POST")
 	block = h3AppendField(block, ":scheme", "https")
 	block = h3AppendField(block, ":authority", authority)
@@ -274,6 +379,10 @@ func h3ReadPrefixedInt(b []byte, prefix uint) (value uint64, rest []byte, err er
 // reference to the dynamic table is an error, because this client advertises no
 // capacity for one and a peer that uses it anyway cannot be answered.
 func h3DecodeHeaderBlock(block []byte) ([][2]string, error) {
+	block, err := h3ReadFieldSectionPrefix(block)
+	if err != nil {
+		return nil, err
+	}
 	var fields [][2]string
 	for len(block) > 0 {
 		first := block[0]
@@ -287,9 +396,10 @@ func h3DecodeHeaderBlock(block []byte) ([][2]string, error) {
 			if first&0x40 == 0 {
 				return nil, errors.New("http3: a response referred to the dynamic table")
 			}
-			if index < uint64(len(h3StaticTable)) {
-				fields = append(fields, [2]string{h3StaticTable[index].name, h3StaticTable[index].value})
+			if index >= uint64(len(h3StaticTable)) {
+				return nil, fmt.Errorf("http3: static table index %d is out of range", index)
 			}
+			fields = append(fields, [2]string{h3StaticTable[index].name, h3StaticTable[index].value})
 		case first&0xc0 == 0x40: // literal with a name reference
 			// 01NTxxxx: the index has four bits, not the six an indexed
 			// field line uses; the N and T bits sit above it.
@@ -332,8 +442,8 @@ func h3DecodeHeaderBlock(block []byte) ([][2]string, error) {
 
 // h3ReadString reads a string whose length has the given prefix width, which is
 // seven bits for a value and three for the name of a literal field line.
-// Huffman coding is not implemented: nothing in these exchanges is short enough
-// for an encoder to choose it, and decoding it wrong is worse than refusing.
+// Huffman-coded strings use the HPACK code table of RFC 7541, Appendix B,
+// which QPACK inherits; an encoder is free to choose it for any string.
 func h3ReadString(b []byte, prefix uint) (string, []byte, error) {
 	if len(b) == 0 {
 		return "", nil, errors.New("http3: truncated string")
@@ -346,8 +456,14 @@ func h3ReadString(b []byte, prefix uint) (string, []byte, error) {
 	if length > uint64(len(rest)) {
 		return "", nil, errors.New("http3: truncated string")
 	}
+	value := rest[:length]
+	remain := rest[length:]
 	if huffman {
-		return "", nil, errors.New("http3: huffman-coded header strings are not supported")
+		decoded, err := hpack.HuffmanDecodeToString(value)
+		if err != nil {
+			return "", nil, fmt.Errorf("http3: decode a huffman-coded header string: %w", err)
+		}
+		return decoded, remain, nil
 	}
-	return string(rest[:length]), rest[length:], nil
+	return string(value), remain, nil
 }

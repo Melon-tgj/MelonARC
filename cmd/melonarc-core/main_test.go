@@ -13,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/melon-tgj/melonarc/internal/api"
 	"github.com/melon-tgj/melonarc/internal/config"
+	"github.com/melon-tgj/melonarc/internal/datadir"
 	"github.com/melon-tgj/melonarc/internal/dns"
 	"github.com/melon-tgj/melonarc/internal/policy"
 )
@@ -214,5 +216,46 @@ FINAL,manual
 	// Sorted, so the missing group comes before the stale member.
 	if !strings.Contains(dropped[0], "gone") || !strings.Contains(dropped[1], "manual: gamma") {
 		t.Errorf("dropped = %v, want the missing group and the stale pin", dropped)
+	}
+}
+
+// TestStartupOutputDoesNotDiscloseToken uses a server with a known token and
+// checks both channels a startup notice can reach: stdout and the structured
+// log. The address and the token file path are still reported, so an operator
+// can find the credential without it ever being copied into a terminal log.
+func TestStartupOutputDoesNotDiscloseToken(t *testing.T) {
+	const token = "a-known-startup-token-that-must-not-be-published"
+	srv, err := api.New(api.Options{
+		Addr:     "127.0.0.1:0",
+		Token:    token,
+		Provider: &daemonState{},
+		Version:  "test",
+	})
+	if err != nil {
+		t.Fatalf("api.New: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Close(ctx)
+	})
+	tokenPath := datadir.TokenPath(t.TempDir())
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+	stdout := captureStdout(t, func() { announceAPI(srv, tokenPath, logger) })
+	for name, output := range map[string]string{"stdout": stdout, "log": logs.String()} {
+		if strings.Contains(output, token) {
+			t.Errorf("startup %s disclosed the bearer token: %q", name, output)
+		}
+	}
+	if !strings.Contains(stdout, srv.URL()) {
+		t.Errorf("startup output has no listen address: %q", stdout)
+	}
+	if !strings.Contains(stdout, tokenPath) {
+		t.Errorf("startup output has no token file path: %q", stdout)
+	}
+	if !strings.Contains(logs.String(), tokenPath) {
+		t.Errorf("startup log has no token file path: %q", logs.String())
 	}
 }

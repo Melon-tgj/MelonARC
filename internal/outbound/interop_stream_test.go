@@ -233,7 +233,11 @@ func trustDialer(t *testing.T, d Dialer) *TLSOptions {
 	case *VLESS:
 		return &v.tls
 	default:
-		t.Fatalf("trustDialer: %T has no TLS settings", d)
+		// The QUIC types compile their TLS options into a *tls.Config when
+		// they are built, so changing a field afterwards cannot affect them.
+		// Their fixtures use trustSpec, which injects the pool before New is
+		// called; trustDialer is only for outbounds that keep TLSOptions.
+		t.Fatalf("trustDialer: %T has no mutable TLS settings; inject the pool with trustSpec when building the spec", d)
 		return nil
 	}
 }

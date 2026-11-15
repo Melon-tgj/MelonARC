@@ -399,13 +399,18 @@ func quicDialConfig(tlsOpts TLSOptions, host string, datagrams bool) (*tls.Confi
 	return tlsConfig, conf, nil
 }
 
+// dialQUICDefault is the production QUIC dial path. It is a named function so
+// a test that temporarily replaces the dial hook can restore exactly this
+// behaviour instead of installing a substitute of its own.
+func dialQUICDefault(ctx context.Context, server string, tlsConfig *tls.Config, conf *quic.Config) (*quic.Conn, error) {
+	return quic.DialAddr(ctx, server, tlsConfig, conf)
+}
+
 // dialQUICAddr opens a QUIC connection to a server address. It is a variable
 // because the socket a default dial creates cannot be used everywhere: a
 // sandbox that blocks sendto on unconnected sockets needs the dial to go
 // through a connected one. Production always uses the default.
-var dialQUICAddr = func(ctx context.Context, server string, tlsConfig *tls.Config, conf *quic.Config) (*quic.Conn, error) {
-	return quic.DialAddr(ctx, server, tlsConfig, conf)
-}
+var dialQUICAddr = dialQUICDefault
 
 // dialQUIC opens one QUIC connection, optionally through an obfuscated packet
 // connection.

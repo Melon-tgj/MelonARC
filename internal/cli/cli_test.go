@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -464,7 +466,9 @@ func TestAPIBaseNormalisation(t *testing.T) {
 		{in: "", want: "http://" + api.DefaultAddr},
 		{in: "127.0.0.1:9000", want: "http://127.0.0.1:9000"},
 		{in: "http://127.0.0.1:9000/", want: "http://127.0.0.1:9000"},
-		{in: "https://core.example", want: "https://core.example"},
+		{in: "127.9.8.7:9000", want: "http://127.9.8.7:9000"},
+		{in: "[::1]:9000", want: "http://[::1]:9000"},
+		{in: "http://[0:0:0:0:0:0:0:1]:9000", want: "http://[::1]:9000"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.in, func(t *testing.T) {
@@ -477,10 +481,109 @@ func TestAPIBaseNormalisation(t *testing.T) {
 			}
 		})
 	}
-	for _, bad := range []string{"ftp://core", "http://", "://x"} {
+	for _, bad := range []string{
+		"ftp://core", "http://", "://x",
+		"https://core.example", "https://127.0.0.1:9000",
+		"http://192.168.1.10:9000", "http://10.0.0.1:9000", "http://[2001:db8::1]:9000",
+		"http://example.com:9000", "http://user@127.0.0.1:9000",
+		"http://127.0.0.1:9000/other", "http://127.0.0.1:9000/?q=1", "http://127.0.0.1",
+	} {
 		if _, err := apiBase(bad); err == nil {
 			t.Errorf("apiBase accepted %q", bad)
 		}
+	}
+}
+
+// TestAPIBaseRejectsNonLoopbackByIPType pins the difference from the old string
+// check: 127.x is loopback by type, while a name that merely starts with "127."
+// or a private address is not.
+func TestAPIBaseRejectsNonLoopbackByIPType(t *testing.T) {
+	for _, bad := range []string{
+		"127.example.com:9000", "127.0.0.1.example.com:9000",
+		"172.16.0.1:9000", "169.254.169.254:9000", "0.0.0.0:9000", "[::2]:9000",
+	} {
+		if _, err := apiBase(bad); err == nil {
+			t.Errorf("apiBase accepted %q", bad)
+		}
+	}
+	for _, good := range []string{"127.1.2.3:9000", "127.255.255.254:9000"} {
+		if _, err := apiBase(good); err != nil {
+			t.Errorf("apiBase rejected the loopback literal %q: %v", good, err)
+		}
+	}
+}
+
+// TestLocalhostMustResolveOnlyToLoopback proves that the name is resolved and
+// every answer checked before an address is chosen to connect to.
+func TestLocalhostMustResolveOnlyToLoopback(t *testing.T) {
+	original := lookupHost
+	t.Cleanup(func() { lookupHost = original })
+
+	lookupHost = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("::1")}, {IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+	target, err := resolveAPITarget("localhost:9000")
+	if err != nil {
+		t.Fatalf("resolveAPITarget(localhost): %v", err)
+	}
+	if target.dial != "127.0.0.1:9000" || target.base != "http://127.0.0.1:9000" {
+		t.Errorf("target = %+v, want the verified IPv4 loopback address", target)
+	}
+
+	lookupHost = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}, {IP: net.ParseIP("192.0.2.5")}}, nil
+	}
+	if _, err := resolveAPITarget("localhost:9000"); err == nil || !strings.Contains(err.Error(), "not loopback") {
+		t.Errorf("a mixed resolution was not refused: %v", err)
+	}
+
+	lookupHost = func(context.Context, string) ([]net.IPAddr, error) {
+		return nil, nil
+	}
+	if _, err := resolveAPITarget("localhost:9000"); err == nil {
+		t.Error("an empty resolution was accepted")
+	}
+}
+
+// TestCredentialedRequestRefusesRedirects pins the two transport rules that keep
+// the token local: a 3xx is not followed and the environment proxy is ignored.
+func TestCredentialedRequestRefusesRedirectsAndProxy(t *testing.T) {
+	var followed bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		followed = true
+		if r.Header.Get("Authorization") != "" {
+			t.Error("the redirect target received the bearer token")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(other.Close)
+
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/v1/status", http.StatusFound)
+	}))
+	t.Cleanup(core.Close)
+
+	// A poisoned proxy would fail the request if the transport honoured it.
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	t.Setenv("http_proxy", "http://127.0.0.1:1")
+
+	c, err := newClient(&options{api: core.URL, token: testToken})
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	transport, ok := c.http.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil || transport.DialContext == nil {
+		t.Fatalf("transport is not pinned: %+v", c.http.Transport)
+	}
+	if c.http.CheckRedirect == nil || !errors.Is(c.http.CheckRedirect(nil, nil), http.ErrUseLastResponse) {
+		t.Error("the client would follow a redirect")
+	}
+	var out api.StatusView
+	if err := c.get(context.Background(), "/v1/status", &out); err == nil {
+		t.Error("a redirect was accepted as an answer")
+	}
+	if followed {
+		t.Error("the redirect was followed")
 	}
 }
 

@@ -13,6 +13,14 @@
 // one with no proxy at all — the first looks configured and silently breaks
 // half the traffic. Every backend therefore reads the current values before it
 // writes, and restores them if any write fails.
+//
+// Ownership is the other property. This package does not "turn the proxy off"
+// when it leaves: it puts back the values that were there before the takeover,
+// including the absence of a value that did not exist, and only for fields that
+// still hold what this program wrote. A user who changes a field while the
+// daemon runs keeps that change. The snapshot is persisted before the first
+// write, so a process that is killed outright still leaves the next start a way
+// to put the machine back.
 package sysproxy
 
 import (
@@ -24,6 +32,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Settings is what the desktop proxy is pointed at.
@@ -56,11 +65,19 @@ type Backend interface {
 	Name() string
 	// Enabled reports whether the desktop proxy is on.
 	Enabled(ctx context.Context) (bool, error)
-	// Apply points the desktop proxy at these listeners. When it returns an
-	// error the setting is what it was before the call.
-	Apply(ctx context.Context, s Settings) error
-	// Clear turns the desktop proxy off, which is the state a machine that
-	// stops proxying has to be left in.
+	// Plan reads the current values and describes the writes a takeover would
+	// make. It changes nothing. Splitting this from Commit is what lets the
+	// controller persist the snapshot before the machine is touched.
+	Plan(ctx context.Context, s Settings) (Snapshot, error)
+	// Commit performs the writes of a Plan. On a failure it restores what it
+	// already wrote and reports the reason.
+	Commit(ctx context.Context, snap Snapshot) error
+	// Restore puts a snapshot back, skipping every field whose current value no
+	// longer equals what this program wrote. A value that was absent before the
+	// takeover is deleted rather than written.
+	Restore(ctx context.Context, snap Snapshot) (RestoreResult, error)
+	// Clear turns the desktop proxy off. It is the fallback for a setting left
+	// by a build that had no snapshot; a normal shutdown uses Restore.
 	Clear(ctx context.Context) error
 }
 
@@ -68,21 +85,29 @@ type Backend interface {
 type Controller struct {
 	backend Backend
 	logger  *slog.Logger
+	// path is where the takeover record is kept. An empty path disables
+	// persistence, which is what a test without a data directory uses.
+	path string
+	// snapshot is the takeover of this process, kept in memory so Release does
+	// not depend on the disk still being readable during shutdown.
+	snapshot Snapshot
 	// applied records that this process turned the setting on, so shutting down
-	// only clears a setting it is responsible for. A setting the user turned on
-	// by hand is not ours to remove.
+	// only restores a setting it is responsible for. A setting the user turned
+	// on by hand is not ours to remove.
 	applied bool
 }
 
-// New returns the controller of this machine's desktop setting.
-func New(logger *slog.Logger) *Controller {
-	return &Controller{backend: platform(), logger: loggerOrDiscard(logger)}
+// New returns the controller of this machine's desktop setting. snapshotPath is
+// the file in which the takeover is recorded; it must live in the data
+// directory so that it survives a restart of the process.
+func New(logger *slog.Logger, snapshotPath string) *Controller {
+	return &Controller{backend: platform(), logger: loggerOrDiscard(logger), path: snapshotPath}
 }
 
 // WithBackend returns a controller over a specific backend, which is what a test
 // uses.
-func WithBackend(b Backend, logger *slog.Logger) *Controller {
-	return &Controller{backend: b, logger: loggerOrDiscard(logger)}
+func WithBackend(b Backend, logger *slog.Logger, snapshotPath string) *Controller {
+	return &Controller{backend: b, logger: loggerOrDiscard(logger), path: snapshotPath}
 }
 
 // Backend returns the backend the controller writes through.
@@ -90,30 +115,62 @@ func (c *Controller) Backend() Backend { return c.backend }
 
 // Enable points the desktop proxy at the listeners.
 //
-// An error is returned with the reason in it, and the setting is left as it was:
-// that is the whole contract, because the alternative is a machine with a
-// half written proxy configuration and no way to tell from the outside.
+// Any takeover a previous process did not release is put back first, then the
+// values about to be replaced are persisted before the first write. An error
+// leaves the setting as it was and removes the record that is no longer
+// needed.
 func (c *Controller) Enable(ctx context.Context, s Settings) error {
 	if err := s.Validate(); err != nil {
 		return err
 	}
-	if err := c.backend.Apply(ctx, s); err != nil {
+	if err := c.Recover(ctx); err != nil {
+		return err
+	}
+	snap, err := c.backend.Plan(ctx, s)
+	if err != nil {
+		return fmt.Errorf("the system proxy could not be read (%s): %w", c.backend.Name(), err)
+	}
+	snap.Backend = c.backend.Name()
+	snap.TakenAt = time.Now()
+	if err := saveSnapshot(c.path, snap); err != nil {
+		return fmt.Errorf("the system proxy takeover could not be recorded: %w", err)
+	}
+	if err := c.backend.Commit(ctx, snap); err != nil {
+		// Commit already rolled the fields back. Nothing is ours any more, so
+		// the record must not tell the next start to restore them again.
+		_ = removeSnapshot(c.path)
 		return fmt.Errorf("the system proxy could not be set (%s): %w", c.backend.Name(), err)
 	}
+	c.snapshot = snap
 	c.applied = true
 	c.logger.Info("system proxy set", "backend", c.backend.Name(), "http", s.HTTP, "socks5", s.SOCKS5)
 	return nil
 }
 
-// Disable turns the desktop proxy off. It is called on shutdown for a setting
-// this process applied, and from the startup path when the configuration does
-// not ask for one but a previous run left it on.
+// Disable turns the desktop proxy off without restoring the previous values.
+// It is the fallback for a setting left by a build that had no snapshot; a
+// normal shutdown goes through Release, which restores.
 func (c *Controller) Disable(ctx context.Context) error {
 	if err := c.backend.Clear(ctx); err != nil {
 		return fmt.Errorf("the system proxy could not be cleared (%s): %w", c.backend.Name(), err)
 	}
 	c.applied = false
 	c.logger.Info("system proxy cleared", "backend", c.backend.Name())
+	return nil
+}
+
+// Recover puts back a takeover that a previous process did not live to
+// release. It is called at startup whether or not the new configuration asks
+// for a system proxy: a hard kill must not leave the machine pointing at a
+// listener that no longer exists. A missing record is the normal case.
+func (c *Controller) Recover(ctx context.Context) error {
+	found, err := recoverSnapshot(ctx, c.path, c.backend)
+	if err != nil {
+		return fmt.Errorf("the previous system proxy takeover could not be restored: %w", err)
+	}
+	if found {
+		c.logger.Warn("restored a system proxy takeover left by a previous run", "backend", c.backend.Name())
+	}
 	return nil
 }
 
@@ -125,13 +182,35 @@ func (c *Controller) Enabled(ctx context.Context) (bool, error) {
 	return c.backend.Enabled(ctx)
 }
 
-// Release turns the setting off if this process turned it on. It is what the
-// daemon defers at startup, and it is safe to call more than once.
+// Release puts the settings back if this process turned them on. It restores
+// the values from before the takeover, not an empty proxy, and leaves alone
+// any field the user changed in the meantime. It is safe to call more than
+// once.
 func (c *Controller) Release(ctx context.Context) error {
 	if !c.applied {
 		return nil
 	}
-	return c.Disable(ctx)
+	snap := c.snapshot
+	// The disk copy is authoritative when it is still there: it is the same
+	// record the next start would use, so restoring it here and restoring it
+	// there can never disagree. An empty path means this controller never
+	// persisted anything, so the in-memory copy is the only one.
+	if c.path != "" {
+		if fromDisk, err := loadSnapshot(c.path); err == nil {
+			snap = fromDisk
+		}
+	}
+	result, err := c.backend.Restore(ctx, snap)
+	if err != nil {
+		return fmt.Errorf("the system proxy could not be restored (%s): %w", c.backend.Name(), err)
+	}
+	if err := removeSnapshot(c.path); err != nil {
+		return err
+	}
+	c.applied = false
+	c.logger.Info("system proxy restored", "backend", c.backend.Name(),
+		"fields", result.Restored, "kept", result.Kept)
+	return nil
 }
 
 // Validate checks that there is something to point at and that every address is

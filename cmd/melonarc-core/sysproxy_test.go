@@ -12,10 +12,12 @@ import (
 
 // fakeProxy records what the daemon asked the desktop to do.
 type fakeProxy struct {
-	enabled  int
-	released int
-	settings sysproxy.Settings
-	err      error
+	enabled    int
+	released   int
+	recovered  int
+	settings   sysproxy.Settings
+	err        error
+	recoverErr error
 }
 
 func (f *fakeProxy) Enable(_ context.Context, s sysproxy.Settings) error {
@@ -27,6 +29,11 @@ func (f *fakeProxy) Enable(_ context.Context, s sysproxy.Settings) error {
 func (f *fakeProxy) Release(context.Context) error {
 	f.released++
 	return nil
+}
+
+func (f *fakeProxy) Recover(context.Context) error {
+	f.recovered++
+	return f.recoverErr
 }
 
 // TestSysproxySettingsFollowTheListeners checks the mapping from the [General]
@@ -58,6 +65,26 @@ func TestApplySystemProxyIsOffByDefault(t *testing.T) {
 	}
 	if proxy.enabled != 0 {
 		t.Error("the desktop proxy was written although system-proxy is off")
+	}
+	if proxy.recovered != 1 {
+		t.Errorf("a leftover takeover was recovered %d times, want 1", proxy.recovered)
+	}
+}
+
+// TestApplySystemProxyReportsARecoveryFailure stops startup when a persisted
+// takeover cannot be put back: continuing would leave the machine pointing at
+// a listener that no longer exists, with no record of what it replaced.
+func TestApplySystemProxyReportsARecoveryFailure(t *testing.T) {
+	proxy := &fakeProxy{recoverErr: errors.New("the takeover record is unreadable")}
+	err := applySystemProxy(context.Background(), config.General{}, proxy, testLogger())
+	if err == nil {
+		t.Fatal("applySystemProxy ignored a recovery failure")
+	}
+	if !strings.Contains(err.Error(), "previous run") || !strings.Contains(err.Error(), "unreadable") {
+		t.Errorf("the error does not explain the recovery: %v", err)
+	}
+	if proxy.enabled != 0 {
+		t.Error("the desktop proxy was written although recovery failed")
 	}
 }
 

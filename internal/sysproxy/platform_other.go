@@ -18,4 +18,14 @@ func (unsupported) Enabled(context.Context) (bool, error) { return false, ErrUns
 
 func (unsupported) Apply(context.Context, Settings) error { return ErrUnsupported }
 
+func (unsupported) Plan(context.Context, Settings) (Snapshot, error) {
+	return Snapshot{}, ErrUnsupported
+}
+
+func (unsupported) Commit(context.Context, Snapshot) error { return ErrUnsupported }
+
+func (unsupported) Restore(context.Context, Snapshot) (RestoreResult, error) {
+	return RestoreResult{}, ErrUnsupported
+}
+
 func (unsupported) Clear(context.Context) error { return ErrUnsupported }

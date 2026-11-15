@@ -55,10 +55,38 @@ type client struct {
 	http      *http.Client
 }
 
+// apiTarget is a fully validated local API address. base is the only URL the
+// client builds requests against; dial is the one socket address the transport
+// may open. Both name a canonical IP literal, so no host name is resolved (or
+// re-resolved) after validation and the bearer token cannot be steered off
+// this machine by a DNS answer that changes between check and connect.
+type apiTarget struct {
+	base string
+	dial string
+}
+
+// lookupHost resolves localhost. It is a variable so a test can pin the answer
+// and prove that a non-loopback result is refused.
+var lookupHost = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
 // apiBase resolves the base URL of the core: the flag, then the environment,
 // then the address the core listens on by default. A bare host:port is accepted
 // because that is what the startup line of the daemon prints.
 func apiBase(raw string) (string, error) {
+	target, err := resolveAPITarget(raw)
+	if err != nil {
+		return "", err
+	}
+	return target.base, nil
+}
+
+// resolveAPITarget accepts only a plaintext HTTP origin on a loopback IP.
+// User information, paths, queries and other schemes are refused, as are host
+// names other than localhost: a request carrying the bearer token must not be
+// steerable to another listener. IPv6 is written in its canonical bracket form.
+func resolveAPITarget(raw string) (apiTarget, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
 		value = strings.TrimSpace(os.Getenv(envAPI))
@@ -71,12 +99,66 @@ func apiBase(raw string) (string, error) {
 	}
 	u, err := url.Parse(value)
 	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("%q is neither a URL nor a host:port address of the core", value)
+		return apiTarget{}, fmt.Errorf("%q is neither a URL nor a host:port address of the core", value)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("%q uses %q, the core answers over http", value, u.Scheme)
+	if u.Scheme != "http" {
+		return apiTarget{}, fmt.Errorf("%q uses %q, the local API answers over plain http", value, u.Scheme)
 	}
-	return strings.TrimSuffix(u.String(), "/"), nil
+	if u.User != nil {
+		return apiTarget{}, fmt.Errorf("%q must not carry user information", value)
+	}
+	if u.Path != "" && u.Path != "/" {
+		return apiTarget{}, fmt.Errorf("%q must be a bare origin, without a path", value)
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return apiTarget{}, fmt.Errorf("%q must be a bare origin, without a query or fragment", value)
+	}
+	port := u.Port()
+	if port == "" {
+		return apiTarget{}, fmt.Errorf("%q has no port", value)
+	}
+	ip, err := loopbackIP(u.Hostname())
+	if err != nil {
+		return apiTarget{}, err
+	}
+	// JoinHostPort brackets an IPv6 literal, so the URL and the socket address
+	// share one canonical form.
+	authority := net.JoinHostPort(ip.String(), port)
+	return apiTarget{base: "http://" + authority, dial: authority}, nil
+}
+
+// loopbackIP validates a host by IP type, not by a textual prefix. An IP
+// literal must be loopback; localhost is resolved and every answer must be
+// loopback before one is chosen; every other name could resolve remotely and
+// is refused.
+func loopbackIP(host string) (net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		if !ip.IsLoopback() {
+			return nil, fmt.Errorf("%q is not a loopback address; the API token never leaves this machine", host)
+		}
+		return ip, nil
+	}
+	if !strings.EqualFold(host, "localhost") {
+		return nil, fmt.Errorf("%q is neither a loopback IP nor localhost; the API token never leaves this machine", host)
+	}
+	answers, err := lookupHost(context.Background(), "localhost")
+	if err != nil {
+		return nil, fmt.Errorf("resolve localhost: %w", err)
+	}
+	var chosen net.IP
+	for _, answer := range answers {
+		if !answer.IP.IsLoopback() {
+			return nil, fmt.Errorf("localhost resolved to %s, which is not loopback; refusing to send the API token", answer.IP)
+		}
+		// Prefer IPv4: the core binds 127.0.0.1 by default.
+		if chosen == nil || (chosen.To4() == nil && answer.IP.To4() != nil) {
+			chosen = answer.IP
+		}
+	}
+	if chosen == nil {
+		return nil, fmt.Errorf("localhost resolved to no address")
+	}
+	return chosen, nil
 }
 
 // dataDirPath resolves the data directory of the core: the flag, then the
@@ -109,13 +191,28 @@ func tokenFileFor(explicitFile, dataDir string) (string, error) {
 // newClient builds a client, reading the token from the flag, the environment or
 // the token file in that order.
 func newClient(o *options) (*client, error) {
-	base, err := apiBase(o.api)
+	target, err := resolveAPITarget(o.api)
 	if err != nil {
 		return nil, err
 	}
+	// A credentialed request must not be redirected or relayed: either could
+	// carry the bearer token to a listener we never validated. Pin the dial to
+	// the verified address, disable the environment proxy and refuse redirects.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, target.dial)
+	}
 	c := &client{
-		base: base,
-		http: &http.Client{Timeout: o.timeout},
+		base: target.base,
+		http: &http.Client{
+			Timeout:   o.timeout,
+			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 	if token := strings.TrimSpace(o.token); token != "" {
 		c.token = token

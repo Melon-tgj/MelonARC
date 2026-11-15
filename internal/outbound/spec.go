@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -22,6 +23,12 @@ type Spec struct {
 	Server string
 	Port   int
 	Args   []string
+	// TLSConfig overrides the trust roots of the QUIC transports. It is a
+	// test escape hatch: the QUIC types compile their TLS options into a
+	// *tls.Config when they are built, so a fixture that wants to trust a
+	// locally issued certificate has to supply it here rather than changing
+	// the dialer afterwards. The configuration layer never sets this field.
+	TLSConfig *tls.Config
 }
 
 // optionSkip is how many leading entries of Args are not options.

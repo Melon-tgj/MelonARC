@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -58,7 +59,6 @@ type TUIC struct {
 	server  string
 	host    string
 	uuid    [16]byte
-	uuidTxt string
 	secret  string
 	timeout time.Duration
 	session *quicSession
@@ -94,7 +94,6 @@ func NewTUIC(opts TUICOptions) (*TUIC, error) {
 		server:  net.JoinHostPort(opts.Server, strconv.Itoa(opts.Port)),
 		host:    opts.Server,
 		uuid:    id,
-		uuidTxt: formatUUID(id),
 		secret:  opts.Password,
 		timeout: timeout,
 	}
@@ -149,6 +148,9 @@ func newTUICFromSpec(spec Spec) (Dialer, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The QUIC session is built inside NewTUIC, so a fixture's trust roots
+	// have to be on the options before that call.
+	tlsOpts.Config = spec.TLSConfig
 	return NewTUIC(TUICOptions{
 		Server: spec.Server, Port: spec.Port,
 		UUID: id, Password: secret, TLS: tlsOpts,
@@ -166,10 +168,9 @@ func (t *TUIC) Disown() { t.session.Disown() }
 // the wire: each side derives it from the TLS session, so a recorded handshake
 // cannot be replayed against another one.
 func (t *TUIC) authenticate(ctx context.Context, conn *quic.Conn) error {
-	state := conn.ConnectionState().TLS
-	token, err := state.ExportKeyingMaterial(t.uuidTxt, []byte(t.secret), tuicTokenLen)
+	token, err := tuicAuthenticationToken(conn.ConnectionState().TLS, t.uuid, t.secret)
 	if err != nil {
-		return fmt.Errorf("tuic: derive the authentication token: %w", err)
+		return err
 	}
 	stream, err := conn.OpenUniStreamSync(ctx)
 	if err != nil {
@@ -255,20 +256,26 @@ func tuicDatagramKey(payload []byte) (uint32, bool) {
 	return uint32(binary.BigEndian.Uint16(payload[2:4])), true
 }
 
-// formatUUID renders an account identifier the way a configuration writes it:
-// lowercase and hyphenated. The token both sides derive is keyed by this
-// string, so a configuration that spells the same identifier differently must
-// still produce the same label.
-func formatUUID(id [16]byte) string {
-	const digits = "0123456789abcdef"
-	out := make([]byte, 0, 36)
-	for i, b := range id {
-		if i == 4 || i == 6 || i == 8 || i == 10 {
-			out = append(out, '-')
-		}
-		out = append(out, digits[b>>4], digits[b&0x0f])
+// tuicExporterLabel is the TLS exporter label of an Authenticate token. A peer
+// derives the token from the account identifier's 16 raw bytes, not from the
+// hyphenated text a configuration writes: the reference implementation passes
+// uuid.as_ref() as the label and password.as_ref() as the context. A Go string
+// can carry those bytes verbatim, so a conversion (not a reformatting) is what
+// the exporter needs here.
+func tuicExporterLabel(id [16]byte) string {
+	return string(id[:])
+}
+
+// tuicAuthenticationToken derives the 32-byte token of an Authenticate
+// command from the TLS 1.3 session. Both the label and the context are byte
+// representations, so the same identifier spelled differently in a
+// configuration still produces the same token.
+func tuicAuthenticationToken(state tls.ConnectionState, id [16]byte, secret string) ([]byte, error) {
+	token, err := state.ExportKeyingMaterial(tuicExporterLabel(id), []byte(secret), tuicTokenLen)
+	if err != nil {
+		return nil, fmt.Errorf("tuic: derive the authentication token: %w", err)
 	}
-	return string(out)
+	return token, nil
 }
 
 // appendTUICAddress writes a TUIC address: its type, the address and the port.

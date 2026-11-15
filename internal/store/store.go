@@ -127,9 +127,10 @@ type Status struct {
 	// The records are still in memory when it is set, so the next flush can
 	// still put them on disk.
 	LastError string `json:"last_error,omitempty"`
-	// Notice explains a history that could not be loaded at startup. It stays
-	// until the file is rewritten, so a daemon that started on a corrupt or
-	// foreign file says so instead of reporting an empty history as normal.
+	// Notice explains a history that could not be loaded at startup. A foreign
+	// or unreadable file is preserved, so the notice stays for the whole run:
+	// a daemon that started on such a file must not report an empty history as
+	// normal or quietly adopt it as its own.
 	Notice string `json:"notice,omitempty"`
 }
 
@@ -164,6 +165,12 @@ type Store struct {
 	samples []Sample
 	status  Status
 
+	// preserved names a history file this build cannot read. It is set once by
+	// load, before the flush loop starts, and never cleared: every Flush must
+	// refuse to overwrite it. An operator who wants a fresh history moves or
+	// deletes that file explicitly; losing an old one silently is not an option.
+	preserved error
+
 	// flushMu serialises the file writes. Two flushes must not interleave: the
 	// older image would win the rename.
 	flushMu sync.Mutex
@@ -174,13 +181,20 @@ type Store struct {
 	closeErr error
 }
 
+// ErrHistoryPreserved marks a run in which an existing history file this build
+// cannot read was left untouched. The store still serves in-memory records, but
+// Flush and Close report this error instead of writing over that file.
+var ErrHistoryPreserved = errors.New("store: the previous history is preserved and writes are suspended")
+
 // Open creates or loads the database at opts.Path and starts the background
 // flush.
 //
 // A file that does not exist is not an error: the store starts empty and writes
-// its first image when it has something to keep. A file that exists but cannot be
-// read is not an error either — an observation history must not stop a daemon —
-// and the reason is reported through Status.Notice until it is replaced.
+// its first image when it has something to keep. A file that exists but cannot
+// be read is not a startup error either — an observation history must not stop
+// a daemon — but the original is preserved byte for byte and writes are
+// suspended for the whole run. Status.Notice explains why; Flush reports
+// ErrHistoryPreserved. An operator starts a fresh history by moving the file.
 func Open(opts Options) (*Store, error) {
 	if opts.Path == "" {
 		return nil, errors.New("store: a database path is required")
@@ -225,49 +239,64 @@ func loggerOrDiscard(l *slog.Logger) *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// load reads the records a previous run left behind.
+// load reads the records a previous run left behind. Any file this build cannot
+// decode is preserved: preserving the bytes of an unknown schema or a partly
+// written file is the only way a later build, or an operator with the right
+// reader, can still recover that history.
 func (s *Store) load() {
 	image, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
 	if err != nil {
-		s.status.Notice = fmt.Sprintf("the history file cannot be read: %v", err)
+		s.preserve(fmt.Errorf("the history file cannot be read: %w", err))
 		return
 	}
 	s.status.Bytes = int64(len(image))
 	s.attach(image)
 }
 
+// preserve latches the store into a read-only run. It is called from load,
+// before the flush loop starts; the lock keeps the write ordered with the reads
+// in Flush and Status.
+func (s *Store) preserve(reason error) {
+	s.mu.Lock()
+	s.preserved = reason
+	s.status.Notice = fmt.Sprintf(
+		"%v; the original file is preserved unchanged and writes are suspended for this run, "+
+			"move it aside explicitly to start a fresh history", reason)
+	s.mu.Unlock()
+	s.logger.Warn("history is preserved, writes are suspended", "path", s.path, "error", reason)
+}
+
 // attach decodes an image into the in-memory tables. A file this build does not
-// understand leaves the tables empty and the reason in the notice.
+// understand is preserved; the tables stay empty but are never written back
+// over the original.
 func (s *Store) attach(image []byte) {
 	db, err := openImage(image)
 	if err != nil {
-		s.status.Notice = fmt.Sprintf("the history file is not usable and will be replaced: %v", err)
-		s.logger.Warn("history file is not usable", "path", s.path, "error", err)
+		s.preserve(fmt.Errorf("the history file is not usable: %w", err))
 		return
 	}
 	if db.userVersion != userVersion {
-		s.status.Notice = fmt.Sprintf(
-			"the history file was written by another version (schema %d, this build writes %d) and will be replaced",
-			db.userVersion, userVersion)
-		s.logger.Warn("history file has another schema", "path", s.path, "schema", db.userVersion)
+		s.preserve(fmt.Errorf(
+			"the history file was written by another version (schema %d, this build writes %d)",
+			db.userVersion, userVersion))
 		return
 	}
 	conns, err := readConnections(db)
 	if err != nil {
-		s.status.Notice = fmt.Sprintf("the connection history cannot be read: %v", err)
+		s.preserve(fmt.Errorf("the connection history cannot be read: %w", err))
 		return
 	}
 	events, err := readEvents(db)
 	if err != nil {
-		s.status.Notice = fmt.Sprintf("the event history cannot be read: %v", err)
+		s.preserve(fmt.Errorf("the event history cannot be read: %w", err))
 		return
 	}
 	samples, err := readSamples(db)
 	if err != nil {
-		s.status.Notice = fmt.Sprintf("the traffic history cannot be read: %v", err)
+		s.preserve(fmt.Errorf("the traffic history cannot be read: %w", err))
 		return
 	}
 	s.mu.Lock()
@@ -349,6 +378,15 @@ func (s *Store) Flush() error {
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
 
+	// A preserved file must never become the empty image of this run. Refuse
+	// the write explicitly rather than replacing history that belongs to a
+	// build or a format we cannot read.
+	if reason := s.preservationReason(); reason != nil {
+		err := fmt.Errorf("%w: %v", ErrHistoryPreserved, reason)
+		s.fail(err)
+		return err
+	}
+
 	tables := s.tables()
 	image, err := buildImage(tables)
 	if err != nil {
@@ -367,6 +405,14 @@ func (s *Store) Flush() error {
 	s.status.Notice = ""
 	s.mu.Unlock()
 	return nil
+}
+
+// preservationReason reports why writes are suspended, or nil for a normal run.
+// The flag is written once by load, before any goroutine can call Flush.
+func (s *Store) preservationReason() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.preserved
 }
 
 // fail records a write failure and reports it once.
@@ -620,7 +666,7 @@ func (s *Store) Close() error {
 	s.closeOne.Do(func() {
 		close(s.stop)
 		<-s.done
-		if err := s.Flush(); err != nil {
+		if err := s.Flush(); err != nil && !errors.Is(err, ErrHistoryPreserved) {
 			s.closeErr = fmt.Errorf("store: the last flush failed: %w", err)
 		}
 	})

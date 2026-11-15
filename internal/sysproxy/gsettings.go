@@ -49,12 +49,14 @@ func (g *gsettings) Enabled(ctx context.Context) (bool, error) {
 	return mode != "" && mode != "none", nil
 }
 
-// Apply implements Backend.
-func (g *gsettings) Apply(ctx context.Context, s Settings) error {
+// gsettingsWrites is every field a takeover of s changes. The order is part of
+// the safety contract: the mode comes first, so a failure while the addresses
+// are being written leaves a machine whose proxy is already on but whose other
+// fields are still being restored; see rollback.
+func gsettingsWrites(s Settings) []write {
 	httpHost, httpPort := splitListen(s.HTTP)
 	socksHost, socksPort := splitListen(s.SOCKS5)
-
-	writes := []write{
+	return []write{
 		{proxySchema, "mode", quote("manual")},
 		// The https proxy is the same listener: the inbound answers CONNECT,
 		// which is what a browser sends to the proxy of an https URL.
@@ -66,12 +68,79 @@ func (g *gsettings) Apply(ctx context.Context, s Settings) error {
 		{socksSchema, "port", strconv.Itoa(socksPort)},
 		{proxySchema, "ignore-hosts", formatStringList(s.BypassList())},
 	}
-	return g.writeAll(ctx, writes)
+}
+
+// Plan implements Backend. A key that cannot be read stops the whole
+// operation: taking over a setting whose previous value is unknown would make
+// it impossible to put back.
+func (g *gsettings) Plan(ctx context.Context, s Settings) (Snapshot, error) {
+	writes := gsettingsWrites(s)
+	fields := make([]Field, 0, len(writes))
+	for _, w := range writes {
+		out, err := g.run(ctx, "gsettings", "get", w.schema, w.key)
+		if err != nil {
+			return Snapshot{}, fmt.Errorf("read %s %s: %w", w.schema, w.key, err)
+		}
+		fields = append(fields, Field{
+			Schema:  w.schema,
+			Key:     w.key,
+			Before:  strings.TrimSpace(out),
+			Present: true, // a gsettings key always has a value, even if it is the default
+			Written: w.value,
+		})
+	}
+	return Snapshot{Fields: fields}, nil
+}
+
+// Commit implements Backend.
+func (g *gsettings) Commit(ctx context.Context, snap Snapshot) error {
+	before := make([]write, 0, len(snap.Fields))
+	for _, f := range snap.Fields {
+		before = append(before, write{f.Schema, f.Key, f.Before})
+	}
+	for _, f := range snap.Fields {
+		if _, err := g.run(ctx, "gsettings", "set", f.Schema, f.Key, f.Written); err != nil {
+			return g.rollback(ctx, before, err)
+		}
+	}
+	return nil
+}
+
+// Restore implements Backend.
+func (g *gsettings) Restore(ctx context.Context, snap Snapshot) (RestoreResult, error) {
+	return restoreFields(snap.Fields,
+		func(f Field) (string, bool, error) {
+			out, err := g.run(ctx, "gsettings", "get", f.Schema, f.Key)
+			if err != nil {
+				return "", false, err
+			}
+			return strings.TrimSpace(out), true, nil
+		},
+		func(f Field, current string) bool { return sameGVariant(current, f.Written) },
+		func(f Field) error {
+			_, err := g.run(ctx, "gsettings", "set", f.Schema, f.Key, f.Before)
+			return err
+		},
+		func(f Field) error {
+			return fmt.Errorf("%s %s has no value to delete", f.Schema, f.Key)
+		},
+	)
+}
+
+// Apply is the one-shot form of Plan plus Commit, kept for callers that do not
+// need the takeover to be recorded and restored later.
+func (g *gsettings) Apply(ctx context.Context, s Settings) error {
+	snap, err := g.Plan(ctx, s)
+	if err != nil {
+		return err
+	}
+	return g.Commit(ctx, snap)
 }
 
 // Clear implements Backend.
 func (g *gsettings) Clear(ctx context.Context) error {
-	return g.writeAll(ctx, []write{{proxySchema, "mode", quote("none")}})
+	_, err := g.run(ctx, "gsettings", "set", proxySchema, "mode", quote("none"))
+	return err
 }
 
 // write is one gsettings assignment.
@@ -81,41 +150,39 @@ type write struct {
 	value  string
 }
 
-// writeAll applies the writes and restores what was there before if any of them
-// fails.
-//
-// The snapshot is taken first, for the schemas about to change only: reading a
-// value is what makes a restore possible, and a restore that cannot read what it
-// is replacing would be a guess.
-func (g *gsettings) writeAll(ctx context.Context, writes []write) error {
-	before, err := g.read(ctx, writes)
-	if err != nil {
-		return err
-	}
-	for _, w := range writes {
-		if _, err := g.run(ctx, "gsettings", "set", w.schema, w.key, w.value); err != nil {
-			return g.rollback(ctx, before, err)
+// sameGVariant compares a value read back from the desktop with the literal
+// this program wrote. The desktop is free to reformat a list — spacing around
+// commas and brackets differs between versions — so lists are compared entry
+// by entry rather than byte for byte. A reformat is not a user change.
+func sameGVariant(current, written string) bool {
+	normalise := func(value string) string {
+		value = strings.TrimSpace(value)
+		if !strings.HasPrefix(value, "[") || !strings.HasSuffix(value, "]") {
+			return unquote(value)
 		}
-	}
-	return nil
-}
-
-// read captures the values of every key about to be written.
-//
-// A key that cannot be read stops the whole operation: writing a setting whose
-// previous value is unknown is writing a setting that cannot be put back, and
-// the half applied state this package exists to avoid is exactly what that
-// would produce on the next failure.
-func (g *gsettings) read(ctx context.Context, writes []write) ([]write, error) {
-	before := make([]write, 0, len(writes))
-	for _, w := range writes {
-		out, err := g.run(ctx, "gsettings", "get", w.schema, w.key)
-		if err != nil {
-			return nil, fmt.Errorf("read %s %s: %w", w.schema, w.key, err)
+		inner := strings.TrimSpace(value[1 : len(value)-1])
+		if inner == "" {
+			return "[]"
 		}
-		before = append(before, write{w.schema, w.key, strings.TrimSpace(out)})
+		parts := make([]string, 0, 4)
+		start, quoted, escaped := 0, false, false
+		for i := 0; i < len(inner); i++ {
+			switch {
+			case escaped:
+				escaped = false
+			case inner[i] == '\\' && quoted:
+				escaped = true
+			case inner[i] == '\'':
+				quoted = !quoted
+			case inner[i] == ',' && !quoted:
+				parts = append(parts, unquote(inner[start:i]))
+				start = i + 1
+			}
+		}
+		parts = append(parts, unquote(inner[start:]))
+		return "[" + strings.Join(parts, "\x00") + "]"
 	}
-	return before, nil
+	return normalise(current) == normalise(written)
 }
 
 // rollback puts the captured values back and reports both the original failure

@@ -16,15 +16,25 @@ import http from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveDataDir, tokenPath, parseAddress } from "./lib/paths.mjs";
+import { resolveDataDir, tokenPath } from "./lib/paths.mjs";
+import {
+  assertDevelopmentOnly,
+  resolveAddress,
+  upstreamRequestOptions,
+  validateBridgeRequest,
+  validateBridgeTarget,
+} from "./lib/address.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(here, "..");
 
+assertDevelopmentOnly();
 const options = parseArgs(process.argv.slice(2));
 const dataDir = resolveDataDir({ explicit: options.dataDir });
 const tokenFile = tokenPath(dataDir);
-const api = parseAddress(options.api);
+// Resolve once, at startup: the upstream request then dials this verified IP
+// literal and never re-resolves a name that might answer differently later.
+const api = await resolveAddress(options.api);
 
 const MIME = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -41,18 +51,42 @@ const MIME = new Map([
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
+  if (url.pathname.startsWith("/bridge")) {
+    // The page is served from this same loopback origin. Reject a Host that
+    // names anything else (DNS rebinding) and an Origin that is not ours
+    // (a cross-site write); a browser's same-origin POST always carries one.
+    const port = server.address()?.port ?? options.port;
+    const check = validateBridgeRequest({
+      hostHeader: req.headers.host,
+      originHeader: req.headers.origin,
+      method: req.method,
+      port,
+    });
+    if (!check.ok) {
+      sendJson(res, 403, { error: { code: check.code, message: "the preview bridge only accepts local requests" }, proxied: false });
+      return;
+    }
+  }
+
   if (url.pathname === "/bridge/runtime") {
     sendJson(res, 200, {
       mode: "preview",
       api_address: api.label,
       data_dir: dataDir,
       token_path: tokenFile,
+      development_only: true,
     });
     return;
   }
 
   if (url.pathname.startsWith("/bridge/")) {
-    proxy(req, res, url.pathname.slice("/bridge".length));
+    const apiPath = url.pathname.slice("/bridge".length);
+    const target = validateBridgeTarget({ method: req.method, path: apiPath });
+    if (!target.ok) {
+      sendJson(res, 403, { error: { code: target.code, message: "the preview bridge does not forward that request" }, proxied: false });
+      return;
+    }
+    proxy(req, res, apiPath);
     return;
   }
 
@@ -69,18 +103,20 @@ const server = http.createServer((req, res) => {
 function proxy(req, res, apiPath) {
   readToken()
     .then((token) => {
-      const headers = {
-        host: api.label,
-        authorization: `Bearer ${token}`,
-        connection: "close",
-        "accept-encoding": "identity",
-      };
-      if (req.headers["content-type"]) headers["content-type"] = req.headers["content-type"];
-      if (req.headers["content-length"]) headers["content-length"] = req.headers["content-length"];
+      const requestOptions = upstreamRequestOptions({
+        api,
+        method: req.method ?? "GET",
+        path: apiPath,
+        contentType: req.headers["content-type"],
+        contentLength: req.headers["content-length"],
+      });
+      requestOptions.headers.authorization = `Bearer ${token}`;
 
       const upstream = http.request(
-        { host: api.host, port: api.port, method: req.method, path: apiPath, headers },
+        requestOptions,
         (answer) => {
+          // Only the body type is forwarded. A Location or Set-Cookie from the
+          // core must not become a redirect that carries the browser elsewhere.
           res.writeHead(answer.statusCode ?? 502, {
             "content-type": answer.headers["content-type"] ?? "application/octet-stream",
             "cache-control": "no-store",

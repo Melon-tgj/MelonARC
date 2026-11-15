@@ -2,7 +2,11 @@ package sysproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -21,10 +25,15 @@ type fakeTool struct {
 }
 
 // run is the runner the backends take.
+//
+// A successful write updates the answers table, so a later read sees what the
+// desktop would report after that write. Restore tests need this: they are
+// about the values currently in force, not about the initial fixture.
 func (f *fakeTool) run(_ context.Context, name string, args ...string) (string, error) {
 	line := name + " " + strings.Join(args, " ")
 	f.calls = append(f.calls, line)
-	if f.failAt > 0 && isMutation(args) {
+	mutation := isMutation(args)
+	if f.failAt > 0 && mutation {
 		f.failAt--
 		if f.failAt == 0 {
 			return "", errors.New("the settings tool refused")
@@ -33,12 +42,73 @@ func (f *fakeTool) run(_ context.Context, name string, args ...string) (string, 
 	if answer, ok := f.answers[line]; ok {
 		return answer, nil
 	}
-	// A write prints nothing when it works, so a mutating call that is not in
-	// the table succeeds silently.
-	if isMutation(args) {
-		return "", nil
+	if !mutation {
+		return "", errors.New("no answer for " + line)
 	}
-	return "", errors.New("no answer for " + line)
+	f.applyMutation(name, args)
+	return "", nil
+}
+
+// applyMutation mirrors one write in the answers table, including the way
+// reg.exe spells a DWORD when it is read back.
+func (f *fakeTool) applyMutation(name string, args []string) {
+	if f.answers == nil {
+		f.answers = map[string]string{}
+	}
+	if name == "gsettings" && len(args) == 4 && args[0] == "set" {
+		f.answers["gsettings get "+args[1]+" "+args[2]] = args[3] + "\n"
+		return
+	}
+	if name != "reg" || len(args) < 2 {
+		return
+	}
+	key := args[1]
+	switch args[0] {
+	case "add":
+		valueName := flagArg(args, "/v")
+		kind := flagArg(args, "/t")
+		data := dataArg(args)
+		if strings.EqualFold(kind, "REG_DWORD") {
+			if n, err := strconv.ParseUint(strings.TrimPrefix(strings.ToLower(data), "0x"), 16, 32); err == nil {
+				data = "0x" + strconv.FormatUint(n, 16)
+			}
+		}
+		f.answers["reg query "+key+" /v "+valueName] =
+			"HKEY_CURRENT_USER\\...\n    " + valueName + "    " + kind + "    " + data + "\n"
+	case "delete":
+		delete(f.answers, "reg query "+key+" /v "+flagArg(args, "/v"))
+	}
+}
+
+// flagArg returns the argument after a flag such as /v or /t.
+func flagArg(args []string, flag string) string {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// dataArg joins everything between /d and /f, because a value may contain
+// spaces even though the command line joins arguments with single spaces.
+func dataArg(args []string) string {
+	start := -1
+	for i, arg := range args {
+		if arg == "/d" {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	for i := start; i < len(args); i++ {
+		if args[i] == "/f" {
+			return strings.Join(args[start:i], " ")
+		}
+	}
+	return strings.Join(args[start:], " ")
 }
 
 // isMutation reports whether a call changes a setting rather than reading one.
@@ -303,7 +373,7 @@ func TestRegistryEnabled(t *testing.T) {
 // TestControllerReportsTheReason checks the wrapping: the message has to name
 // the setting and the reason, because the user cannot see either otherwise.
 func TestControllerReportsTheReason(t *testing.T) {
-	c := WithBackend(newGSettings((&fakeTool{answers: gsettingsAnswers(), failAt: 1}).run), nil)
+	c := WithBackend(newGSettings((&fakeTool{answers: gsettingsAnswers(), failAt: 1}).run), nil, "")
 	err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"})
 	if err == nil {
 		t.Fatal("Enable succeeded although the write failed")
@@ -316,11 +386,11 @@ func TestControllerReportsTheReason(t *testing.T) {
 	}
 }
 
-// TestControllerReleaseOnlyClearsItsOwnSetting keeps a stopped daemon from
+// TestControllerReleaseOnlyRestoresItsOwnSetting keeps a stopped daemon from
 // switching off a proxy it never turned on.
-func TestControllerReleaseOnlyClearsItsOwnSetting(t *testing.T) {
+func TestControllerReleaseOnlyRestoresItsOwnSetting(t *testing.T) {
 	tool := &fakeTool{answers: gsettingsAnswers()}
-	c := WithBackend(newGSettings(tool.run), nil)
+	c := WithBackend(newGSettings(tool.run), nil, "")
 
 	if err := c.Release(context.Background()); err != nil {
 		t.Fatalf("Release: %v", err)
@@ -336,10 +406,237 @@ func TestControllerReleaseOnlyClearsItsOwnSetting(t *testing.T) {
 		t.Fatalf("Release: %v", err)
 	}
 	if !containsCall(tool.calls, "gsettings set org.gnome.system.proxy mode 'none'") {
-		t.Error("Release did not clear the setting it applied")
+		t.Error("Release did not put the original mode back")
 	}
 	if err := c.Release(context.Background()); err != nil {
 		t.Fatalf("a second Release: %v", err)
+	}
+}
+
+// TestEnablePersistsTheSnapshotBeforeItWrites is the hard-kill guarantee: the
+// record is on disk before the first field of the machine is changed.
+func TestEnablePersistsTheSnapshotBeforeItWrites(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers()}
+	path := filepath.Join(t.TempDir(), "state", SnapshotFile)
+	c := WithBackend(newGSettings(tool.run), nil, path)
+
+	if err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the takeover was not persisted: %v", err)
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatalf("decode the snapshot: %v", err)
+	}
+	if snap.Backend != "gsettings" || len(snap.Fields) == 0 || snap.TakenAt.IsZero() {
+		t.Fatalf("snapshot = %+v, want a dated gsettings takeover", snap)
+	}
+	for _, f := range snap.Fields {
+		if f.Written == "" || f.Key == "" {
+			t.Errorf("field %+v has no written value", f)
+		}
+	}
+	// The plan was taken before any write: mode records the user's value and
+	// the value this program replaced it with, not one and the same thing.
+	mode := snap.Fields[0]
+	if mode.Key != "mode" || mode.Before != "'none'" || mode.Written != "'manual'" {
+		t.Errorf("mode field = %+v, want 'none' replaced by 'manual'", mode)
+	}
+}
+
+// TestReleaseRestoresEveryField checks a normal shutdown: the machine ends up
+// with the values it had before the takeover, and the record is removed.
+func TestReleaseRestoresEveryField(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers()}
+	path := filepath.Join(t.TempDir(), SnapshotFile)
+	c := WithBackend(newGSettings(tool.run), nil, path)
+	if err := c.Enable(context.Background(), Settings{
+		HTTP: "127.0.0.1:7890", SOCKS5: "127.0.0.1:7891", Bypass: []string{"*.internal"},
+	}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	tool.calls = nil
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	for _, line := range []string{
+		"gsettings set org.gnome.system.proxy mode 'none'",
+		"gsettings set org.gnome.system.proxy.http host ''",
+		"gsettings set org.gnome.system.proxy.http port 0",
+		"gsettings set org.gnome.system.proxy.https host ''",
+		"gsettings set org.gnome.system.proxy.https port 0",
+		"gsettings set org.gnome.system.proxy.socks host ''",
+		"gsettings set org.gnome.system.proxy.socks port 0",
+		"gsettings set org.gnome.system.proxy ignore-hosts ['localhost', '127.0.0.1', '::1']",
+	} {
+		if !containsCall(tool.calls, line) {
+			t.Errorf("the previous value was not put back: %q\ncalls:\n%s", line, strings.Join(tool.calls, "\n"))
+		}
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the takeover record survived a successful release: %v", err)
+	}
+	if c.Applied() {
+		t.Error("the controller still reports a setting it released")
+	}
+}
+
+// TestReleaseKeepsFieldsTheUserChanged is the ownership rule: a restore may
+// not overwrite a value the user edited while the daemon was running.
+func TestReleaseKeepsFieldsTheUserChanged(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers()}
+	c := WithBackend(newGSettings(tool.run), nil, "")
+	if err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+
+	// The user changes the mode and the HTTP host by hand.
+	tool.answers["gsettings get org.gnome.system.proxy mode"] = "'auto'\n"
+	tool.answers["gsettings get org.gnome.system.proxy.http host"] = "'user.proxy'\n"
+	tool.calls = nil
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	for _, line := range []string{
+		"gsettings set org.gnome.system.proxy mode 'none'",
+		"gsettings set org.gnome.system.proxy.http host ''",
+	} {
+		if containsCall(tool.calls, line) {
+			t.Errorf("a field the user changed was overwritten: %q", line)
+		}
+	}
+	if !containsCall(tool.calls, "gsettings set org.gnome.system.proxy.http port 0") {
+		t.Errorf("a field the user did not change was left behind:\n%s", strings.Join(tool.calls, "\n"))
+	}
+}
+
+// TestSnapshotSurvivesAProcessRestart is the hard-kill case. The first
+// controller never releases; the next start recovers from the file on disk.
+func TestSnapshotSurvivesAProcessRestart(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers()}
+	path := filepath.Join(t.TempDir(), SnapshotFile)
+	first := WithBackend(newGSettings(tool.run), nil, path)
+	if err := first.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	// No Release: the process is killed outright.
+
+	tool.calls = nil
+	second := WithBackend(newGSettings(tool.run), nil, path)
+	if err := second.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	for _, line := range []string{
+		"gsettings set org.gnome.system.proxy mode 'none'",
+		"gsettings set org.gnome.system.proxy.http host ''",
+		"gsettings set org.gnome.system.proxy.http port 0",
+	} {
+		if !containsCall(tool.calls, line) {
+			t.Errorf("the next start did not restore %q:\n%s", line, strings.Join(tool.calls, "\n"))
+		}
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the recovered record was not removed: %v", err)
+	}
+	// A second recovery is a no-op, so startup can be retried safely.
+	tool.calls = nil
+	if err := second.Recover(context.Background()); err != nil {
+		t.Fatalf("a second Recover: %v", err)
+	}
+	if len(tool.calls) != 0 {
+		t.Errorf("a second Recover wrote %v", tool.calls)
+	}
+}
+
+// TestRecoverRejectsAForeignRecord keeps a snapshot from another desktop from
+// being applied to this one, and keeps the record for an operator to inspect.
+func TestRecoverRejectsAForeignRecord(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers()}
+	path := filepath.Join(t.TempDir(), SnapshotFile)
+	snap := Snapshot{Backend: "another-desktop", Fields: []Field{{Key: "mode", Written: "'manual'"}}}
+	if err := saveSnapshot(path, snap); err != nil {
+		t.Fatalf("saveSnapshot: %v", err)
+	}
+	c := WithBackend(newGSettings(tool.run), nil, path)
+	if err := c.Recover(context.Background()); err == nil {
+		t.Fatal("a foreign takeover record was accepted")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the foreign record was discarded: %v", err)
+	}
+}
+
+// TestRegistryRestoreDeletesValuesThatWereMissing is the registry half of the
+// ownership rule: a value the user never had must be absent again, not present
+// with a zero or a stale address in it.
+func TestRegistryRestoreDeletesValuesThatWereMissing(t *testing.T) {
+	tool := &fakeTool{answers: map[string]string{}}
+	c := WithBackend(newRegistry(tool.run), nil, "")
+	if err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	tool.calls = nil
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	for _, name := range registryNames {
+		want := "reg delete " + internetSettingsKey + " /v " + name + " /f"
+		if !containsCall(tool.calls, want) {
+			t.Errorf("the value that did not exist was not deleted: %q\ncalls:\n%s", want, strings.Join(tool.calls, "\n"))
+		}
+	}
+}
+
+// TestRegistryRestorePutsBackExistingValues checks both halves together: an
+// existing value is restored to its old data, a value the user changed since
+// the takeover is kept, and the absence of a third value is restored as absence.
+func TestRegistryRestorePutsBackExistingValues(t *testing.T) {
+	answers := map[string]string{
+		"reg query " + internetSettingsKey + " /v ProxyEnable": "HKEY_CURRENT_USER\\...\n    ProxyEnable    REG_DWORD    0x0\n",
+		"reg query " + internetSettingsKey + " /v ProxyServer": "HKEY_CURRENT_USER\\...\n    ProxyServer    REG_SZ    proxy.corp:8080\n",
+	}
+	tool := &fakeTool{answers: answers}
+	c := WithBackend(newRegistry(tool.run), nil, "")
+	if err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	// The user edits ProxyServer while the daemon runs.
+	tool.answers["reg query "+internetSettingsKey+" /v ProxyServer"] =
+		"HKEY_CURRENT_USER\\...\n    ProxyServer    REG_SZ    user.proxy:3128\n"
+	tool.calls = nil
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if !containsCall(tool.calls, "reg add "+internetSettingsKey+" /v ProxyEnable /t REG_DWORD /d 0 /f") {
+		t.Errorf("the previous enable flag was not restored:\n%s", strings.Join(tool.calls, "\n"))
+	}
+	if !containsCall(tool.calls, "reg delete "+internetSettingsKey+" /v ProxyOverride /f") {
+		t.Errorf("the value that was absent was not deleted:\n%s", strings.Join(tool.calls, "\n"))
+	}
+	if containsCall(tool.calls, "reg add "+internetSettingsKey+" /v ProxyServer /t REG_SZ /d proxy.corp:8080 /f") ||
+		containsCall(tool.calls, "reg delete "+internetSettingsKey+" /v ProxyServer /f") {
+		t.Errorf("the value the user changed was overwritten:\n%s", strings.Join(tool.calls, "\n"))
+	}
+}
+
+// TestValueComparisonsIgnoreTheDesktopsFormatting pins the two normalisations
+// a restore depends on: a reformatted list and a DWORD printed as hex.
+func TestValueComparisonsIgnoreTheDesktopsFormatting(t *testing.T) {
+	if !sameGVariant("['localhost', '127.0.0.1', '::1']", "['localhost','127.0.0.1','::1']") {
+		t.Error("a reformatted list was read as a user change")
+	}
+	if sameGVariant("'auto'", "'manual'") {
+		t.Error("a changed mode was read as unchanged")
+	}
+	if !sameRegistryData("0x1", "1", "REG_DWORD") {
+		t.Error("a DWORD printed as hex was read as a user change")
+	}
+	if sameRegistryData("0x0", "1", "REG_DWORD") {
+		t.Error("a changed DWORD was read as unchanged")
 	}
 }
 

@@ -7,6 +7,12 @@ import (
 	"strings"
 )
 
+// registryNames are the values this backend takes over, in write order. The
+// enable flag is last: while the addresses are being written the proxy stays
+// off, so a failure cannot leave the machine sending traffic to a half written
+// address. A restore walks the list in reverse for the same reason.
+var registryNames = []string{valueServer, valueOverride, valueEnable}
+
 // internetSettingsKey is where the desktop keeps the proxy of the user.
 const internetSettingsKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
@@ -58,29 +64,85 @@ func (r *registry) Enabled(ctx context.Context) (bool, error) {
 	return on != 0, nil
 }
 
-// Apply implements Backend.
-//
-// The enable flag is written last. That order is the whole reason a failure here
-// cannot leave a machine with an enabled proxy that points somewhere wrong: as
-// long as the addresses are being written the proxy stays off.
-func (r *registry) Apply(ctx context.Context, s Settings) error {
-	before, err := r.snapshot(ctx)
-	if err != nil {
-		return err
-	}
-
-	server := proxyServerList(s)
-	writes := []registryValue{
-		{name: valueServer, kind: "REG_SZ", data: server},
+// registryWrites is the value each field gets during a takeover of s.
+func registryWrites(s Settings) []registryValue {
+	return []registryValue{
+		{name: valueServer, kind: "REG_SZ", data: proxyServerList(s)},
 		{name: valueOverride, kind: "REG_SZ", data: strings.Join(s.BypassList(), ";")},
 		{name: valueEnable, kind: "REG_DWORD", data: "1"},
 	}
-	for _, w := range writes {
-		if err := r.add(ctx, w); err != nil {
-			return r.rollback(ctx, before, err)
+}
+
+// Plan implements Backend. A value that did not exist before the takeover is
+// recorded with Present=false, which is what makes a restore delete it instead
+// of leaving a zero value behind.
+func (r *registry) Plan(ctx context.Context, s Settings) (Snapshot, error) {
+	before, err := r.snapshot(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	fields := make([]Field, 0, len(registryWrites(s)))
+	for _, w := range registryWrites(s) {
+		f := Field{
+			Key:         w.name,
+			Written:     w.data,
+			WrittenKind: w.kind,
+		}
+		if old, ok := findRegistryValue(before, w.name); ok {
+			f.Present = true
+			f.Before = canonicalRegistryData(old.data, old.kind)
+			f.BeforeKind = old.kind
+		}
+		fields = append(fields, f)
+	}
+	return Snapshot{Fields: fields}, nil
+}
+
+// Commit implements Backend.
+func (r *registry) Commit(ctx context.Context, snap Snapshot) error {
+	for _, f := range snap.Fields {
+		if err := r.add(ctx, registryValue{name: f.Key, kind: f.WrittenKind, data: f.Written}); err != nil {
+			return r.rollback(ctx, snapshotValues(snap.Fields), err)
 		}
 	}
 	return nil
+}
+
+// Restore implements Backend.
+func (r *registry) Restore(ctx context.Context, snap Snapshot) (RestoreResult, error) {
+	return restoreFields(snap.Fields,
+		func(f Field) (registryValue, bool, error) {
+			values, err := r.read(ctx, f.Key)
+			if err != nil {
+				return registryValue{}, false, err
+			}
+			if len(values) == 0 {
+				return registryValue{}, false, nil
+			}
+			return values[0], true, nil
+		},
+		func(f Field, current registryValue) bool {
+			return strings.EqualFold(current.kind, f.WrittenKind) &&
+				sameRegistryData(current.data, f.Written, f.WrittenKind)
+		},
+		func(f Field) error {
+			return r.add(ctx, registryValue{name: f.Key, kind: f.BeforeKind, data: f.Before})
+		},
+		func(f Field) error {
+			_, err := r.run(ctx, "reg", "delete", internetSettingsKey, "/v", f.Key, "/f")
+			return err
+		},
+	)
+}
+
+// Apply is the one-shot form of Plan plus Commit, kept for callers that do not
+// need the takeover to be recorded and restored later.
+func (r *registry) Apply(ctx context.Context, s Settings) error {
+	snap, err := r.Plan(ctx, s)
+	if err != nil {
+		return err
+	}
+	return r.Commit(ctx, snap)
 }
 
 // Clear implements Backend.
@@ -94,7 +156,62 @@ func (r *registry) Clear(ctx context.Context) error {
 
 // snapshot captures the three values this backend writes.
 func (r *registry) snapshot(ctx context.Context) ([]registryValue, error) {
-	return r.read(ctx, valueEnable, valueServer, valueOverride)
+	return r.read(ctx, registryNames...)
+}
+
+// snapshotValues turns the persisted fields back into registry values for the
+// rollback path. Values that were absent are simply not in the result, and
+// rollback deletes them.
+func snapshotValues(fields []Field) []registryValue {
+	out := make([]registryValue, 0, len(fields))
+	for _, f := range fields {
+		if f.Present {
+			out = append(out, registryValue{name: f.Key, kind: f.BeforeKind, data: f.Before})
+		}
+	}
+	return out
+}
+
+// findRegistryValue looks a captured value up by name. reg.exe echoes the name
+// as it was queried, but the comparison stays case insensitive because the
+// registry itself treats value names that way.
+func findRegistryValue(values []registryValue, name string) (registryValue, bool) {
+	for _, v := range values {
+		if strings.EqualFold(v.name, name) {
+			return v, true
+		}
+	}
+	return registryValue{}, false
+}
+
+// canonicalRegistryData renders a value read from reg.exe in the form a later
+// reg add accepts. A DWORD is printed as 0x0 but is written as decimal, so a
+// snapshot that kept the hex spelling would restore it ambiguously.
+func canonicalRegistryData(data, kind string) string {
+	value := strings.TrimSpace(data)
+	if !strings.EqualFold(strings.TrimSpace(kind), "REG_DWORD") {
+		return value
+	}
+	n, err := strconv.ParseUint(strings.TrimPrefix(strings.ToLower(value), "0x"), 16, 32)
+	if err != nil {
+		return value
+	}
+	return strconv.FormatUint(n, 10)
+}
+
+// sameRegistryData compares a value read back from the registry with the one
+// this program wrote. reg.exe prints a DWORD as 0x1 while the write takes 1,
+// so the two spellings have to compare equal.
+func sameRegistryData(current, written, kind string) bool {
+	if !strings.EqualFold(strings.TrimSpace(kind), "REG_DWORD") {
+		return strings.TrimSpace(current) == strings.TrimSpace(written)
+	}
+	parse := func(value string) (uint64, error) {
+		return strconv.ParseUint(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(value)), "0x"), 16, 32)
+	}
+	a, errA := parse(current)
+	b, errB := parse(written)
+	return errA == nil && errB == nil && a == b
 }
 
 // read returns the values that exist among names.

@@ -23,6 +23,9 @@
 | 10 | VLESS（含 REALITY）、自研 TLS 1.3、Hysteria2、TUIC v5 | 完成 |
 | 11 | 第三方参考实现互通验证、分享链接解析、订阅导入与定时更新 | 完成 |
 | 12 | 收尾件：SQLite 观测层、系统代理接入、重载继承选择 | 完成 |
+| 13 | GUI 第一步：Tauri 骨架与架构 | 完成（Rust 壳未编译） |
+| 14 | GUI 第二步：规则 / 日志 / 设置 | 完成（Rust 壳未编译） |
+| 15 | 按外部评审修订的修复批（9 项） | 完成（QUIC 真实互通待环境复验） |
 
 ---
 
@@ -2862,3 +2865,212 @@ TUIC v5）连同所有 UDP 行为如实留白。
 3. 规则页接规则集内容预览与命中历史；日志页接时间范围、搜索、导出与
    `/v1/history/events`，并评估服务端流式订阅。
 4. 之后是连接页历史与流量曲线、系统托盘、Logo 矢量化与图标资产、安装包与 README 更新。
+
+### 阶段 15 开工前依赖说明（第 3 项 QPACK）
+
+- 不引入 QPACK 编解码库；自研 h3 头部块编解码保留。响应侧需要能解 Huffman 编码的
+  字符串（成熟 QPACK 编码器会对常见串启用 Huffman），仅把已在模块图内的
+  `golang.org/x/net v0.56.0`（BSD-3-Clause，与 GPLv3 兼容，源码已在本机模块缓存）
+  从间接依赖升为直接依赖，使用 `http2/hpack` 的 Huffman 解码；不增新模块、不联网。
+- 理由：手写 257 项 Huffman 码表易错且无法与成熟实现逐项对照；复用其码表可把
+  「与规范一致」固定为已知答案测试。版本与许可证如上，用途仅限字符串编解码。
+
+---
+
+## 阶段 15 — 按外部评审修订的修复批（2026-11-15）
+
+任务来源：仓库外评审文件 `melonarc-review-gpt-20261115.md`（只读参考，未拷入仓库）。
+本阶段只做评审点名的 9 项修复，逐项单独实现、单独补测试、尽量少动；不改
+`spikes/`、不改 `docs/development-doc-v1.md`、不动六个前端面板的功能。
+
+### 逐项修复内容与证据口径
+
+1. **QUIC 互通夹具信任注入（第 1 项，`31dd276`）**
+   - `trustDialer` 原来只认 `*Trojan` / `*VLESS`（这两类保留可变 `TLSOptions`）；
+     Hysteria2 / TUIC 在构造期就把 TLS 选项编译进 `*tls.Config`，事后改不到。
+   - `Spec` 增加 `TLSConfig *tls.Config` 测试逃生口（配置层绝不设置），
+     夹具用 `trustSpec(spec, pool)` 在 `New(spec)` 前注入测试 CA；
+     生产 QUIC 拨号器显式命名 `dialQUICDefault`（`quic.DialAddr`），互通测试用
+     `useProductQUICDial` 恢复产品路径；进程内 QUIC 单测仍走既有的
+     `dialQUICConnected` 钩子，两者不合并。
+   - 新测试：`TestInteropQUICFixtureInjectsTrustAtConstruction`（hysteria2/tuic）、
+     `TestInteropQUICFixtureReachesSendtoBoundary`（hysteria2/tuic）——后者断言
+     拨号推进到 seccomp 的 `sendto` 边界（EPERM）。
+   - **证据口径**：本机 seccomp 禁止未连接套接字 `sendto`，QUIC 首程无法真实互通；
+     本项验收只到「夹具注入信任 + 拨号到达 `sendto` 边界」。Hysteria2 / TUIC
+     **仍按「已知不可用、修复进行中」口径**，不得写成已互通；真实互通待环境复验。
+
+2. **TUIC 认证：导出标签用 UUID 原始字节（第 2 项，`31dd276`）**
+   - 参考实现用 `uuid.as_ref()`（16 字节原始值）作 TLS exporter 标签；本实现原来
+     用格式化 UUID 文本，导致外部实现认证必败（评审 TUIC 失败根因）。
+   - 改为 `string(id[:])`（`tuicExporterLabel`），密码仍是上下文，令牌长度仍 32 字节。
+   - 已知答案测试：`TestTUICExporterLabelKnownAnswer`、
+     `TestTUICAuthenticationTokenKnownAnswer`；自研测试对端同步改为原始字节。
+
+3. **HTTP/3 QPACK 头部块对齐 RFC 9204（第 3 项，`31dd276`）**
+   - 原实现漏了 §4.5.1 的编码字段段前缀（必需插入计数 8 位前缀 + S/Delta Base
+     7 位前缀），静态表也不全；外部实现回包解不开，即评审 Hysteria2
+     错误码 512 / 字段段解码失败的根因。
+   - 补齐：每个头部块带 `0x00 0x00` 前缀（本客户端无动态表，插入计数必须为 0，
+     非零即拒）；静态表补全 99 行；字符串支持 Huffman 解码（复用
+     `golang.org/x/net/http2/hpack` 的码表，依赖登记见下方「开工前依赖说明」）；
+     静态表越界索引由静默丢字段改为报错。
+   - 已知答案测试：RFC 9204 附录 B 向量（B.1 字面量、B.2 / B.4 动态表应拒）、
+     `TestH3StaticTableIsComplete`（99 行）、Huffman 解码、前缀整数扩展用例；
+     自研 QUIC 测试对端的响应块同步加前缀。
+
+4. **启动输出不再泄露 Bearer 令牌（第 4 项，`696755b`）**
+   - 原来 `fmt.Printf` 直接把完整令牌打到 stdout。现在 `announceAPI` 只打印
+     监听地址与令牌文件路径，结构化日志同样只带 `token_file`。
+   - 测试 `TestStartupOutputDoesNotDiscloseToken`：对 stdout 与日志分别断言
+     不含令牌本体、且含文件路径。
+
+5. **凭据连接的地址校验三处统一（第 5 项，`f41df25`）**
+   - 统一口径：按 IP 类型判断回环（不做字符串前缀匹配）；`localhost` 必须解析并
+     逐一验证解析结果全部为回环后才连接已验证的地址；IPv6 用规范括号形式；
+     凭据请求禁远端代理（`Proxy = nil` / 裸 `TcpStream`）、禁重定向
+     （`http.ErrUseLastResponse`）。
+   - Go CLI：`resolveAPITarget` / `loopbackIP`，请求钉死到已验证地址的拨号器。
+   - JS 预览桥（`dev-preview.mjs` + 新共享模块 `address.mjs`）：启动即
+     `assertDevelopmentOnly()`（`NODE_ENV=production` 拒绝启动）；API 地址走
+     `resolveAddress`；`/bridge` 校验 Host 与浏览器 Origin（写请求必须有合法
+     Origin）；目标路径走 `validateBridgeTarget`；上游请求头经
+     `upstreamRequestOptions` 统一构造（不带令牌，令牌单独注入）。
+   - Rust 壳（`settings.rs` / `api.rs`）：`Settings` 改存 `api_addrs: Vec<SocketAddr>`
+     （读设置时已验证的回环地址，连接期只拨这些地址并再验回环）+
+     规范括号 `api_label`；`connect` 用裸 `TcpStream::connect_timeout`，
+     无环境代理、无重定向（3xx 原样返回）。**仅源码交付**：本机无
+     `rustc` / `cargo`，未编译，沿用阶段 13/14 挂账。
+   - 测试：Go 侧 `TestAPIBaseNormalisation` 扩展（规范 IPv6、https/私网/域名/
+     userinfo/路径/查询/缺端口拒绝）、`TestAPIBaseRejectsNonLoopbackByIPType`、
+     `TestLocalhostMustResolveOnlyToLoopback`（混入非回环解析结果必须拒）、
+     `TestCredentialedRequestRefusesRedirectsAndProxy`（真实 HTTP 服务端 +
+     环境代理变量，断言不跟随、不走代理）；JS 侧新增 `address.test.mjs` 与
+     `paths.test.mjs` 扩展共 8 条；Rust 侧 `#[cfg(test)]` 单测随源码交付、未编译。
+
+6. **SQLite 历史保全：不再用空表覆盖（第 6 项，`dba1db8`）**
+   - 原行为：打不开 / 版本不认识的库文件照常以空表继续，`Flush` 时用
+     原子重写把原文件覆盖掉，历史不可逆丢失。
+   - 新行为：读不开 / `userVersion` 不认识 / 表读失败 → 进入 `preserve` 态
+     （`ErrHistoryPreserved`）：原文件原地保全、字节不动，`Flush` 与
+     `Close` 前的最后落盘一律拒绝替换并返回显式包装错误；`Close` 不把
+     拒绝视为停机失败；`Notice` 全程说明「原文件已保全、写入挂起」，
+     经 `/v1/history` 与 CLI `note:` 透出。选择原地保全而非备份改名：
+     谁都不该替用户动它的历史文件，明确报错 + 手动移走是更安全的契约。
+   - 测试：`TestStorePreservesACorruptFile`（损坏夹具）、
+     `TestStorePreservesAFileFromAnotherVersion`（合法镜像 + `userVersion+1`），
+     均断言 `Flush` 返回 `ErrHistoryPreserved`、原文件字节不变、重启后仍保全；
+     原 `TestStoreReplacesAFileItCannotRead`（旧语义）删除。
+   - modernc 驱动迁移列入后续计划（见遗留问题）。
+
+7. **系统代理释放：恢复接管前快照（第 7 项，`bedf0ca`）**
+   - 原行为 `Release` 只是清空代理（gsettings 置 `none` / 注册表置 `0x0`），
+     用户接管前的手工代理配置被抹掉。
+   - 新行为：`Enable` 前先拍快照（每个后端先读后写），持久化到
+     `<data-dir>/system-proxy.json`（临时文件 + Rename，0600）；`Release` 恢复
+     快照——只恢复「当前值仍等于本程序写入值」的字段，用户改过的字段不动，
+     接管前就不存在的注册表值恢复为不存在（删除）；进程重启后由
+     `recoverSnapshot` 从盘上记录恢复，后端不匹配（换机器/换后端）则保留记录
+     并显式报错，不盲目写。快照恢复成功后删除盘上记录。
+   - `Backend` 接口 `Clear` → `Restore(Snapshot)`；gsettings 逐键读回、列表按
+     条目比较（GVariant 重排格式不算用户改动）；注册表 DWORD 读回的 `0x0`
+     归一化后与写入值比较。
+   - 测试：正常恢复（逐字段回写、快照文件删除）、用户改过的字段不覆盖、
+     跨进程重启的快照恢复（模拟：启用 → 释放后重开控制器）、失败回滚、
+     后端不匹配保留记录；`cmd/melonarc-core` 侧 `fakeProxy` 同步适配。
+
+8. **REALITY TLS 1.3 服务器 CertificateVerify 验签（第 8 项，`c959c4d`）**
+   - 原实现对 `CertificateVerify` 只挂进转录不验签（注释明说赌调用方不依赖
+     证书链）；REALITY 的认证恰恰经过这条握手，服务器签名必须验。
+   - 新行为：按 RFC 8446 §4.4.3 验证——签名内容是固定上下文串 +
+     握手转录哈希，用证书叶子公钥（ECDSA P-256 / Ed25519）验证；消息顺序
+     强制 Certificate → CertificateVerify → Finished，任何失败在**任何业务
+     数据送达之前**终止握手。`Options.VerifyPeer` 钩子保留，收原始证书链。
+   - 不引新 TLS 库、不做指纹仿真、不做会话复用（约束不变）。
+   - 测试（`tls13_certverify_test.go`）：正例用独立 `crypto/tls` 服务器
+     （ECDSA / Ed25519 两种真实签名）；负例：改签名一个字节、签错转录
+     （换 ClientHello 后重签）、错误密钥类型（RSA 公钥）、算法不匹配、
+     长度不符、截断，全部断言拨号失败且连接上收不到应用数据。
+   - **证据口径**：仅单元/已知答案 + 独立标准库对端验证，上游参考实现
+     互通未复跑；换库评估列入后续计划。
+
+9. **README 支持矩阵改为证据口径（第 9 项，`914a418`）**
+   - 删除 MVP 时代的过期承诺（如「加密出站未实现」），改为逐协议
+     TCP / UDP 验证状态 + 证据环境：明确区分外部评审（macOS arm64、
+     2026-11-15）的阶段 11 七组 TCP/UDP 通过、Hysteria2 / TUIC 三轮全败
+     （错误码 512 / 认证失败，修复已落码但**未在本机复验真实互通**）、
+     本机 seccomp 限制下未验证的 UDP 路径清单；Windows 标注仅交叉编译；
+     性能目标标注未在真实硬件实测；REALITY 验签标注「单元已验、互通未复跑」。
+   - 命名红线扫描通过（无非开源商业产品名称）。
+
+### 关键决策
+
+- **QUIC 验收口径降级为本机可达边界**：第 1/3 项的验收只到「夹具注入 +
+  RFC 向量已知答案 + 拨号到达 `sendto EPERM`」，不在 DEVLOG 里把 QUIC 互通
+  写成已修复/已通过；真实互通复验是遗留问题。
+- **第 3 项不引 QPACK 编解码库**：仅把模块图内已有的 `golang.org/x/net v0.56.0`
+  （BSD-3-Clause，GPLv3 兼容）从间接升为直接依赖，用 `http2/hpack` 的
+  Huffman 解码；登记见上方「阶段 15 开工前依赖说明」。除此之外零新依赖，
+  `go.sum` 无新模块。
+- **第 6 项原地保全而非备份改名**：打不开的历史文件一个字节都不动，
+  写入挂起 + 显式报错 + 提示手动移走；避免任何自动改名覆盖用户数据。
+- **第 7 项「只恢复仍等于本程序写入值的字段」**：快照恢复不是无条件倒带，
+  用户在接管期间的修改保留；注册表「恢复为不存在」用删除实现。
+- **第 5 项 Rust 侧只交源码**：无工具链，静态核对 + 单测随源码交付，
+  编译验证挂账。
+- 令牌输出、地址校验、历史保全、快照恢复的测试都写在各自包内，
+  全部不需要外部环境。
+
+### 当前状态
+
+- 提交（本地，未推送）：`31dd276`（第 1–3 项）→ `696755b`（第 4 项）→
+  `f41df25`（第 5 项）→ `dba1db8`（第 6 项）→ `bedf0ca`（第 7 项）→
+  `c959c4d`（第 8 项）→ `914a418`（第 9 项 README）→ 本记录（docs）。
+- Go 验收五连全绿、无回退、通过数上升：
+  `go build ./...`、`go vet ./...`、`gofmt -l .`（无输出）、
+  `GOOS=windows go build ./cmd/... ./internal/...` 通过；
+  `go test ./... -count=1 -v` **1140 条目 / 1119 通过 / 21 跳过 / 0 失败**
+  （基线 1085 / 1064 / 21 / 0：条目 +55、通过 +55，全部来自本阶段新测试）。
+  **零新增跳过**：21 条跳过与基线完全同一集合（seccomp 环境的 UDP 往返/
+  互通二进制缺失类用例）。两个新 QUIC 夹具测试（注入信任、到达 sendto 边界）
+  在本机**通过**而非跳过。
+- 前端离线测试（托管 Node 22.22.2，清代理 + 串行）：
+  **58 条目 / 56 通过 / 2 跳过 / 0 失败**（基线 50 / 48 / 2 / 0，+8 条来自
+  第 5 项；2 条跳过仍是既有的「需真实核心」用例，无新增跳过）。
+- 前端实时测试（系统 Node 24.22.1，挂重建的 `/tmp/arc/demo.conf` 演示核心、
+  真实令牌文件，`MELONARC_TEST_API` / `MELONARC_TEST_DATA_DIR`）：
+  **58 条目 / 58 通过 / 0 跳过 / 0 失败**（基线 50 / 50 / 0 / 0，+8 条同样全过；
+  含对真实核心的策略切换/回读、规则解释、审计与「任何应答不含令牌」检查）。
+  演示核心启动输出实测只有监听地址与令牌文件路径（第 4 项的直接旁证）。
+- 前端六面板功能无回退：面板注册、i18n、构建校验相关离线用例全部通过。
+- 命名红线：本阶段所有新增/修改源码、测试、README 与各条提交信息已扫描，
+  无非开源商业产品名称。
+
+### 遗留问题
+
+- **QUIC 真实互通待环境复验**：Hysteria2 / TUIC 的修复（信任注入、UUID 原始
+  字节标签、RFC 9204 头部块）已落码并有已知答案测试，但本机 seccomp 不允许
+  QUIC 首程真实收发；需在无此限制的环境对参考实现服务器复验，通过后才可把
+  两者从「已知不可用」改为「已验证」。
+- **Rust 壳仍未编译**：第 5 项改动沿用阶段 13/14 挂账，`cargo build` /
+  `Cargo.lock` / 原生窗口验证全部待有 `rustc` + WebKitGTK 的机器。
+- **SQLite 驱动迁移（后续计划）**：自研最小写端保持现状；迁到
+  `modernc.org/sqlite`（纯 Go、无 CGO）作为后续独立阶段评估，届时按约定
+  登记版本 / 许可证 / 用途并用系统 sqlite3 CLI 做 oracle 对照。
+- **REALITY 换库评估（后续计划）**：自研 TLS 1.3 现已含 CertificateVerify
+  验签，但仍是不支持会话复用 / 0-RTT / HRR 的受限实现；是否换成熟库
+  （以及指纹兼容性取舍）作为后续独立评估，不随本阶段决策。
+- **预览桥丢弃 query string（既有缺口，非本阶段回归）**：
+  `dev-preview.mjs` 的 `/bridge` 转发只取 `url.pathname`，`?limit=…` 之类
+  查询参数到不了上游；阶段 13 起即如此，本阶段保持不动，记为后续修复项。
+- 沿用阶段 14 全部挂账：托管 Node 22 的 undici Wasm 环境瑕疵、`dist/` 陈旧
+  产物、GUI 设置重启生效、规则集/日志功能缺口等。
+
+### 下一步计划
+
+1. 在可用环境复验 QUIC 真实互通（Hysteria2 / TUIC 对参考实现服务器，
+   TCP + UDP），把结论按证据写回 DEVLOG 与 README 支持矩阵。
+2. 修复预览桥 query string 透传（小改动 + 一条实时用例）。
+3. 评估 SQLite modernc 驱动迁移与 REALITY 换库两项后续计划，先登记
+   依赖与许可证再动手。
+4. 找有 Rust 工具链的机器补编译验证、`Cargo.lock` 与传递依赖许可证复核。

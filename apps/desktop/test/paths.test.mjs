@@ -61,3 +61,12 @@ test("an address must be host:port", () => {
   assert.throws(() => parseAddress("127.0.0.1:0"), /not a port/);
   assert.throws(() => parseAddress("127.0.0.1:99999"), /not a port/);
 });
+
+test("IPv6 is canonicalised into the bracketed form", () => {
+  assert.deepEqual(parseAddress("[0:0:0:0:0:0:0:1]:7946"), { host: "::1", port: 7946, label: "[::1]:7946" });
+  assert.deepEqual(parseAddress("[2001:db8:0:0:0:0:0:1]:7946"), {
+    host: "2001:db8::1", port: 7946, label: "[2001:db8::1]:7946",
+  });
+  assert.throws(() => parseAddress("::1:7946"), /not an address/);
+  assert.throws(() => parseAddress("[127.0.0.1]:7946"), /not an address/);
+});
