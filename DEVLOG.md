@@ -3074,3 +3074,242 @@ TUIC v5）连同所有 UDP 行为如实留白。
 3. 评估 SQLite modernc 驱动迁移与 REALITY 换库两项后续计划，先登记
    依赖与许可证再动手。
 4. 找有 Rust 工具链的机器补编译验证、`Cargo.lock` 与传递依赖许可证复核。
+
+## 阶段 16 — REALITY 握手改用锁版 uTLS + 薄适配（2026-11-15）
+
+外部评审 7 项修复批（阶段 15）之后，REALITY 的剩余问题不再是某一条校验，而是
+「自研 TLS 1.3 手写实现」这个决定本身：它不支持会话复用、0-RTT、HRR，握手消息
+顺序与验签全靠自己维护，每加一条规则都要再证明一次没有绕过。本阶段按所有者决策
+（方案 B）换掉它：**握手交给锁版 uTLS，本仓库只留 REALITY 自己那一层**。
+
+### 开工前的判断
+
+`DEVLOG` 阶段 10/11 记录的是自研 `tls13.go` 的完整实现与当时对 Xray-core
+26.11.9 的互通结果；阶段 15 第 8 项给它补了 CertificateVerify 验签。开工前
+`git status` 干净，`HEAD = 575fc24`（阶段 15 收尾），符合任务书基线。
+
+**锁版依据**：uTLS 版本取自 Xray-core v26.11.9 的 `go.mod`，即
+`github.com/refraction-networking/utls v1.8.3-0.20261108164504-a13c59ffe98b`
+（伪版本，commit `a13c59ffe98b`，2026-11-08T16:45:04Z）。不取最新、不浮动升级：
+服务端与客户端用同一份 ClientHello 解析与指纹代码，版本一旦分叉，"我发出的
+形状"和"它能接受的形状"就又是两件事。
+
+该提交的公开 API 与 v1.8.2 不同名，照旧版记忆写必然编译失败：
+
+- `PubClientHandshakeState`（不是 `ClientHandshakeState`）、`PubClientHelloMsg`；
+- `State13.KeyShareKeys *KeySharePrivateKeys{Ecdhe, Mlkem, MlkemEcdhe}`。
+
+### 完成工作
+
+1. **依赖落位**（`go.mod` / `go.sum`）：`go mod edit -require` 写入上述伪版本后
+   `GOPROXY=off go mod tidy`。MVS 连带升版 `golang.org/x/crypto` 0.54.0→0.57.0、
+   `golang.org/x/net` 0.56.0→0.59.0（后者由间接转直接，因为 QPACK 码表本来就在用），
+   新增两个间接模块 `github.com/klauspost/compress v1.20.1`、
+   `github.com/molecule-man/go-brrr v1.2.0`（uTLS 的 `u_handshake_client.go`
+   无条件 import `zstd` 与 `brrr`，缺一个就编译不过）。逐项登记见下。
+2. **适配层重写**（`internal/outbound/reality.go`）：`RealityOptions.Dial` 现在只做
+   REALITY 独有的四件事，其余全部交给 uTLS：
+   - 用 `utls.HelloChrome_Auto` 建 ClientHello，取本次握手的密钥材料；
+   - 把 16 字节明文（3 版本 + 1 保留 + 4 时间戳 + short id）用
+     `HKDF-SHA256(shared, salt=random[0:20], "REALITY")` 派生的密钥封进 legacy
+     session id，AAD = session id 清零后的 ClientHello；
+   - 从证书回调里验服务端凭据（`HMAC-SHA512(authKey, leaf public key)` 与证书
+     签名域逐字节比较），复用原有 `realityVerifyCertificate`；
+   - 只有握手完成（含客户端 Finished 已发出）且凭据验过才返回 `net.Conn`。
+3. **删除自研握手**：`internal/outbound/tls13.go`（1056 行）与
+   `tls13_certverify_test.go`（286 行）同批删除。删除前逐文件核查引用面：生产代码
+   只有 `RealityOptions.Dial` 一处调用，测试侧只有上述两个文件与 `reality_test.go`
+   的 `TestTLS13AgainstStdlibServer`；`tls13SessionIDOffset` 被本地测试对端使用，已搬
+   进适配层并改名 `realitySessionIDOffset`（与 `realitySessionIDLen` 同处声明）。
+   没有第二个调用方，因此没有"停下报告"的分支。
+4. **本地对端与测试改造**：`reality_test.go` 的本地服务端按 uTLS 产出的形状改写
+   （key share 遍历要容忍 GREASE 与未知组；认证用的 X25519 取"独立 share"，
+   混合 share 只作兜底；首记录必须是 handshake 而非 CCS），并删掉
+   `TestTLS13AgainstStdlibServer`（它测的客户端已不存在）。
+5. **新增测试装置**：`tlspeer_test.go` 是一个只存在于测试里的**脚本化 TLS 1.3
+   服务端**，自己讲记录层（HKDF 标签、AEAD、transcript、Finished MAC）。理由：
+   想验证的失败全在握手的负空间里——缺/重/乱序的 CertificateVerify、签错摘要、
+   错凭据、错 Finished——`crypto/tls` 只会发一个正确且有序的 flight，造不出来。
+   `reality_handshake_test.go` 在其上落了 14 个用例（含 10 个子用例）。
+6. **README 支持矩阵**：REALITY 行更新为阶段 16 口径（TCP 仍是「项目内记录」，
+   UDP 仍无证据）。
+
+### 关键决策与理由
+
+1. **回调不返回 nil 就等于成功 —— 这条必须堵死**。`InsecureSkipVerify` 下
+   `VerifyPeerCertificate` 是唯一接受对端的入口，所以回调里先查
+   `len(verifiedChains) > 0`：链能验通说明握手到的是**被模仿的真实站点**而不是
+   服务器，直接拒绝；再用 REALITY 凭据判定，成功才置 `verified`。`Dial` 结束时
+   除了 `HandshakeComplete` / `VersionTLS13` / `!DidResume`，还要查 `verified`：
+   回调从未被调用（比如对端根本没发证书）时不会留下"空成功"。
+   这正是任务书第 2 项要求的「不得把证书回调返回 nil 当作 REALITY 成功」。
+2. **关掉会话复用与 0-RTT**：`SessionTicketsDisabled: true`，不设 `ClientSessionCache`。
+   复用会跳过携带服务端凭据的 Certificate 消息，而 session id 又必须留给
+   客户端那一半证明，两者不能共存。任务书第 5 项也明确不做 PSK 与 early data，
+   因此在 VLESS 请求头层面不可能出现"提前写"。
+3. **模板与上游的对应关系如实记录，不做指纹承诺**：`HelloChrome_Auto` 在本版本
+   就等于 `HelloChrome_155`（Chrome 155 的 parrot），所以客户端形状是"某个
+   Chrome 版本的形状"，不是"任意 Chrome 都认"。相对该模板只有两处**故意**偏离，
+   都写在 `realityShapeHello` 的注释里：
+   - 签名算法补 `ed25519`：凭据是 Ed25519 证书，而该模板的列表里没有它，
+     不加就在证书选择阶段就死，REALITY 检查根本轮不到；
+   - ALPN 用配置里的列表替换模板自带列表（`h2`/`http/1.1`），因为真正跑在
+     上面的是 VLESS 而不是浏览器。
+   两处都改在**扩展对象**上再 `MarshalClientHello()`，不是改字节：字段与扩展
+   必须同时前进，否则"发出去的列表"和"拿来校验服务端的列表"会不一致。
+4. **AAD 必须用真正发出去的那份字节**。`PubClientHelloMsg.Raw` 在本版本就是
+   `clientHelloMsg.original`（同名同偏移的结构体视图），而 TLS 1.3 握手写的是
+   `hello.original`，即 `Raw` 原样落盘。反过来，"从字段重新 marshal 一遍"会丢掉
+   模板里的 GREASE、padding、ECH GREASE 等只存在于扩展对象里的内容，得到的是
+   **另一个** ClientHello。第一版就是这么错的，表现为本地对端回
+   "the session id was not sealed with this key"：封的时候用的是一份重新 marshal
+   出来的字节，对端收到的却是 `Raw` 那一份，两者长度就不相等。现在改为：
+   清零 `Raw` 里的 session id 段 → 用它做 AAD 算封文 → 把封文写回 `Raw` 同一段；
+   实测发出记录的负载与 `hello.Raw` 逐字节相同（1978 = 1978，某一轮的形状）。
+5. **认证密钥取"独立 X25519 share"，不取混合 share 的经典半段**。这条是**真实
+   互通打出来的**，本地测试反而会掩盖它：脚本化对端若跟着客户端一起选错，两边
+   自洽，永远绿。第一次互通时 Xray 日志是
+   `REALITY: processed invalid connection …: failed to read client hello`，
+   而客户端收到的是被模仿站点的 ECDSA 证书——即服务端把这次握手当成了未认证
+   探测并转给了 `dest`。把密钥来源从 `KeyShareKeys.MlkemEcdhe` 换成
+   `KeyShareKeys.Ecdhe` 后互通立刻通过（同一份 hello、同一份模板）。
+   现在代码顺序是 `Ecdhe` 优先、`MlkemEcdhe` 兜底，本地对端
+   （`peerClassicalShare` 与 `reality_test.go`）同步改成同一规则，避免测试与
+   实现对"哪个 share"各执一词。
+6. **失败零业务数据的断言放在对端字节预算上，不放在 sleep 上**。脚本化对端在
+   发完认证段后开始记录客户端后续字节；拒绝一次握手时，客户端只可能写
+   "一个兼容 CCS（6 字节）+ 一个加密 alert（5+2+1+16=24 字节）"共 30 字节，
+   而客户端 Finished 光自己就是 5+4+32+16=57 字节、还必须在 VLESS 请求之前，
+   因此 30 字节的预算里装不下任何隧道前言。成功路径则用**字节偏移**证明顺序：
+   请求所在记录的结束偏移必须严格大于 Finished 记录的结束偏移。
+7. **不拷贝上游文件**。适配层是照 REALITY 协议与 uTLS 公开 API 重写的调用代码，
+   没有整文件、也没有片段来自 Xray-core 或 uTLS 源码，因此不涉及 MPL-2.0 双许可
+   声明（uTLS 本体是 BSD-3-Clause，见登记表）；`unsafe` 只存在于 uTLS 内部，
+   适配层没有引入。
+
+### 依赖登记（本阶段）
+
+`go.mod` 变动：新增 1 个直接依赖、1 个直接依赖升版、1 个间接转直接升版、
+2 个新增间接依赖。**下表取代此前各阶段对同一模块的版本数字**（旧值已就地更新，
+不留两份互相矛盾的记录）：`golang.org/x/crypto` 原记 v0.54.0、`golang.org/x/net`
+原记 v0.56.0，本阶段起分别为 v0.57.0 / v0.59.0。
+
+| 组件 | 版本 | 许可证 | 用途 | 与 GPLv3 |
+|---|---|---|---|---|
+| `github.com/refraction-networking/utls` | v1.8.3-0.20261108164504-a13c59ffe98b（锁版，源自 Xray-core v26.11.9 的 go.mod） | BSD-3-Clause（Go Authors） | 客户端 TLS 1.3 握手：ClientHello 构造与模板、密钥调度、记录层、消息顺序、CertificateVerify 验签、Finished 收发 | 兼容 |
+| `golang.org/x/crypto` | v0.57.0（原 v0.54.0，uTLS 的 MVS 要求所致） | BSD-3-Clause（Go Authors） | `chacha20poly1305`/`argon2`（既有用途）＋ uTLS 依赖 | 兼容 |
+| `golang.org/x/net` | v0.59.0（原 v0.56.0，uTLS 的 MVS 要求所致；本阶段起为直接依赖） | BSD-3-Clause（Go Authors） | `http2/hpack` 码表（阶段 15 起）＋ uTLS 依赖 | 兼容 |
+| `golang.org/x/sys` | v0.50.0（未变；uTLS 也要求它，MVS 取两者较高者，仍是 0.50.0） | BSD-3-Clause（Go Authors） | TUN ioctl / poll / rtnetlink 常量（既有用途） | 兼容 |
+| `golang.org/x/text` | v0.42.0（仅 `go.sum` 的 `/go.mod` 摘要，不参与构建） | BSD-3-Clause（Go Authors） | `x/net` 的模块图需求；本仓库没有任何代码路径 import 它 | 兼容 |
+| `github.com/klauspost/compress` | v1.20.1（新增，间接） | BSD-3-Clause（Go Authors + Klaus Post） | uTLS 的 `u_handshake_client.go` 无条件 import `zstd`（证书压缩扩展）；本仓库代码不直接 import | 兼容 |
+| `github.com/molecule-man/go-brrr` | v1.2.0（新增，间接） | MIT | 同上，uTLS 无条件 import 的 brotli 实现（证书压缩扩展）；本仓库代码不直接 import | 兼容 |
+| `github.com/quic-go/quic-go` | v0.65.0（未变） | MIT | QUIC 传输（既有用途） | 兼容 |
+| `github.com/oschwald/maxminddb-golang` | v1.13.1（未变） | ISC | mmdb 读取（既有用途） | 兼容 |
+
+说明：`klauspost/compress` 与 `go-brrr` 是 uTLS 的**编译期**硬依赖（不是可选的
+构建标签），因此"零依赖"的红线在本阶段被一次性地改写为"新增依赖必须锁版并登记"。
+它们不进入本仓库源码，只在构建时链接。
+
+### 验收证据
+
+**（1）消息顺序：缺失、重复、乱序都必须被拒，且证明适配层没有绕过。**
+uTLS 自己维护状态机，测试用脚本化对端发出被篡改的认证段，实测拒绝原因逐条如下
+（三条都是 uTLS 的 `unexpectedMessageError`，说明判定发生在库内而不是适配层）：
+
+- 缺 CertificateVerify（`ECF`）：`received unexpected handshake message of type
+  *tls.finishedMsg when waiting for *tls.certificateVerifyMsg`；
+- 重复 CertificateVerify（`ECVVF`）：`… of type *tls.certificateVerifyMsg when
+  waiting for *tls.finishedMsg`；
+- 乱序（`CEVF` / `EFCV` / `CVEF`）：`… when waiting for *tls.encryptedExtensionsMsg`
+  / `… when waiting for *tls.certificateMsgTLS13`。
+
+**（2）三类独立负例，各自至少一个，且都必须被拒**（另覆盖错误签名算法、错误
+握手摘要、消息乱序）：
+
+- ① 凭据与 Finished 都对，签名错或 CertificateVerify 缺失：缺失/重复/乱序见上；
+  用**另一把私钥**签真实摘要 → `tls: invalid signature by the server certificate:
+  Ed25519 verification failure`；对**另一份 transcript** 签名 → 同一错误。
+- ② TLS 签名对但凭据错，或对端出示普通可信站点证书：用另一个 authKey 封装证书
+  → `reality: the server certificate is not sealed with the authentication key`；
+  出示一张**真的能验通**的证书（用例内先用 `crypto/tls` 客户端做对照，证明这条链
+  确实可信）→ `reality: the server certificate carries a *ecdsa.PublicKey key,
+  want ed25519`。
+- ③ 前两者都对但 Finished 错 → `tls: invalid server finished hash`。
+- 附：声明一个证书不可能产生的签名算法（`ecdsa_secp256r1_sha256`、
+  `rsa_pkcs1_sha256`、`rsa_pss_rsae_sha256` 配 Ed25519 证书）→
+  `tls: certificate used with invalid signature algorithm`。
+
+**（3）失败零业务数据**：四个失败场景（普通证书、错凭据、缺 CertificateVerify、
+错 Finished）都在对端字节计数器上断言：`afterFlight ≤ 30`（兼容 CCS 6 + 加密
+alert 24）、`finished == false`、`appData` 为空。成功路径断言
+`appAt > finishedAt`（VLESS 请求所在记录的结束偏移严格大于客户端 Finished 记录的
+结束偏移），即"请求在 Finished 之后"是字节序事实，不是时序巧合。
+
+**（4）真实互通复跑（TCP，本机可跑，必须跑）**：
+
+- 服务端：`/home/hatch/interop-bin/vless/server`，`Xray 26.11.9 (Xray,
+  Penetrates Everything.) 676eaf6 (go1.27.3 linux/amd64)`
+  （`server version` 实测输出）；
+- 二进制 SHA-256（本机复算）：`e87bce586acdb9136aa5b1f1d9c8db9f1ea1d145b6d86368c7f6f662f9f6a66d`；
+- 发布 zip 的 SHA-256 为 `b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82`
+  （由编排侧在本机之外与官方 `.dgst` 核对；本机无外网，只能复算**二进制**这一层）；
+- 客户端：本阶段代码，锁版 uTLS 上述伪版本；
+- 命令：`MELONARC_INTEROP_DIR=/home/hatch/interop-bin go test ./internal/outbound/
+  -run TestInteropVLESSReality -count=1 -v`；
+- 结果：**PASS，5.2–5.4 s**（其中约 5 s 是参考服务端首次连线时对 `dest` 做画像
+  轮询的等待，不是握手耗时），16 KiB TCP 回环一致。
+
+REALITY 是 TCP，不受本机 `sendto` 限制，所以这一项是**真跑出来的**，不是"到达
+边界"的替代证据。也正因为如此，README 支持矩阵的 REALITY 行可以从阶段 15 的
+"未复跑互通"改为"阶段 16 复跑通过"。
+
+### 当前状态
+
+- 提交（本地，未推送）：`a07c565`（依赖与适配）→ `f1ce97f`（测试）→ 本记录随
+  文档提交一并落盘。第一条带上了 `tlspeer_test.go`，因为改写后的 `reality_test.go`
+  要用它的线上常量，拆出去会让那一笔编译不过；第二条只剩新增的负例套件。
+- Go 验收五连：`go build ./...`、`go vet ./...`、`gofmt -l .`（无输出）、
+  `GOOS=windows go build ./cmd/... ./internal/...` 全绿。
+- `go test ./... -count=1 -v`：**1147 条目 / 1126 通过 / 21 跳过 / 0 失败**
+  （基线 1140 / 1119 / 21 / 0）。逐项对账：
+  - 减少 17 条：`tls13_certverify_test.go` 的 3 个函数及其 13 个子用例
+    （KnownAnswer 3、RejectsBadForms 8、MismatchedCertificateVerify 2）合计 16 条，
+    加 `TestTLS13AgainstStdlibServer` 1 条——全部随自研握手一起删除；
+  - 新增 24 条：`reality_handshake_test.go` 14 个函数 + 10 个子用例
+    （乱序 3、签名算法 3、零业务数据 4）；
+  - 净 +7 条 = 1147。**21 条跳过与基线完全同一集合**（seccomp 环境的 UDP 类
+    用例 + 缺互通二进制的 7 个 `TestInterop*`），无新增跳过。本阶段新增的
+    `TestInteropVLESSReality` 在设了 `MELONARC_INTEROP_DIR` 时**通过**，
+    不设时与其它互通用例一样跳过。
+- `-race`：逐包跑（`internal/*` 全部 + `cmd/melonarc-core`）**全部通过**。
+  单次 `go test ./... -race` 在本沙箱被内存上限杀掉（退出码 137 / SIGTERM），
+  是环境限制而非测试失败，故按包执行。
+- 前端无改动，复跑确认无回退：离线（托管 Node 22.22.2，清代理 + 串行）
+  **58 条目 / 56 通过 / 2 跳过 / 0 失败**；实时（系统 Node 24.22.1 + 重建的
+  `/tmp/arc/demo.conf` 演示核心 + 真实令牌文件）**58 条目 / 58 通过 / 0 跳过 /
+  0 失败**。
+- 命名红线：本阶段新增/修改的源码、测试、README 与提交信息已扫描，无非开源
+  商业产品名称（`Threat`/`clash` 类子串在前几阶段已清理，本阶段没有引入）。
+
+### 遗留问题
+
+- **两处偏离模板的后果要记住**：补 Ed25519 会让签名算法列表比真 Chrome 多一项，
+  ALPN 用配置值则可能少于真浏览器。这是"能连上"与"看起来像"之间的取舍，
+  本阶段选前者，且不做指纹承诺。若将来要做指纹仿真，得先把凭据换成模板本来
+  就支持的曲线（例如 ECDSA P-256）。
+- **只有 Chrome 模板经过真实互通**。Firefox 模板在排查过程中临时切过去也通过了
+  （它只发一个 X25519 share，正好绕开决策 5 的坑）；Safari/iOS/旧 Chrome 在
+  Xray 26.11.9 上会落到"被模仿站点"。当前实现固定用 `HelloChrome_Auto`，
+  若将来开放模板选择，必须先按模板逐个复跑互通，不能只跑单测。
+- **`go list -m all` 在本机不可用**（`GOPROXY=off` 下缺部分模块图的 `go.mod`），
+  传递依赖清单以上表的实测 `go.mod` / `go.sum` 为准。
+- **QUIC 真实互通、Rust 壳编译、SQLite modernc 迁移、预览桥 query string**
+  四项挂账沿用阶段 15，本阶段未触碰。
+- REALITY 的 UDP 业务仍无任何证据（`Unverified`），与是否换库无关：UDP 需要
+  能跑参考服务端并允许数据报往返的环境。
+
+### 下一步计划
+
+1. 在允许 UDP 的环境补 REALITY 的 UDP 证据，或明确把该组合标为不支持。
+2. 若要开放 uTLS 模板选择，按模板逐个复跑互通并登记对应关系。
+3. 沿用阶段 15 计划：QUIC 互通复验、Rust 壳编译、modernc 迁移评估、预览桥修复。

@@ -13,7 +13,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -128,7 +127,7 @@ func (s *realityTestServer) handle(conn net.Conn, static *ecdh.PrivateKey, authe
 	authKey := realityAuthKey(shared, random)
 
 	if authenticate {
-		plain, err := realityOpenSessionID(hello, tls13SessionIDOffset, authKey, random)
+		plain, err := realityOpenSessionID(hello, realitySessionIDOffset, authKey, random)
 		if err != nil {
 			s.fail(err)
 			return
@@ -226,7 +225,7 @@ func readTestClientHello(conn net.Conn) (record, payload []byte, err error) {
 	if _, err = io.ReadFull(conn, head); err != nil {
 		return nil, nil, err
 	}
-	if head[0] != tls13RecordHandshake {
+	if head[0] != peerRecordHandshake {
 		return nil, nil, errors.New("reality test: the first record is not a handshake record")
 	}
 	payload = make([]byte, binary.BigEndian.Uint16(head[3:]))
@@ -240,13 +239,14 @@ func readTestClientHello(conn net.Conn) (record, payload []byte, err error) {
 // parseTestClientHello pulls the fields the handshake check needs out of a
 // ClientHello. It is the test peer's own parser on purpose: the client side
 // builds these bytes, and a shared builder would hide a layout mistake.
-// parseTestClientHello returns the fields a REALITY peer needs: the client
-// random, the session id and the X25519 half of the key share. The share itself
-// may be the hybrid X25519MLKEM768 group, whose last 32 bytes are the X25519
-// public key; the peer hands the whole ClientHello to crypto/tls, which answers
-// the hybrid group properly, so only the X25519 part is extracted here.
+//
+// The hello is a browser-shaped one: its key share list starts with a GREASE
+// group and its first real entry is the hybrid X25519MLKEM768 group, whose last
+// 32 bytes are the X25519 public key. The peer hands the whole ClientHello to
+// crypto/tls, which answers the hybrid group properly, so only the classical
+// half is extracted here: that is the key REALITY authenticates against.
 func parseTestClientHello(hello []byte) (random, sessionID, keyShare []byte, err error) {
-	if len(hello) < 39 || hello[0] != tls13MsgClientHello {
+	if len(hello) < 39 || hello[0] != peerMsgClientHello {
 		return nil, nil, nil, errors.New("reality test: not a client hello")
 	}
 	random = hello[6:38]
@@ -276,6 +276,7 @@ func parseTestClientHello(hello []byte) (random, sessionID, keyShare []byte, err
 	if len(rest) < extLen {
 		return nil, nil, nil, errors.New("reality test: truncated extensions")
 	}
+	var hybrid []byte
 	for extensions := rest[:extLen]; len(extensions) >= 4; {
 		typ := binary.BigEndian.Uint16(extensions)
 		length := int(binary.BigEndian.Uint16(extensions[2:]))
@@ -285,32 +286,45 @@ func parseTestClientHello(hello []byte) (random, sessionID, keyShare []byte, err
 		}
 		body := extensions[:length]
 		extensions = extensions[length:]
-		if typ != tls13ExtKeyShare {
+		if typ != peerExtKeyShare {
 			continue
 		}
-		if len(body) < 4 {
+		if len(body) < 2 {
 			return nil, nil, nil, errors.New("reality test: truncated key share list")
 		}
-		listLen := int(binary.BigEndian.Uint16(body))
-		if len(body) < 2+listLen || listLen < 4 {
-			return nil, nil, nil, errors.New("reality test: truncated key share list")
-		}
-		group := binary.BigEndian.Uint16(body[2:])
-		keyLen := int(binary.BigEndian.Uint16(body[4:]))
-		if len(body) < 6+keyLen {
-			return nil, nil, nil, errors.New("reality test: truncated key share")
-		}
-		switch group {
-		case tls13GroupX25519:
-			keyShare = body[6 : 6+keyLen]
-		case tls13GroupX25519MLKEM768:
-			if keyLen != mlkem.EncapsulationKeySize768+32 {
-				return nil, nil, nil, errors.New("reality test: the hybrid key share has the wrong length")
+		list := body[2:]
+		for len(list) >= 4 {
+			group := binary.BigEndian.Uint16(list)
+			keyLen := int(binary.BigEndian.Uint16(list[2:]))
+			list = list[4:]
+			if len(list) < keyLen {
+				return nil, nil, nil, errors.New("reality test: truncated key share")
 			}
-			keyShare = body[6+mlkem.EncapsulationKeySize768 : 6+keyLen]
-		default:
-			return nil, nil, nil, fmt.Errorf("reality test: the key share uses group %d", group)
+			data := list[:keyLen]
+			list = list[keyLen:]
+			switch group {
+			case peerGroupX25519MLKEM768:
+				if keyLen != mlkem.EncapsulationKeySize768+32 {
+					return nil, nil, nil, errors.New("reality test: the hybrid key share has the wrong length")
+				}
+				hybrid = data[mlkem.EncapsulationKeySize768:]
+			case peerGroupX25519:
+				if keyShare == nil && keyLen == 32 {
+					keyShare = data
+				}
+			default:
+				// A GREASE group or a group this peer does not speak. It is
+				// part of the shape of a browser hello, not an error.
+				continue
+			}
 		}
+	}
+	// A REALITY server authenticates against the standalone X25519 share, and
+	// only falls back to the classical half of the hybrid share for a hello
+	// that offers nothing else. The peer has to make the same choice or it
+	// would accept a seal the real server refuses.
+	if keyShare == nil {
+		keyShare = hybrid
 	}
 	if keyShare == nil {
 		return nil, nil, nil, errors.New("reality test: the client hello has no key share")
@@ -464,55 +478,5 @@ func TestRealityOptions(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, test.want)
 			}
 		})
-	}
-}
-
-func TestTLS13AgainstStdlibServer(t *testing.T) {
-	// The TLS half of the REALITY handshake is checked against crypto/tls: a
-	// server written by somebody else must accept the hello, the key schedule,
-	// the finished messages and the record layer.
-	cert, _ := testCertificate(t)
-	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"h2"},
-	})
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer ln.Close()
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				_, _ = io.Copy(c, c)
-			}(conn)
-		}
-	}()
-
-	raw, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, err := tls13Client(ctx, raw, tls13ClientConfig{ServerName: "127.0.0.1", ALPN: []string{"h2"}})
-	if err != nil {
-		t.Fatalf("tls13Client: %v", err)
-	}
-	defer conn.Close()
-
-	payload := bytes.Repeat([]byte("record layer "), 4096) // spans several records
-	assertEcho(t, conn, payload)
-	if err := conn.CloseWrite(); err != nil {
-		t.Fatalf("CloseWrite: %v", err)
-	}
-	got := make([]byte, 1)
-	if _, err := conn.Read(got); err != io.EOF {
-		t.Fatalf("read after close_notify = %v, want EOF", err)
 	}
 }
