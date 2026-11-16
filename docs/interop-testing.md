@@ -86,9 +86,9 @@ MELONARC_INTEROP_DIR=$HOME/interop-bin scripts/check-interop.sh
    换句话说：**在受限沙箱里，UDP 与 QUIC 一律没有互通证据**。这不是代码问题，改不了，
    只能换环境。
 
-   2026-11-16 已在 GitHub Actions（ubuntu）以七个槽位跑过一次：除 Snell 的 v4/v5 UDP
-   子用例外全部通过（含 Hysteria2、TUIC 的 TCP 与 UDP）；Snell UDP 的失败定位见公开前
-   清单 B6。
+   2026-11-16 已在 GitHub Actions（ubuntu）以七个槽位跑过：其中一次运行只有 Snell 的
+   v4/v5 UDP 子用例失败，紧接着在代码树未变的情况下重跑即全部通过（含 Hysteria2、TUIC
+   的 TCP 与 UDP），按一次性瞬时失败记录，见公开前清单 B6。
 3. **回环端口可用**。用例自己挑空闲端口（`freePort`），不需要预先分配，但需要 127.0.0.1
    上能绑临时端口。
 4. **不联网**。所有各方都在 `127.0.0.1` 上：下载是一次性动作，跑用例时不需要外网。
