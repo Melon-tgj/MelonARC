@@ -1,0 +1,260 @@
+name: CI
+
+# Three jobs, in the order the repository is built: the Go tree, the desktop
+# frontend with a real core behind it, and the interop gate that dials reference
+# implementations of each protocol.
+#
+# Nothing here downloads into the repository, and nothing here needs a secret:
+# the reference implementations are fetched into a directory outside the tree and
+# checked against the hashes their releases publish.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # The toolchain is pinned by go.mod, so the job cannot drift from it.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would rewrite these files:"
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # The interop tests skip without MELONARC_INTEROP_DIR, which is what makes
+      # this job usable on its own; they get their own job below.
+      - name: Test
+        run: go test ./... -count=1
+
+      # The product ships on Windows, so the cross-compile is part of the gate.
+      # ./... is not used: spikes/ holds Unix-only prototypes that have never
+      # been meant to build for Windows (see DEVLOG stage 8).
+      - name: Cross-compile for Windows
+        run: GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          # apps/desktop requires node >= 20 and has no dependencies at all, so
+          # the lockfile is the whole graph and `npm ci` needs no network.
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Build the frontend
+        working-directory: apps/desktop
+        run: npm run build
+
+      # Offline pass: the two cases that need a live core skip here and say so.
+      - name: Test without a core
+        working-directory: apps/desktop
+        run: npm test
+
+      - name: Build the core
+        run: |
+          mkdir -p /tmp/arc
+          go build -o /tmp/arc/melonarc-core ./cmd/melonarc-core
+
+      # The demonstration configuration used by hand in stages 13-19: one proxy,
+      # one group of each type, a handful of rules, and a data directory the test
+      # can read the token from.
+      - name: Write the demonstration configuration
+        run: |
+          mkdir -p /tmp/arc/data
+          cat > /tmp/arc/demo.conf <<'CONF'
+          [General]
+          log-level = info
+          api-listen = 127.0.0.1:7946
+          data-dir = /tmp/arc/data
+
+          [Proxy]
+          NodeA = ss, 127.0.0.1, 8388, aes-128-gcm, demo-secret
+          NodeB = socks5, 127.0.0.1, 1080
+
+          [Proxy Group]
+          manual = select, NodeA, NodeB
+          auto = url-test, NodeA, NodeB, url=http://127.0.0.1:9/probe, interval=600
+          backup = fallback, NodeA, NodeB, url=http://127.0.0.1:9/probe
+
+          [Rule]
+          rule-set local = ./rulesets/local.txt
+          DOMAIN,example.com,DIRECT
+          DOMAIN-SUFFIX,example.org,manual
+          DOMAIN-KEYWORD,tracker,REJECT
+          IP-CIDR,127.0.0.0/8,DIRECT
+          IP-CIDR6,::1/128,DIRECT
+          DEST-PORT,8080,manual
+          PROTOCOL,udp,DIRECT
+          FINAL,manual
+
+          [Host]
+          demo.example = 127.0.0.1
+          CONF
+          mkdir -p /tmp/arc/rulesets
+          printf 'DOMAIN-SUFFIX,ads.example\n' > /tmp/arc/rulesets/local.txt
+          /tmp/arc/melonarc-core -config /tmp/arc/demo.conf -check
+
+      - name: Start the core
+        run: |
+          nohup /tmp/arc/melonarc-core -config /tmp/arc/demo.conf > /tmp/arc/core.log 2>&1 &
+          for _ in $(seq 1 60); do
+            token=$(cat /tmp/arc/data/api-token 2>/dev/null || true)
+            if [ -n "$token" ] &&
+              curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:7946/healthz >/dev/null; then
+              echo "the core is answering"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the core did not answer within 60s"
+          cat /tmp/arc/core.log
+          exit 1
+
+      # Live pass: all cases, including the ones that read the core's answers.
+      - name: Test against the running core
+        working-directory: apps/desktop
+        env:
+          MELONARC_TEST_API: 127.0.0.1:7946
+          MELONARC_TEST_DATA_DIR: /tmp/arc/data
+        run: npm test
+
+      - name: Core log
+        if: always()
+        run: cat /tmp/arc/core.log
+
+  interop:
+    name: Interop
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MELONARC_INTEROP_DIR: ${{ github.workspace }}/interop
+      XRAY_TAG: v26.11.9
+      SHADOWSOCKS_TAG: v1.25.0
+      SNELL_VERSION: v5.0.0
+      HYSTERIA_TAG: app/v2.13.0
+      TUIC_TAG: v1.0.0
+      # Snell has no release page a machine can read: the zip and its hash are
+      # published on a download page, so both arrive through repository variables
+      # instead of being guessed here. Empty values fail the step on purpose.
+      SNELL_ZIP_URL: ${{ vars.SNELL_ZIP_URL }}
+      SNELL_ZIP_SHA256: ${{ vars.SNELL_ZIP_SHA256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Asset names follow each release page. They are globs on purpose: the tag
+      # and the target triple appear in most of them, and a bump should be a
+      # change of the version above rather than a rewrite of the pattern.
+      - name: Fetch the reference implementations
+        run: |
+          set -eu
+          work=$RUNNER_TEMP/interop-download
+          mkdir -p "$work"
+
+          gh release download "$XRAY_TAG" --repo XTLS/Xray-core \
+            --pattern 'Xray-linux-64.zip*' --dir "$work"
+          gh release download "$SHADOWSOCKS_TAG" --repo shadowsocks/shadowsocks-rust \
+            --pattern 'shadowsocks-*-x86_64-unknown-linux-gnu.tar.xz*' --dir "$work"
+          gh release download "$HYSTERIA_TAG" --repo apernet/hysteria \
+            --pattern 'hysteria-linux-amd64' --pattern 'hashes.txt' --dir "$work"
+          gh release download "$TUIC_TAG" --repo EAimTY/tuic \
+            --pattern '*server*linux*x86_64*' --dir "$work"
+
+          if [ -z "$SNELL_ZIP_URL" ] || [ -z "$SNELL_ZIP_SHA256" ]; then
+            echo "::error::SNELL_ZIP_URL and SNELL_ZIP_SHA256 must be set from the snell-server $SNELL_VERSION download page"
+            exit 1
+          fi
+          curl -fsSL -o "$work/snell-server.zip" "$SNELL_ZIP_URL"
+
+      - name: Verify the downloads
+        run: |
+          set -eu
+          work=$RUNNER_TEMP/interop-download
+          cd "$work"
+
+          # Xray: the .dgst file is text, one hash per line.
+          want=$(sed -n 's/^SHA2-256:[[:space:]]*//p' Xray-linux-64.zip.dgst | tr -d '\r')
+          test -n "$want"
+          echo "$want  Xray-linux-64.zip" | sha256sum -c -
+
+          # shadowsocks-rust: the .sha256 file is already sha256sum's input.
+          sha256sum -c shadowsocks-*-x86_64-unknown-linux-gnu.tar.xz.sha256
+
+          # hysteria: hashes.txt lists the assets by name.
+          grep 'hysteria-linux-amd64$' hashes.txt | sha256sum -c -
+
+          # tuic-server: same shape as shadowsocks, a .sha256sum beside the zip.
+          sha256sum -c ./*.sha256sum
+
+          # snell: no checksum file exists, so the value comes from the page.
+          echo "$SNELL_ZIP_SHA256  snell-server.zip" | sha256sum -c -
+
+      - name: Lay out the slots
+        run: |
+          set -eu
+          work=$RUNNER_TEMP/interop-download
+          dir=$MELONARC_INTEROP_DIR
+          mkdir -p "$dir"/{shadowsocks,vmess,trojan,vless,snell,hysteria2,tuic}
+
+          # One binary speaks three protocols; the slots name protocols, so the
+          # same file answers three of them.
+          unzip -qo "$work/Xray-linux-64.zip" -d "$work/xray"
+          install -m 0755 "$work/xray/xray" "$dir/vless/server"
+          ln -sf ../vless/server "$dir/vmess/server"
+          ln -sf ../vless/server "$dir/trojan/server"
+
+          tar -xJf "$work"/shadowsocks-*-x86_64-unknown-linux-gnu.tar.xz -C "$work"
+          install -m 0755 "$work"/shadowsocks-*-x86_64-unknown-linux-gnu/ssserver "$dir/shadowsocks/server"
+
+          install -m 0755 "$work/hysteria-linux-amd64" "$dir/hysteria2/server"
+
+          unzip -qo "$work"/tuic-server-*.zip -d "$work/tuic"
+          install -m 0755 "$(find "$work/tuic" -name 'tuic-server' -type f -print -quit)" "$dir/tuic/server"
+
+          unzip -qo "$work/snell-server.zip" -d "$work/snell"
+          install -m 0755 "$(find "$work/snell" -name 'snell-server' -type f -print -quit)" "$dir/snell/server"
+
+          find "$dir" -maxdepth 2 -name server -exec ls -l {} \;
+
+      # A skip counts as a failure: with every slot filled there is no legitimate
+      # reason for one, and "skipped" must never read as "verified".
+      - name: Gate
+        run: scripts/check-interop.sh
