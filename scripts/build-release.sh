@@ -7,14 +7,15 @@
 #   scripts/build-release.sh 0.1.0-preview.1
 #
 # What it does, in order:
-#   1. builds melonarc-core and melonarc-cli for linux/amd64 with -trimpath and
+#   1. builds melonarc-core and melonarc-cli for linux/<arch> (amd64 unless the
+#      optional second argument says arm64) with -trimpath and
 #      "-s -w", and injects the version into internal/version.Version;
-#   2. fills a staging directory melonarc-<version>-linux-amd64/ with the two
+#   2. fills a staging directory melonarc-<version>-linux-<arch>/ with the two
 #      binaries, the example configuration, the licence and the three documents a
 #      reader needs before running a binary from the internet;
 #   3. copies the licence texts of every third-party module linked into
 #      melonarc-core into licenses/, one file per module (checklist B2);
-#   4. writes dist-release/melonarc-<version>-linux-amd64.tar.gz and prints its
+#   4. writes dist-release/melonarc-<version>-linux-<arch>.tar.gz and prints its
 #      SHA-256.
 #
 # It does not tag, does not publish and does not touch the network. The archive
@@ -25,17 +26,17 @@
 # The whole point of the injected version is that the archive, the binaries and
 # the documents agree on one number, so the two binaries are asked what they are
 # after the build. Running them is the check; on a machine that cannot execute a
-# linux/amd64 binary the build still succeeds and the check is skipped.
+# binary for the target arch the build still succeeds and the check is skipped.
 
 set -u
 
 usage() {
     cat <<'EOF'
-usage: scripts/build-release.sh <version>
+usage: scripts/build-release.sh <version> [arch]
 
-Build dist-release/melonarc-<version>-linux-amd64.tar.gz from the current tree.
-The version is injected into the binaries and into the archive name, for example
-0.1.0-preview.1.
+Build dist-release/melonarc-<version>-linux-<arch>.tar.gz from the current tree.
+arch is amd64 (the default) or arm64. The version is injected into the binaries
+and into the archive name, for example 0.1.0-preview.1.
 EOF
 }
 
@@ -44,12 +45,17 @@ die() {
     exit 1
 }
 
-if [ "$#" -ne 1 ]; then
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
     usage >&2
     exit 2
 fi
 
 version=$1
+arch=${2:-amd64}
+case $arch in
+    amd64 | arm64) ;;
+    *) die "unsupported arch: '$arch' (expected amd64 or arm64)" ;;
+esac
 # The version becomes part of a directory name this script deletes and recreates,
 # so it may not contain a slash, a space or a shell metacharacter.
 case $version in
@@ -66,7 +72,7 @@ root=$(dirname -- "$here") || die "cannot resolve the repository root"
 
 command -v go >/dev/null 2>&1 || die "go is not on PATH"
 
-name="melonarc-$version-linux-amd64"
+name="melonarc-$version-linux-$arch"
 out="$root/dist-release"
 stage="$out/$name"
 tarball="$out/$name.tar.gz"
@@ -80,10 +86,10 @@ mkdir -p -- "$stage" "$tmp" || die "cannot create $stage"
 printf 'build-release: building %s\n' "$version"
 
 ldflags="-s -w -X github.com/melon-tgj/melonarc/internal/version.Version=$version"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
     go build -trimpath -ldflags "$ldflags" -o "$stage/melonarc-core" ./cmd/melonarc-core ||
     die "melonarc-core did not build"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
     go build -trimpath -ldflags "$ldflags" -o "$stage/melonarc-cli" ./cmd/melonarc-cli ||
     die "melonarc-cli did not build"
 
@@ -192,14 +198,19 @@ printf 'build-release: melonarc-cli  %s bytes\n' "$(bytes "$stage/melonarc-cli")
 
 # The binaries answer with the injected number. They cannot be executed when this
 # runs on a non-linux host, which is not an error for a cross build.
-if [ "$(uname -s 2>/dev/null)" = "Linux" ] && [ "$(uname -m 2>/dev/null)" = "x86_64" ]; then
+hostarch=""
+case "$(uname -m 2>/dev/null)" in
+    x86_64) hostarch=amd64 ;;
+    aarch64 | arm64) hostarch=arm64 ;;
+esac
+if [ "$(uname -s 2>/dev/null)" = "Linux" ] && [ "$hostarch" = "$arch" ]; then
     reported=$("$stage/melonarc-cli" version 2>/dev/null) || reported=""
     if [ "$reported" != "melonarc-cli $version" ]; then
         die "the built CLI reports '$reported', expected 'melonarc-cli $version'"
     fi
     printf 'build-release: the built CLI reports %s\n' "$reported"
 else
-    printf 'build-release: not a linux/x86_64 host, so the injected version was not read back\n'
+    printf 'build-release: not a linux/%s host, so the injected version was not read back\n' "$arch"
 fi
 
 tar -czf "$tarball" -C "$out" "$name" || die "cannot write $tarball"

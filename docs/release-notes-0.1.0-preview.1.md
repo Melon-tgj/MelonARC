@@ -15,7 +15,9 @@ list as a promise of working combinations.
 
 ## What is in the archive
 
-`melonarc-0.1.0-preview.1-linux-amd64.tar.gz` contains one directory:
+`melonarc-0.1.0-preview.1-linux-amd64.tar.gz` contains one directory. A second
+archive, `melonarc-0.1.0-preview.1-linux-arm64.tar.gz`, has exactly the same
+layout with linux/arm64 binaries (for ARM machines and ARM virtual machines):
 
 ```
 melonarc-0.1.0-preview.1-linux-amd64/
@@ -38,12 +40,13 @@ archive you actually have, not a digest copied from an earlier run.
 
 ## Install and run from the tar
 
-There is no installer. Unpack it, edit one file, and run two binaries. Linux x86_64
-only; no Windows binary and no desktop application are in this archive.
+There is no installer. Unpack it, edit one file, and run two binaries. Linux
+x86_64 and arm64; no Windows binary and no desktop application are in either
+archive.
 
 ```sh
-tar -xzf melonarc-0.1.0-preview.1-linux-amd64.tar.gz
-cd melonarc-0.1.0-preview.1-linux-amd64
+tar -xzf melonarc-0.1.0-preview.1-linux-amd64.tar.gz   # or ...-linux-arm64.tar.gz
+cd melonarc-0.1.0-preview.1-linux-amd64                # matching directory
 ```
 
 `melonarc.conf` is deliberately fictional and is the same file as
