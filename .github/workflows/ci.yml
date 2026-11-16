@@ -167,7 +167,7 @@ jobs:
       SHADOWSOCKS_TAG: v1.25.0
       SNELL_VERSION: v5.0.0
       HYSTERIA_TAG: app/v2.13.0
-      TUIC_TAG: v1.0.0
+      TUIC_TAG: tuic-server-1.0.0
       # Snell has no release page a machine can read: the zip and its hash are
       # published on a download page, so both arrive through repository variables
       # instead of being guessed here. Empty values fail the step on purpose.
@@ -192,11 +192,11 @@ jobs:
           gh release download "$XRAY_TAG" --repo XTLS/Xray-core \
             --pattern 'Xray-linux-64.zip*' --dir "$work"
           gh release download "$SHADOWSOCKS_TAG" --repo shadowsocks/shadowsocks-rust \
-            --pattern 'shadowsocks-*-x86_64-unknown-linux-gnu.tar.xz*' --dir "$work"
+            --pattern 'shadowsocks-*.x86_64-unknown-linux-gnu.tar.xz*' --dir "$work"
           gh release download "$HYSTERIA_TAG" --repo apernet/hysteria \
             --pattern 'hysteria-linux-amd64' --pattern 'hashes.txt' --dir "$work"
-          gh release download "$TUIC_TAG" --repo EAimTY/tuic \
-            --pattern '*server*linux*x86_64*' --dir "$work"
+          gh release download "$TUIC_TAG" --repo tuic-protocol/tuic \
+            --pattern 'tuic-server-*-x86_64-unknown-linux-gnu*' --dir "$work"
 
           if [ -z "$SNELL_ZIP_URL" ] || [ -z "$SNELL_ZIP_SHA256" ]; then
             echo "::error::SNELL_ZIP_URL and SNELL_ZIP_SHA256 must be set from the snell-server $SNELL_VERSION download page"
@@ -216,7 +216,7 @@ jobs:
           echo "$want  Xray-linux-64.zip" | sha256sum -c -
 
           # shadowsocks-rust: the .sha256 file is already sha256sum's input.
-          sha256sum -c shadowsocks-*-x86_64-unknown-linux-gnu.tar.xz.sha256
+          sha256sum -c shadowsocks-*.x86_64-unknown-linux-gnu.tar.xz.sha256
 
           # hysteria: hashes.txt lists the assets by name.
           grep 'hysteria-linux-amd64$' hashes.txt | sha256sum -c -
@@ -241,13 +241,12 @@ jobs:
           ln -sf ../vless/server "$dir/vmess/server"
           ln -sf ../vless/server "$dir/trojan/server"
 
-          tar -xJf "$work"/shadowsocks-*-x86_64-unknown-linux-gnu.tar.xz -C "$work"
-          install -m 0755 "$work"/shadowsocks-*-x86_64-unknown-linux-gnu/ssserver "$dir/shadowsocks/server"
+          tar -xJf "$work"/shadowsocks-*.x86_64-unknown-linux-gnu.tar.xz -C "$work"
+          install -m 0755 "$work/ssserver" "$dir/shadowsocks/server"
 
           install -m 0755 "$work/hysteria-linux-amd64" "$dir/hysteria2/server"
 
-          unzip -qo "$work"/tuic-server-*.zip -d "$work/tuic"
-          install -m 0755 "$(find "$work/tuic" -name 'tuic-server' -type f -print -quit)" "$dir/tuic/server"
+          install -m 0755 "$work"/tuic-server-*-x86_64-unknown-linux-gnu "$dir/tuic/server"
 
           unzip -qo "$work/snell-server.zip" -d "$work/snell"
           install -m 0755 "$(find "$work/snell" -name 'snell-server' -type f -print -quit)" "$dir/snell/server"
