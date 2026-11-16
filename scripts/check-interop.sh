@@ -90,11 +90,10 @@ if [ -z "$passed" ] && [ "$problems" -eq 0 ]; then
 fi
 
 if [ "$problems" -ne 0 ] || [ "$status" -ne 0 ]; then
-    if [ "$status" -ne 0 ] && [ -z "$failed" ]; then
-        # A build failure or a panic outside a test prints no "--- FAIL" line.
-        printf 'check-interop: go test exited %d; its output follows\n' "$status" >&2
-        sed 's/^/  | /' "$out" >&2
-    fi
+    # Always print the captured run: a name-only failure list cannot be
+    # diagnosed from CI logs, where the temp file is gone with the runner.
+    printf 'check-interop: go test exited %d; its full output follows\n' "$status" >&2
+    sed 's/^/  | /' "$out" >&2
     printf 'check-interop: %s\n' "$dir" >&2
     exit 1
 fi
