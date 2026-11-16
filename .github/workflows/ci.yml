@@ -211,7 +211,7 @@ jobs:
           cd "$work"
 
           # Xray: the .dgst file is text, one hash per line.
-          want=$(sed -n 's/^SHA2-256:[[:space:]]*//p' Xray-linux-64.zip.dgst | tr -d '\r')
+          want=$(sed -n 's/^SHA2-256=[[:space:]]*//p' Xray-linux-64.zip.dgst | tr -d '\r')
           test -n "$want"
           echo "$want  Xray-linux-64.zip" | sha256sum -c -
 
@@ -219,7 +219,7 @@ jobs:
           sha256sum -c shadowsocks-*.x86_64-unknown-linux-gnu.tar.xz.sha256
 
           # hysteria: hashes.txt lists the assets by name.
-          grep 'hysteria-linux-amd64$' hashes.txt | sha256sum -c -
+          grep 'hysteria-linux-amd64$' hashes.txt | sed 's|build/||' | sha256sum -c -
 
           # tuic-server: same shape as shadowsocks, a .sha256sum beside the zip.
           sha256sum -c ./*.sha256sum
