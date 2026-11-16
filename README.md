@@ -1,6 +1,24 @@
+<div align="center">
+
+<img src="apps/desktop/src/assets/logo.png" width="128" alt="MelonARC logo" />
+
 # MelonARC
 
-MelonARC (Adaptive Routing Core) is an open-source, cross-platform rule-based proxy client. It dispatches traffic to different outbound protocols according to user-defined rules, with the core daemon and the UI kept strictly separate.
+**Adaptive Routing Core**
+
+An open-source, cross-platform rule-based proxy client. It dispatches traffic to different outbound protocols according to user-defined rules, with the core daemon and the UI kept strictly separate.
+
+[![CI](https://github.com/Melon-tgj/MelonARC/actions/workflows/ci.yml/badge.svg)](https://github.com/Melon-tgj/MelonARC/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8.svg?logo=go&logoColor=white)](go.mod)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)](#platforms-and-build-artefacts)
+[![Preview](https://img.shields.io/badge/preview-0.1.0--preview.1-orange.svg)](docs/release-notes-0.1.0-preview.1.md)
+
+**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
+
+</div>
+
+---
 
 **Status: 0.x source preview, not a stable release.** The Go core, the local API, the CLI and the desktop frontend are implemented; native installers, a compiled desktop shell and end-to-end validation on the release targets are not. The support matrix below is the single source of truth for what has actually been verified. Do not read the feature list as a promise of working combinations.
 
@@ -64,7 +82,7 @@ The five performance targets in the development document **have not been measure
 - No long-run, public-network, multi-process or crash-recovery results.
 - The desktop shell's data directory and API address still require a restart of the GUI to take effect; the core binary path and core configuration take effect on the next core start (the settings panel can restart the core).
 - Fuzz targets and their seed corpora exist for the configuration parser, share links, subscription bodies and DNS responses. Each has only been run in bounded local sessions; no CI job runs them yet.
-- A CI workflow with a separate interop job is written, but it has never run on Actions: no run has yet checked the reference release asset names, and no release tag has machine reports behind it.
+- A CI workflow with a separate interop job runs on Actions: all three jobs (Go, Frontend, Interop) are green as of 2026-11-16, and the interop job re-verified Hysteria2, TUIC v5 and Snell against the pinned reference servers. No release tag has machine reports behind it yet.
 
 ## Source-level scope
 
