@@ -256,4 +256,4 @@ jobs:
       # A skip counts as a failure: with every slot filled there is no legitimate
       # reason for one, and "skipped" must never read as "verified".
       - name: Gate
-        run: scripts/check-interop.sh
+        run: bash scripts/check-interop.sh
