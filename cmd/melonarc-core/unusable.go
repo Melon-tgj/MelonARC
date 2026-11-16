@@ -21,8 +21,16 @@ import (
 // It runs on both the load paths: startup, and a reload that gets as far as
 // building the dialers.
 func warnUnusableProtocols(cfg *config.Config, logger *slog.Logger) {
+	warnUnusable(cfg, logger, outbound.IsUnusable)
+}
+
+// warnUnusable is the mechanism behind warnUnusableProtocols. The lookup is a
+// parameter because the shipped list is empty: a test that has to prove the
+// message names the node and never one of its arguments must hand in the entry
+// it exercises, which is exactly what the list no longer provides.
+func warnUnusable(cfg *config.Config, logger *slog.Logger, lookup func(string) (outbound.Unusable, bool)) {
 	for _, p := range cfg.Proxies {
-		entry, unusable := outbound.IsUnusable(p.Type)
+		entry, unusable := lookup(p.Type)
 		if !unusable {
 			continue
 		}

@@ -2,36 +2,51 @@ package outbound
 
 import "testing"
 
-func TestUnusableProtocolsCoverTheKnownFailingOnes(t *testing.T) {
-	got := map[string]bool{}
-	for _, entry := range UnusableProtocols() {
-		if entry.Protocol == "" {
-			t.Fatal("an entry has no protocol")
-		}
-		if entry.Reason == "" {
-			t.Fatalf("%s has no reason", entry.Protocol)
-		}
-		if entry.Protocol != "hysteria2" && entry.Protocol != "tuic" {
-			t.Fatalf("unexpected protocol on the unusable list: %s", entry.Protocol)
-		}
-		got[entry.Protocol] = true
+// withUnusable installs entries for the duration of a test and puts the shipped
+// list back afterwards. The shipped list is empty, so a test that exercises the
+// mechanism has to supply the entries itself; leaving them installed would make
+// the next test read a list this build does not ship.
+func withUnusable(t *testing.T, entries ...Unusable) {
+	t.Helper()
+	shipped := unusableProtocols
+	unusableProtocols = entries
+	t.Cleanup(func() { unusableProtocols = shipped })
+}
+
+// implementedTypes is every type [New] accepts, spelled the way a configuration
+// writes it.
+func implementedTypes() []string {
+	return []string{
+		"socks5", "socks5-tls", "http", "https", "ss", "vmess", "trojan",
+		"snell", "vless", "hysteria2", "tuic",
 	}
-	for _, want := range []string{"hysteria2", "tuic"} {
-		if !got[want] {
-			t.Fatalf("%s is missing from the unusable list", want)
+}
+
+// Nothing this build implements is on the list any more. hysteria2 and tuic
+// left it when the interop gate passed in CI on 2026-11-16; an entry coming back
+// means the README matrix row and this test have to change together.
+func TestNoImplementedProtocolIsUnusable(t *testing.T) {
+	if got := UnusableProtocols(); len(got) != 0 {
+		t.Fatalf("the shipped list is not empty: %v", got)
+	}
+	for _, typ := range implementedTypes() {
+		if entry, ok := IsUnusable(typ); ok {
+			t.Fatalf("%s is reported unusable: %s", typ, entry.Reason)
 		}
 	}
 }
 
 func TestIsUnusableMatchesTheWayNewDoes(t *testing.T) {
+	withUnusable(t, Unusable{Protocol: "hysteria2", Reason: "test entry"})
 	cases := []struct {
 		typ  string
 		want bool
 	}{
 		{"hysteria2", true},
 		{"Hysteria2", true},
-		{"  tuic  ", true},
-		{"TUIC", true},
+		{"  hysteria2  ", true},
+		{"HYSTERIA2", true},
+		{"tuic", false},
 		{"vless", false},
 		{"socks5", false},
 		{"", false},
@@ -48,6 +63,7 @@ func TestIsUnusableMatchesTheWayNewDoes(t *testing.T) {
 }
 
 func TestUnusableProtocolsReturnsACopy(t *testing.T) {
+	withUnusable(t, Unusable{Protocol: "hysteria2", Reason: "test entry"})
 	first := UnusableProtocols()
 	first[0].Protocol = "tampered"
 	if again := UnusableProtocols(); again[0].Protocol == "tampered" {
@@ -58,7 +74,14 @@ func TestUnusableProtocolsReturnsACopy(t *testing.T) {
 // A protocol on the list is one this build implements: the warning says "known
 // unusable", not "missing". If a type ever stops being implemented, the entry
 // has to be reworded rather than left to describe the wrong problem.
+//
+// The entries are injected because the shipped list is empty; the guard matters
+// the moment one returns.
 func TestUnusableProtocolsAreImplemented(t *testing.T) {
+	withUnusable(t,
+		Unusable{Protocol: "hysteria2", Reason: "test entry"},
+		Unusable{Protocol: "tuic", Reason: "test entry"},
+	)
 	for _, entry := range UnusableProtocols() {
 		spec := Spec{Type: entry.Protocol, Server: "203.0.113.1", Port: 443}
 		dialer, err := New(spec)

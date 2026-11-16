@@ -18,27 +18,28 @@ type Unusable struct {
 	Reason string
 }
 
-// unusableProtocols lists the types a configuration must not rely on. Both
-// entries describe the same situation: the repair landed (stage 15) and has
-// known-answer tests behind it, but no real traffic has been carried since, so
-// neither may be reported as working.
-var unusableProtocols = []Unusable{
-	{
-		Protocol: "hysteria2",
-		Reason: "known unusable: the stage 15 fixes are in place, but real interoperability " +
-			"with a reference server has not been re-verified; keep it out of any stable setup",
-	},
-	{
-		Protocol: "tuic",
-		Reason: "known unusable: the stage 15 fixes are in place, but real interoperability " +
-			"with a reference server has not been re-verified; keep it out of any stable setup",
-	},
-}
+// unusableProtocols lists the types a configuration must not rely on.
+//
+// It is empty. The two entries it held since stage 15 — hysteria2 and tuic —
+// described a repair that had landed without any traffic carried against a
+// reference server since. That evidence now exists: both pass the interop gate
+// in CI (GitHub Actions, ubuntu, 2026-11-16) against their pinned reference
+// servers, TCP and UDP business alike, and the README matrix rows moved to
+// Verified with that run behind them. A type is listed here only while the
+// matrix says Unusable, so the list emptied when the matrix changed.
+//
+// The list and the mechanism around it stay. An entry belongs here when a
+// protocol's evidence stops supporting what the matrix claims — a regression
+// found by a re-run, a repair that has not been re-tested — and adding one back
+// is a documentation change backed by that evidence, not a code change made to
+// quiet a warning.
+var unusableProtocols = []Unusable{}
 
 // UnusableProtocols returns the protocols a configuration must not rely on.
 //
 // The caller gets a copy: a list that decides what the daemon warns about is
-// not something a caller may edit at run time.
+// not something a caller may edit at run time. An empty list is a valid answer
+// and the caller must not treat it as missing data.
 func UnusableProtocols() []Unusable {
 	out := make([]Unusable, len(unusableProtocols))
 	copy(out, unusableProtocols)

@@ -97,24 +97,28 @@ run that goes from an installed copy through an inbound listener to an outbound.
 
 Status words are the ones defined in `README.md` (Verified / Project record /
 Unit-tested only / Unusable / Unverified). This table is a summary, not a substitute
-for that matrix.
+for that matrix. No protocol sits in the Unusable row today; the word is kept because
+the matrix defines it and a future regression can put a row back there.
 
 | Area | Status |
 |---|---|
 | Shadowsocks legacy AEAD (`aes-256-gcm`) and 2022 suites | **Verified** 4/4 TCP and UDP business by the 2026-11-15 external review on macOS arm64 against a pinned reference server. The other two legacy AEAD suites still need their own cases. |
 | VMess (AEAD), Trojan, VLESS + TLS | **Verified** 3/3 TCP and UDP business in the same review, with a pinned reference server. Scope is exactly those three configured cases. |
 | VLESS + REALITY | **Project record** for TCP (stage 16, 16 KiB round trip against a pinned reference server). UDP is **Unverified**. Only the Chrome-shaped ClientHello template (`HelloChrome_Auto` on the pinned uTLS version) was carried through real interop; this is **not** a fingerprint claim, other browser templates were not verified, and the implementation deliberately deviates from the template in two extension fields. The VLESS `xtls-rprx-vision` flow is rejected at configuration time. |
-| Snell v4 / v5 | **Project record** for TCP (stage 11); UDP **Unverified**. |
+| Snell v4 / v5 | **Verified** (CI, 2026-11-16) for TCP and UDP business. Stage 11 first carried TCP for both versions against a pinned Snell reference server. The full interop gate then ran in CI (GitHub Actions, ubuntu, 2026-11-16) against snell-server 5.0.0 with both version configurations, and every Snell case passes. One earlier run in that series failed only the two UDP subtests on an identical code tree and passed on the next, so that failure is recorded as transient (`docs/pre-release-checklist.md` B6). |
 | SOCKS5 (+TLS), HTTP / HTTPS outbounds | **Unit-tested only**; UDP **Unverified**. Not part of the reference-server matrix. |
-| Hysteria2 and TUIC v5 | **Unusable** — defects found by the external review were repaired in stage 15, but no traffic has been carried against a reference server since. The core warns at startup when either is configured, and accepts it; a warning is not a pass. Both must be excluded from any stable claim or stable package. |
+| Hysteria2 and TUIC v5 | **Verified** (CI, 2026-11-16) for TCP and UDP business. The 2026-11-15 external review failed every echo attempt against Hysteria 2.13.0 (the HTTP/3 stage reported a QPACK field-section decode failure, error 512) and against tuic-server 1.0.0 (authentication failure from a text-formatted UUID exporter label); stage 15 repaired both and added known-answer tests. The gate re-ran in CI (GitHub Actions, ubuntu, 2026-11-16) with all seven reference slots filled, and every Hysteria2 and TUIC case passes. Neither is on the core's unusable list any more, so a configuration that uses them starts without a warning. |
 | Linux x86_64 | Source build, `go build` / `go vet` / `go test`, `gofmt` and the offline frontend suite pass in this workspace. No installer, no packaged release, no long-running soak test. |
 | Windows x86_64 | **Cross-compile only.** Nothing has been executed natively; the Windows TUN device entry still returns "session not implemented". |
 | Desktop application | Frontend offline and live-core suites pass, but the frontend is **not in this archive**. The Rust shell has never been compiled here (no `rustc` / `cargo` / WebKitGTK, no `Cargo.lock`, no native window or native IPC test). Process hosting, the single-instance lock and the shell settings file exist only as source. |
 
 Not claimed anywhere in this note:
 
-- **Hysteria2 / TUIC usable.** They are unusable until their real interoperability is
-  re-run on a machine where a QUIC first flight can leave the host.
+- **Hysteria2 / TUIC beyond the cases the interop suite configures.** The 2026-11-16
+  pass is one configuration per protocol against its pinned server — password auth for
+  Hysteria2; `cubic` congestion control, `h3` ALPN and 0-RTT off for TUIC — carrying
+  32 KiB over TCP and a single datagram over UDP. No other obfuscation,
+  congestion-control or certificate setting was exercised.
 - **REALITY verified beyond one Chrome template.** No general fingerprint
   compatibility, no REALITY UDP evidence.
 - **A desktop build.** No compiled native shell, no installer, no tray, no signed
@@ -124,10 +128,11 @@ Not claimed anywhere in this note:
   microbenchmarks on a fixed rule set from different machines and stages; they cannot
   be extrapolated into throughput, tail latency, memory footprint or cross-platform
   compliance.
-- **CI.** A workflow with a separate interop job is written but **has never run on
-  Actions**; no run has checked the reference release asset names and no release tag
-  has machine reports behind it. Fuzz targets and seed corpora exist but have only run
-  in bounded local sessions.
+- **CI beyond the runs it has had.** The workflow first ran on Actions on 2026-11-16;
+  the fifth run was the first with all three jobs green, after four fix rounds in the
+  steps that fetch and check the reference implementations. No release tag has machine
+  reports behind it. Fuzz targets and seed corpora exist but have only run in bounded
+  local sessions.
 
 ## Known issues and limits
 
@@ -141,8 +146,7 @@ Not claimed anywhere in this note:
   settings-refresh broadcast to already-running Windows applications.
 - Observation history rewrites all three SQLite tables on each flush; one full flush
   costs about 40 ms in the stage 19 measurement. This is accepted for the preview.
-- The VLESS `xtls-rprx-vision` flow and any configuration that uses Hysteria2 / TUIC
-  are not usable; the latter only produce a warning.
+- The VLESS `xtls-rprx-vision` flow is rejected at configuration time and is not usable.
 - A configuration with an unknown or unreadable history file is preserved unchanged
   with writes suspended, so an older history is never overwritten.
 - `README.md` § Other known gaps carries the full list; `docs/pre-release-checklist.md`
@@ -161,9 +165,9 @@ version (`-check` banner, `melonarc-cli version`, `/healthz`), the platform, the
 smallest reproduction, a redacted configuration and the relevant log lines. Never put
 credentials, subscription links, access history or an unredacted configuration in a
 public issue; if any were already posted, rotate them first — deleting a comment does
-not un-publish it. Note that private vulnerability reporting may not be enabled on the
-repository yet (checklist A4), which is why the no-details public issue fallback
-matters.
+not un-publish it. Private vulnerability reporting is enabled on the repository
+(2026-11-16); the no-details fallback stays for mirrors and forks where that form is
+unavailable.
 
 For ordinary bugs and questions, use the repository's issue tracker with the same
 redaction care. `README.md`, `THIRD-PARTY-NOTICES.md` and `DEVLOG.md` record the

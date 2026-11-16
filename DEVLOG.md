@@ -5165,3 +5165,181 @@ go test ./... -count=1 -v                    1292 条目 / 1271 过 / 21 跳 / 0
 没有生成正式 release。清单 A7 关闭；A1（图标资产）、A2（`Cargo.lock`）、A3（CI 首跑）、
 A4（私密报告入口）仍 **blocked**，B4/B5/C1/C2/C3 与阶段 8–23 的既有挂账照旧，见本条目
 「遗留问题」与「下一步计划」。
+
+## 阶段 25 — 运行时告警与发布说明对齐 CI 复验结果（2026-11-16）
+
+范围：两处没跟上事实的旧口径。① `internal/outbound/unusable.go` 的 `unusableProtocols` 仍列着
+hysteria2 与 tuic，理由是「修复已落码、真实互通未复验」，于是核心在启动与重载时对含这两类
+出站的配置打 `known unusable` 警告——而 2026-11-16 的 CI 已在锁定参考服务端上把两者的 TCP 与
+UDP 业务跑过，README 矩阵那两行已是 Verified。② `docs/release-notes-0.1.0-preview.1.md` 仍写
+两者 Unusable（约第 109 行），另有同类过时结论三处：Snell 行停在「Project record / UDP
+Unverified」、CI 一条写「从未在 Actions 上跑过」、私密报告入口一条写「可能尚未开启」。
+
+本阶段只对齐告警与文档口径：**协议实现零改动，README 矩阵（含四个语言版本）一字未动**，
+`spikes/` 未动，许可证口径文件未动；只本地提交，没有 push、没有打 tag、没有生成 release。
+
+开工前：`HEAD = 621b8c1`（阶段 24 之后的发布脚本补丁），工作区干净，`git rev-list --all` 为
+**69 笔**，单分支 `master`、无 tag、无 remote。按任务书先读 `DEVLOG.md`（重点阶段 21 的支持
+矩阵统一、阶段 24 的发布说明草稿与 B5 记法）与 `docs/development-doc-v1.md`（v1 是目标规格，
+其头部状态说明要求当前实现状态以 README 支持矩阵为唯一事实源）。README 矩阵按任务书当作唯一
+事实来源，逐行读出 Hysteria2 / TUIC / Snell 三行的现状。基线按阶段 24 记录：Go 全量
+**1292 / 1271 / 21 / 0**，前端离线 **79 / 77 / 2 / 0**、实时 **79 / 79 / 0 / 0**；动手前先跑了
+一次 Go 全量，四个数字与基线逐项相同，21 条跳过逐名一致。
+
+### 任务一：两个协议移出不可用列表（机制与出口保留，列表为空）
+
+**`internal/outbound/unusable.go`**
+
+- `unusableProtocols` 改为空切片；`Unusable` 类型、`UnusableProtocols()`、`IsUnusable()` 三个
+  出口的签名、拷贝语义与「大小写不敏感 + 去首尾空白」的匹配规则**一字未改**。
+- 变量注释改写：说明它为什么为空（旧条目的原话是「修复已落码但此后没再复验」，这份证据现在
+  有了——两者在 CI 对锁定参考服务端通过，TCP 与 UDP 业务皆然，矩阵随之改 Verified），并写明
+  「条目回来要靠证据与文档改动，不是为了让警告闭嘴去改代码」。
+- `UnusableProtocols()` 的注释补一句：**空列表是合法答案**，调用方不得当作缺数据。
+
+**`cmd/melonarc-core/unusable.go`**
+
+- `warnUnusableProtocols(cfg, logger)` 的签名与两个调用点（`main.go:157` 启动、`reload.go:103`
+  重载）都没变；循环体抽成 `warnUnusable(cfg, logger, lookup)`，生产路径传入的仍是
+  `outbound.IsUnusable`。
+- 抽这一层的理由只有一条：列表空掉之后，「警告会点名节点、但绝不回显节点参数」这条性质唯一
+  的可测入口就是给测试注入一条条目；否则用例只能退化成「什么都没打」，把一条真正的安全属性
+  测没了。它不导出、只有一个生产调用者，不是给生产加的开关。
+
+**测试（两个包，条目数不变）**
+
+| 文件 | 用例 | 现在断言什么 |
+|---|---|---|
+| `internal/outbound/unusable_test.go` | `TestNoImplementedProtocolIsUnusable` | 列表长度为 0；`New` 接受的 11 个类型（`socks5`、`socks5-tls`、`http`、`https`、`ss`、`vmess`、`trojan`、`snell`、`vless`、`hysteria2`、`tuic`）逐个 `IsUnusable` 为假 |
+| 同上 | `TestIsUnusableMatchesTheWayNewDoes` | 临时注入一条 hysteria2 后，`Hysteria2` / `  hysteria2  ` / `HYSTERIA2` 命中，`tuic` / `vless` / `socks5` / 空串不命中（匹配语义仍被覆盖） |
+| 同上 | `TestUnusableProtocolsReturnsACopy` | 注入一条后改返回值，取第二次仍是原条目 |
+| 同上 | `TestUnusableProtocolsAreImplemented` | 注入两条后逐条确认 `New` 不走 `Unsupported`（条目回来时的守门） |
+| `cmd/melonarc-core/unusable_test.go` | `TestUnusableProtocolsWarnAtLoad` | 表驱动 4 个子用例，形状与旧用例一致；断言从「会警告」翻成「不警告」：曾列出的两类、混合大小写的一类、从未列出的三类、空配置，一律 `level=WARN` 计数 0 且**日志缓冲区为空** |
+| 同上 | `TestUnusableProtocolWarningCarriesOnlyTheNodeAndTheReason` | 注入条目 + 一个未被列出的节点：只打 1 条，含 `proxy` / `type` / `reason`，未列出的节点不出现，`Args` 里的哨兵串不出现 |
+
+- 注入用 `withUnusable(t, …)` + `t.Cleanup` 把出厂列表放回去，用例间不串状态，也不并行。
+- 文案用例的 `Args` 用**非凭据形状的哨兵串**（`argument-must-not-be-logged`），不是旧用例里的
+  口令字面量：断言的性质没变（Args 不进日志），但测试文件里不再需要出现任何口令形状的字符串。
+
+**CLI / GUI / API 兼容**：`grep -rn Unusable internal/cli internal/api apps` **零命中**——这个列表
+没有对外出口，CLI、GUI 与本地 API 都不消费它，因此不存在「空列表解析失败」的路径；核心侧唯一
+消费者是 `IsUnusable`，空列表下恒为 `false`。
+
+**行为证据（不止单测）**：同一份含 `hysteria2` + `tuic` + `ss` 的配置，用 `HEAD` 的临时 worktree
+构建出旧核心、再用本阶段的工作树构建新核心，各起一次：
+
+| | 旧核心（`621b8c1`） | 新核心（本阶段） |
+|---|---|---|
+| `/healthz` | `{"status":"ok",…}` | `{"status":"ok",…}` |
+| `known to be unusable` 行数 | **2**（H2、TUIC 各一条，文案即旧条目的 reason） | **0** |
+
+启动与重载调的是同一个函数，重载路径没有第二份判断。
+
+### 任务二：发布说明全文与矩阵对齐
+
+`docs/release-notes-0.1.0-preview.1.md` 逐段核过，改了七处：
+
+| 位置 | 旧口径 | 改后 |
+|---|---|---|
+| Hysteria2 / TUIC 行 | **Unusable**，启动只警告不拒绝，不得进稳定包 | **Verified (CI, 2026-11-16)**：保留外审失败的具体症状（QPACK 字段段解码错误 512；文本形式 UUID 导出标签导致认证失败）与阶段 15 的修复，写明七个参考槽位齐备的 CI 复跑 TCP/UDP 皆过，并补「两者已不在核心的不可用列表上，配置启动不再警告」 |
+| Snell 行 | **Project record** TCP（阶段 11），UDP **Unverified** | **Verified (CI, 2026-11-16)**：阶段 11 首次跑通 TCP，CI 对 snell-server 5.0.0 两套版本配置全过；B6 记的瞬时 UDP 失败按「同树重跑全绿」如实写入 |
+| 状态词段落 | 只列五个词 | 补一句：今天 Unusable 行里没有协议，词保留是因为矩阵定义了它，回归时可以再放回 |
+| 「Not claimed」首条 | 「Hysteria2 / TUIC 可用」是不可声称项 | 换成**范围限定**：一次通过 = 每个协议一套配置（Hysteria2 口令认证；TUIC `cubic` + `h3` ALPN + 关 0-RTT）、32 KiB TCP + 单个数据报；未涉及其它 obfs、拥塞控制或证书设置 |
+| 「Not claimed」CI 条 | 工作流**从未在 Actions 上跑过**，没有核过参考资产名 | 2026-11-16 首跑，第五次跑三个 job 全绿，之前四轮修的是抓取/校验参考实现那几步；保留「没有 release tag 背后有机器报告」「fuzz 只在有界本地会话跑过」 |
+| 已知问题 | XTLS-Vision **与** Hysteria2/TUIC 配置不可用（后者只警告） | 只留 XTLS-Vision 配置期拒绝 |
+| 反馈渠道段 | 私密报告「可能尚未开启」（清单 A4） | 已于 2026-11-16 开启；无细节公开 issue 保留作镜像/分叉的兜底 |
+
+- 范围限定的依据是 `internal/outbound/interop_quic_test.go` 里**实际写下的**服务端配置
+  （hysteria2：listen + 自签证书 + 口令认证；tuic：`cubic`、`["h3"]`、`zero_rtt_handshake:false`）
+  与用例体（32 KiB 回显 + 单数据报），不是凭印象。
+- 未改的段落逐项核过：包内清单（17 bundle / 24 节）、安装步骤、版本横幅、许可证段都与当前
+  tree 一致；`README.md` 的四个语言版本已由前一笔提交改成 Verified，本阶段只 grep 确认、未编辑。
+
+### 任务三：全量回归与基线对照
+
+| 命令 | 结果 | 基线 | 差异 |
+|---|---|---|---|
+| `go build ./...` | 通过 | 通过 | 无 |
+| `go vet ./...` | 通过 | 通过 | 无 |
+| `gofmt -l .` | 无输出 | 无输出 | 无 |
+| `GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...` | 通过 | 通过 | 无 |
+| `go test ./... -count=1 -v` | **1292 / 1271 / 21 / 0** | 1292 / 1271 / 21 / 0 | 条目 ±0、通过 ±0、跳过 ±0、失败 0 |
+| 21 条跳过逐名 `diff` | `IDENTICAL` | 固定集合 | 无 |
+| 前端离线（系统 `/usr/bin/node` 24.22.1、清代理、`--test-concurrency=1`） | **79 / 77 / 2 / 0** | 79 / 77 / 2 / 0 | 无 |
+| 前端实时（真核心 + 真令牌，仓库外 `/tmp/s25-live`，端口 17890/17891/17946） | **79 / 79 / 0 / 0** | 79 / 79 / 0 / 0 | 无 |
+
+- **条目数为什么不变**：两个包的用例形状被刻意保持——`internal/outbound` 前后都是 4 个顶层
+  用例（无子用例），`cmd/melonarc-core` 前后都是「1 个表驱动父用例 + 4 个子用例 + 1 个文案用例」
+  （6 条）。所以条目、通过、跳过三项都是 ±0，而不是「测试改写了，数字顺便变了」。
+- 21 条跳过仍是固定集合：缺参考实现的互通 10、未连接 `sendto` 的 UDP 9、上游「UDP 截断改
+  TCP」1、`TestTUNLinuxLoopback` 1。
+- 前端两套在 Go 侧改动之后跑；本阶段前端源码零改动（`git status` 只有 5 个文件，其中没有
+  `apps/`），数字仍与基线相同。实时装置沿用阶段 24 的做法：`go build` 的核心先 `-check`，再
+  后台起真进程、轮询 `/healthz` 拿真令牌，用例结束即停核心，**没有动** 7890/7891/7946 上的
+  任何遗留进程。
+
+### 关键决策及理由
+
+1. **清空列表，保留类型与两个查询出口。** 任务书要求「机制保留、列表为空」；做法上最省事的
+   是连 `Unusable`/`IsUnusable` 一起删，但那会把「下次证据变差时怎么回来」也一起删掉，矩阵
+   里的 Unusable 定义就失去了机器可读的一半。
+2. **为文案用例留一个 lookup 注入点。** 列表空掉之后，「警告点名节点但不回显参数」不可能再用
+   真实列表测到；删掉那条用例等于承认这条性质以后不再验证。抽一个不导出的 `warnUnusable`，
+   让注入只存在于测试侧，是能保住这条断言的代价最小做法。
+3. **文案用例改用非凭据哨兵，而不是保留旧的口令字面量。** 要证的从来不是「这个口令没被打
+   出来」，而是「`Args` 整体不进日志」。用哨兵串断言同一个性质，测试文件里也不必留口令形状
+   的字符串。
+4. **发布说明把「不可用」换成「范围限定」，而不是把那条边界直接删掉。** 矩阵只写「CI 复跑
+   通过」，读者很容易把它读成「这两种协议的任意配置都可依赖」；写清一次通过覆盖的是哪套
+   配置（口令认证 / `cubic` + `h3` + 关 0-RTT、32 KiB + 单数据报），边界才是可核的。
+5. **改写测试时保持用例形状。** 条目数、跳过数与基线逐项相同，才能把「本阶段没改变测试覆盖
+   面」变成可断言的事实；否则任何数字变化都要读者自己判断是新增覆盖还是覆盖丢失。
+6. **只动告警与文档，不碰协议实现与 README 矩阵。** 矩阵已由前序提交改对，是唯一事实源；
+   这一阶段的任务是让代码与发布说明向它看齐，而不是再引入一个可以漂移的副本。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链 `~/sdks/go/bin` 的 Go 1.27.4，Linux/x86_64：
+
+```
+go build ./...                                              通过
+go vet ./...                                                通过
+gofmt -l .                                                  无输出
+GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...  通过
+go test ./... -count=1 -v                                   1292 条目 / 1271 通过 / 21 跳过 / 0 失败
+前端离线（系统 Node 24，清代理）                             79 / 77 / 2 / 0
+前端实时（真核心 + 真令牌）                                  79 / 79 / 0 / 0
+含 hysteria2 + tuic 的配置起核心                             无 known unusable 警告，/healthz ok
+```
+
+- 改动面只有 5 个文件：`internal/outbound/unusable.go`、`internal/outbound/unusable_test.go`、
+  `cmd/melonarc-core/unusable.go`、`cmd/melonarc-core/unusable_test.go`、
+  `docs/release-notes-0.1.0-preview.1.md`，加上本条目。
+- 命名红线：本批新增/修改文本沿用阶段 21 的已知清单扫描**零命中**；新出现的名字都是公开
+  协议名与已登记的开源参考实现名。许可证口径文件在 `git diff --name-only` 里零命中。
+- `go tool` 与临时装置（`/tmp/s25-live`、`/tmp/s25-warn`、临时 worktree）全在仓库外，用后即删；
+  临时 worktree 已 `git worktree remove` 并 `prune`，`git worktree list` 只剩主树。
+
+### 遗留问题
+
+- **Hysteria2 / TUIC 的 Verified 只覆盖互通套件那套配置**：无 obfs、TUIC 用 `cubic`、单数据报。
+  其它 obfs / 拥塞控制 / 证书组合仍无证据；要扩大结论得先扩用例。
+- **REALITY 仍是 Project record、UDP Unverified**，本阶段按任务书未触碰；规格里 `xtls-rprx-vision`
+  与实现（配置期拒绝）的差异照旧。
+- 清单 **A2（`Cargo.lock`）、B4（Rust 壳）、C1（Windows 实机）、C2（五项性能）、C3（打包安装
+  端到端）** 仍 blocked；A1/A3/A4/A5/A6/A7、B2/B3/B5/B6 已关闭。
+- 发布说明仍是**草稿**：没有 tag、没有 release、没有上传；正式发布前要按清单再核一遍边界，
+  并把 sha256 换成本次发布构建的输出。
+- 阶段 8–24 的既有挂账照旧：真 TUN 枯竭计数非零态、`Status.Skipped` 的 `/v1` 出口、第五个 GUI
+  tile 的真窗口目视验收、`core.log` 无轮转、用户态 TCP 的 IPv6/乱序/窗口缩放、Flush 成本与
+  整表重写、预览桥 query string。
+- 环境侧：本阶段未再触发敏感内容拦截（改写后的测试文件不含口令形状字面量）；若以后仍要从
+  该文件读全文，需注意这一层的审批行为。
+
+### 下一步计划
+
+1. 所有者侧：联网生成 `Cargo.lock`（A2）→ 编译 Rust 壳（B4）→ 才能谈打包安装端到端（C3）。
+2. 性能五项（C2）需要有线测试台与固定构建，本工作区出不了结论。
+3. REALITY 若要离开 Project record，先补 UDP 证据与其它浏览器模板的互通复跑。
+4. 正式发布前：按 `docs/pre-release-checklist.md` 的 A/B/C 组逐项销账，用实际构建的 sha256，
+   并把发布说明里「Draft, not a release」的头部换成发布版本的声明。
