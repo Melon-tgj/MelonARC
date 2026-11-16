@@ -111,7 +111,7 @@ MELONARC_INTEROP_DIR=$HOME/interop-bin scripts/check-interop.sh
 
 ### 本机的预期输出
 
-`/home/hatch/interop-bin` 只布置了 Xray 的三个槽位（`vmess`、`trojan`、`vless`，都是同一个
+`$HOME/interop-bin` 只布置了 Xray 的三个槽位（`vmess`、`trojan`、`vless`，都是同一个
 二进制的链接）。因此在本机：
 
 - Xray 系的 **TCP** 子用例通过（VMess / Trojan / VLESS / VLESS+REALITY）；

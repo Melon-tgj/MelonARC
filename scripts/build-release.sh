@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build the preview release archive: two binaries, the documents that ship with
-# them, and one tar.gz whose digest is printed at the end.
+# them, the third-party licence texts, and one tar.gz whose digest is printed at
+# the end.
 #
 # Usage:
 #   scripts/build-release.sh 0.1.0-preview.1
@@ -11,12 +12,15 @@
 #   2. fills a staging directory melonarc-<version>-linux-amd64/ with the two
 #      binaries, the example configuration, the licence and the three documents a
 #      reader needs before running a binary from the internet;
-#   3. writes dist-release/melonarc-<version>-linux-amd64.tar.gz and prints its
+#   3. copies the licence texts of every third-party module linked into
+#      melonarc-core into licenses/, one file per module (checklist B2);
+#   4. writes dist-release/melonarc-<version>-linux-amd64.tar.gz and prints its
 #      SHA-256.
 #
 # It does not tag, does not publish and does not touch the network. The archive
 # is not claimed to be bit-reproducible: tar records modification times and gzip
-# records the time it ran.
+# records the time it ran. The licence texts are read from the local Go module
+# cache with GOPROXY=off, so a build cannot quietly download a text instead.
 #
 # The whole point of the injected version is that the archive, the binaries and
 # the documents agree on one number, so the two binaries are asked what they are
@@ -66,11 +70,12 @@ name="melonarc-$version-linux-amd64"
 out="$root/dist-release"
 stage="$out/$name"
 tarball="$out/$name.tar.gz"
+tmp="$out/.build-release-licences"
 
-# Re-runnable: the two paths below are the ones this script owns, and they are
+# Re-runnable: the paths below are the ones this script owns, and they are
 # computed from a validated version, never from an argument used verbatim.
-rm -rf -- "$stage" "$tarball" || die "cannot clear the previous output"
-mkdir -p -- "$stage" || die "cannot create $stage"
+rm -rf -- "$stage" "$tarball" "$tmp" || die "cannot clear the previous output"
+mkdir -p -- "$stage" "$tmp" || die "cannot create $stage"
 
 printf 'build-release: building %s\n' "$version"
 
@@ -88,6 +93,94 @@ for file in LICENSE README.md THIRD-PARTY-NOTICES.md SECURITY.md; do
 done
 [ -f "$root/examples/melonarc.conf" ] || die "examples/melonarc.conf is missing"
 cp -- "$root/examples/melonarc.conf" "$stage/melonarc.conf" || die "cannot copy the example configuration"
+
+# --- third-party licence texts (pre-release checklist B2) -------------------
+#
+# Which modules: the dep lines of the core we just built are the authoritative
+# answer to "what is in the artefact". THIRD-PARTY-NOTICES.md section 1 is the
+# published index, so the two sets are compared first: a dependency change that
+# is not reflected in that file fails the build instead of shipping an archive
+# whose notices and licence texts disagree.
+#
+# Which texts: every LICENSE/LICENCE/COPYING/NOTICE file at the root of that
+# exact module version in the local Go module cache. A module that ships
+# several (the SQLite driver does) gets all of them in its one bundle, each
+# under a separator naming the original file. Each source is checked to exist
+# and to be non-empty before it is copied verbatim.
+
+expected_linked=17
+awk '
+    /^## 1\./ { in1 = 1; next }
+    /^## 2\./ { in1 = 0 }
+    in1 && /^\| `/ {
+        split($0, f, "|")
+        m = f[2]; v = f[3]
+        gsub(/[` \t]/, "", m)
+        gsub(/[ \t]/, "", v)
+        if (m != "" && v ~ /^v/) print m "@" v
+    }
+' "$root/THIRD-PARTY-NOTICES.md" | LC_ALL=C sort > "$tmp/notices" ||
+    die "cannot read THIRD-PARTY-NOTICES.md section 1"
+go version -m "$stage/melonarc-core" |
+    awk '$1 == "dep" { print $2 "@" $3 }' |
+    LC_ALL=C sort > "$tmp/deps" || die "cannot read the core build info"
+cmp -s "$tmp/notices" "$tmp/deps" ||
+    die "THIRD-PARTY-NOTICES.md section 1 is out of sync with the core's linked modules"
+nmods=$(wc -l < "$tmp/deps" | tr -d ' ')
+# The count is a tripwire, not a derived value: stage 21/24 recorded 17 linked
+# modules. A dependency change has to update the notices table and this number
+# together; failing closed is better than shipping a stale licence set.
+[ "$nmods" -eq "$expected_linked" ] ||
+    die "expected $expected_linked linked modules, found $nmods (update the notices and this script together)"
+
+licdir="$stage/licenses"
+mkdir -p -- "$licdir" || die "cannot create $licdir"
+nlic=0
+while IFS= read -r mod; do
+    [ -n "$mod" ] || continue
+
+    # Cache-only lookup. GOPROXY=off makes an uncached module fail instead of
+    # being fetched, which keeps the archive's licence texts local and auditable.
+    dir=$(GOPROXY=off GOSUMDB=off go mod download -json "$mod" 2>/dev/null |
+          sed -n 's/^[[:space:]]*"Dir":[[:space:]]*"\([^"]*\)".*/\1/p')
+    [ -n "$dir" ] && [ -d "$dir" ] ||
+        die "no local module-cache copy of $mod (GOPROXY=off)"
+
+    find "$dir" -maxdepth 1 -type f \
+        \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \) \
+        -print | LC_ALL=C sort > "$tmp/files" || die "cannot list licence files in $dir"
+    [ -s "$tmp/files" ] || die "no licence file found in $dir"
+
+    safe=$(printf '%s' "$mod" | tr '/' '_')
+    target="$licdir/$safe.txt"
+    nfiles=$(wc -l < "$tmp/files" | tr -d ' ')
+    {
+        printf 'Third-party licence texts for %s\n' "$mod"
+        # Symbolic, not absolute: a shipped file must not carry a local account
+        # name (pre-release checklist A7). The bundle still names the exact
+        # module version, which is what a reader needs to find the source.
+        printf 'Source: local Go module cache, $GOMODCACHE/%s\n' "$mod"
+        printf '\n'
+        printf 'Generated by scripts/build-release.sh (pre-release checklist B2).\n'
+        printf 'Each section below is a byte-for-byte copy of the named licence\n'
+        printf 'file at the root of this exact module version. The separator lines\n'
+        printf 'are added by the build script and are not part of any licence text.\n'
+        printf 'Files included (%s):\n' "$nfiles"
+        while IFS= read -r f; do printf '  - %s\n' "${f##*/}"; done < "$tmp/files"
+        printf '\n'
+    } > "$target" || die "cannot write $target"
+
+    while IFS= read -r f; do
+        [ -s "$f" ] || die "licence file is missing or empty: $f"
+        printf '\n===== %s =====\n\n' "${f##*/}" >> "$target" || die "cannot write $target"
+        cat "$f" >> "$target" || die "cannot copy $f"
+        printf '\n' >> "$target" || die "cannot write $target"
+        nlic=$((nlic + 1))
+    done < "$tmp/files"
+    printf 'build-release: licences %s -> %s (%s file(s))\n' "$mod" "$safe.txt" "$nfiles"
+done < "$tmp/deps"
+printf 'build-release: %s module licence bundles, %s licence files\n' "$nmods" "$nlic"
+rm -rf -- "$tmp" || die "cannot clear $tmp"
 
 # Sizes are printed because the two numbers a preview reader asks about first are
 # "how big is the download" and "did the strip flags actually apply".

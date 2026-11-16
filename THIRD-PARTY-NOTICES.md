@@ -5,12 +5,14 @@ this tree selects, the licence that component ships, and whether its code ends u
 binaries `scripts/build-release.sh` produces.
 
 - **Checked on** 2026-11-15 (stage 21), Linux/x86_64, Go 1.27.4, against the module cache
-  of that toolchain.
+  of that toolchain. The four module-graph-only modules that were unverified then were
+  downloaded and read on 2026-11-16 (stage 24); see section 2.
 - **Checked how** the licence of each module was read from the `LICENSE`, `LICENCE`,
   `COPYING` and `NOTICE` files that ship **inside that exact version** of the module in
   the local module cache (`$GOMODCACHE/<module>@<version>/`). Nothing here is written
   from memory or from a project's web page. Where a module ships several licence files
-  (the SQLite driver does), each one is named.
+  (the SQLite driver does), each one is named. The four modules fetched in stage 24 were
+  read the same way, after `go mod download` placed that exact version in the cache.
 - **Scope** the two binaries this repository releases (`melonarc-core`, `melonarc-cli`),
   the desktop frontend, and the desktop shell. Test-only and build-only material is
   listed separately and marked as not distributed.
@@ -74,15 +76,15 @@ graph and a `go list -m all` on a connected machine will all report them.
 
 | Module | Version | Licence | Why it is not in the binary |
 |---|---|---|---|
-| `github.com/davecgh/go-spew` | v1.1.1 | **not verified here** — no copy in the local module cache | test-only dependency of another module |
+| `github.com/davecgh/go-spew` | v1.1.1 | ISC (stage 24, from `LICENSE`) | test-only dependency of another module |
 | `github.com/google/pprof` | v0.0.0-20261016150608-1facf8f91b50 | Apache-2.0 | test-only dependency of the SQLite driver |
 | `github.com/hashicorp/golang-lru/v2` | v2.0.7 | MPL-2.0 | module-graph-only dependency of `modernc.org/libc`; file-level copyleft, and no file of it is linked |
-| `github.com/jordanlewis/gcassert` | v0.0.0-20250430164644-389ef753e22e | **not verified here** — no copy in the local module cache | test-only tooling of another module |
+| `github.com/jordanlewis/gcassert` | v0.0.0-20250430164644-389ef753e22e | MIT (stage 24, from `LICENSE.txt`) | test-only tooling of another module |
 | `github.com/mattn/go-isatty` | v0.0.24 | MIT | required by `go.mod` for other targets; no package of it is reached on linux/amd64 |
 | `github.com/ncruces/go-strftime` | v1.1.0 | MIT | same |
-| `github.com/pmezard/go-difflib` | v1.0.0 | **not verified here** — no copy in the local module cache | test-only dependency of another module |
+| `github.com/pmezard/go-difflib` | v1.0.0 | BSD-3-Clause (stage 24, from `LICENSE`) | test-only dependency of another module |
 | `github.com/quic-go/go-ossfuzz-seeds` | v0.1.0 | MIT | fuzz corpus module of `quic-go` |
-| `github.com/quic-go/qpack` | v0.6.0 | **not verified here** — no copy in the local module cache | `quic-go` uses its own copy; no package of this module is linked |
+| `github.com/quic-go/qpack` | v0.6.0 | MIT (stage 24, from `LICENSE.md`) | `quic-go` uses its own copy; no package of this module is linked |
 | `github.com/stretchr/testify` | v1.12.1 | MIT | test-only dependency of other modules |
 | `go.uber.org/mock` | v0.5.2 | Apache-2.0 | test-only dependency of other modules |
 | `go.yaml.in/yaml/v3` | v3.0.5 | Apache-2.0, with the module's `NOTICE` | tooling dependency of other modules |
@@ -103,10 +105,14 @@ graph and a `go list -m all` on a connected machine will all report them.
 | `modernc.org/strutil` | v1.2.1 | BSD-3-Clause | same |
 | `modernc.org/token` | v1.1.0 | BSD-3-Clause | same |
 
-Four modules could not be checked against a local copy because the module cache does not
-hold them. They are marked as such rather than guessed: a licence line that nobody read
-is worse than an honest gap, and none of the four is distributed. Filling them in needs a
-machine with module proxy access (`go mod download` then re-read the same files).
+Four modules could not be checked at stage 21 because the module cache held no copy, and
+were marked "not verified here" rather than guessed. Stage 24 (2026-11-16) ran
+`go mod download` for all four; the module proxy was reachable on this run, and each
+licence was then read from that exact version's own file in the cache: `LICENSE`
+(go-spew, ISC; go-difflib, BSD-3-Clause), `LICENSE.md` (qpack, MIT) and `LICENSE.txt`
+(gcassert, MIT). None of the four is linked into either shipped binary, so this closes
+an accounting gap, not a distribution obligation. **No Go-module row is now unverified**;
+the Rust shell in section 5 still awaits a networked build that produces `Cargo.lock`.
 
 ## 3. C code the SQLite driver carries into the binary
 
@@ -154,9 +160,13 @@ it.
 
 ## 6. What this file does not do
 
-- It does not reproduce the full licence texts. The archive ships this file and the
-  project's own `LICENSE`; bundling the third-party texts is a prerequisite of the first
-  binary release and is tracked in `docs/pre-release-checklist.md`.
+- It is an **index**, not a copy of the full licence texts. Since stage 24 the archive
+  carries them too: `licenses/<module>@<version>.txt` (with `/` written as `_` in the
+  filename), one bundle per module linked into `melonarc-core`. Each bundle holds every
+  `LICENSE*` / `LICENCE*` / `COPYING*` / `NOTICE*` file that exact version ships, copied
+  verbatim from the local Go module cache by `scripts/build-release.sh`, with the source
+  filename above each section. The project's own `LICENSE` stays at the archive root.
+  See `docs/pre-release-checklist.md` B2.
 - It does not decide which GNU GPL version the project is released under; that is the
   copyright holder's decision, and the current divergence between the manifests is
   recorded in `DEVLOG.md` (stage 21).

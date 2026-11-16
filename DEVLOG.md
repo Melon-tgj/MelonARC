@@ -3254,14 +3254,14 @@ alert 24）、`finished == false`、`appData` 为空。成功路径断言
 
 **（4）真实互通复跑（TCP，本机可跑，必须跑）**：
 
-- 服务端：`/home/hatch/interop-bin/vless/server`，`Xray 26.11.9 (Xray,
+- 服务端：`$HOME/interop-bin/vless/server`，`Xray 26.11.9 (Xray,
   Penetrates Everything.) 676eaf6 (go1.27.3 linux/amd64)`
   （`server version` 实测输出）；
 - 二进制 SHA-256（本机复算）：`e87bce586acdb9136aa5b1f1d9c8db9f1ea1d145b6d86368c7f6f662f9f6a66d`；
 - 发布 zip 的 SHA-256 为 `b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82`
   （由编排侧在本机之外与官方 `.dgst` 核对；本机无外网，只能复算**二进制**这一层）；
 - 客户端：本阶段代码，锁版 uTLS 上述伪版本；
-- 命令：`MELONARC_INTEROP_DIR=/home/hatch/interop-bin go test ./internal/outbound/
+- 命令：`MELONARC_INTEROP_DIR=$HOME/interop-bin go test ./internal/outbound/
   -run TestInteropVLESSReality -count=1 -v`；
 - 结果：**PASS，5.2–5.4 s**（其中约 5 s 是参考服务端首次连线时对 `dest` 做画像
   轮询的等待，不是握手耗时），16 KiB TCP 回环一致。
@@ -4065,7 +4065,7 @@ GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...  通过
   说明并退 **2**；跑 `go test ./internal/outbound/ -run TestInterop -count=1 -v`，任一
   `TestInterop*`（父或子）SKIP 或 FAIL 就列出名字并退 **1**；全过退 **0**。另加一条：
   **一个用例都没跑也算失败**，否则过滤条件写错就会"因为没失败而成功"。
-  本机实测（`/home/hatch/interop-bin`，只有 Xray 三槽）：
+  本机实测（`$HOME/interop-bin`，只有 Xray 三槽）：
 
   ```
   check-interop: SKIPPED (a skip means this protocol was not verified)
@@ -4156,7 +4156,7 @@ go test -race ./internal/rules/ ./internal/config/ ./internal/share/ ./internal/
                                                             五包全通过
 GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...  通过
 scripts/check-interop.sh（未设变量）                          退出 2
-MELONARC_INTEROP_DIR=/home/hatch/interop-bin scripts/check-interop.sh
+MELONARC_INTEROP_DIR=$HOME/interop-bin scripts/check-interop.sh
                                                             退出 1，列出 9 条跳过（预期行为）
 ```
 
@@ -4410,8 +4410,8 @@ release tags.」三件事里前两件已经变了。拆成两条，按事实分�
 | 带 `token=`/`key=`/`password=` 的 https 链接 | 37 处（去重后 2 行） | **测试夹具**：`https://example.com/sub?token=abc`（订阅解析用例） |
 | 私钥文件扩展名（`.pem`/`.key`/`id_rsa`/`.p12`/`.pfx`/`.jks`/`.kdbx`/`.gpg` …） | 0 | 从无此类文件被跟踪 |
 | `.env` / `credentials` / `secret` 文件名 | 0 | — |
-| `/home/<name>/` | `/home/melon/` 196 处、`/home/hatch/` 56 处（跨提交计数） | **测试夹具 + 本机环境路径**：前者是 `paths.test.mjs`/`settings.rs` 的 home 目录夹具（`melon` 是开发机账号）；后者是 DEVLOG 与 `docs/interop-testing.md` 里互通二进制的位置。无凭据，但确实写了账号名——列入清单 A7 待所有者决定是否改成 `$HOME` |
-| `/Users/<name>/` | `/Users/melon/` 34 处 | **测试夹具**（macOS 配置目录用例） |
+| `/home/<name>/` | 夹具 home 目录 196 处、本机环境路径 56 处（跨提交计数，按当时的字面量统计） | **测试夹具 + 本机环境路径**：前者是 `paths.test.mjs`/`settings.rs` 的 home 目录夹具；后者是 DEVLOG 与 `docs/interop-testing.md` 里互通二进制的位置。无凭据，但当时确实写了账号名——清单 A7 已处理：文档与日志侧自阶段 24 起改写为 `$HOME`，测试夹具按语义保留 |
+| `/Users/<name>/` | macOS 配置目录夹具 34 处（同上，按当时字面量统计） | **测试夹具**（macOS 配置目录用例）；同上，文档侧改写为 `$HOME`，测试代码里的夹具输入按语义保留 |
 | `C:\Users\<name>` | `paths.test.mjs` 2 行 | **测试夹具** |
 | 非保留段 IPv4 | 历史里 89 个唯一地址，17 个不在保留/文档段 | 全部**夹具或刻意的近邻值**：`1.0.1.x`（geoip mmdb 夹具）、`8.8.8.8`/`1.1.1.1`/`9.9.9.9`（解析器入参，只解析不连接）、`128.0.0.1`（回环判定反例）、`198.51.101.1`/`203.0.114.x`/`2001:db9|dba|dbb`（文档段外一位，证明规则不外溢）、`4.5.1.2` 是 RFC 章节号误报 |
 | 全局 IPv6 | 仅 `2001:db8::/32` 与上述近邻、`2606:4700::/32`（ASN 夹具） | 同上 |
@@ -4533,9 +4533,10 @@ scripts/build-release.sh 0.1.0-preview.1                    通过，产出 tar 
   拍板（补全文，或在发布说明里给源码获取方式）——清单 B2。
 - **四个模块的许可证未核**（没有本地副本，均不进二进制）——清单 B3。
 - **脱敏扫描有一条子检查被环境拦下**（字面量 `password=<值>`），公开前必须补跑——清单 A6。
-- **DEVLOG 与 `docs/interop-testing.md` 里有本机账号路径**（`/home/hatch/interop-bin`），
-  `paths.test.mjs` 等夹具里有 `/home/melon`、`/Users/melon`。不是凭据，但确实是账号名；
-  改不改（日志是记录，不该当草稿改）留给所有者——清单 A7。
+- **DEVLOG 与 `docs/interop-testing.md` 里有本机账号路径**（阶段 24 起统一写作
+  `$HOME/interop-bin`），`paths.test.mjs` 等夹具里有 Linux / macOS 两套 fixture home。
+  不是凭据，但当时确实写了账号名；清单 A7 由所有者定「文档与日志改写为 `$HOME`、
+  测试夹具按语义保留」，阶段 24 落地。
 - **CI 仍未实跑**，且阶段 20 留下的 `TestInteropQUICFixtureReachesSendtoBoundary` 在宽松
   runner 上会把 interop job 判红；本阶段按任务书**未动**（改名与判定口径都属明确排除项）。
 - **前端同源只是预备**：本阶段 tar 不含桌面包，`MELONARC_VERSION` 在真实打包链里还没跑过。
@@ -4860,3 +4861,307 @@ node scripts/build.mjs                             通过，28 文件 / 208.8 Ki
 2. 二进制发布前处理 B2（第三方许可证全文或源码获取方式）与 B3（四个未核模块）。
 3. 沿用阶段 22 的下一步 3/4/5：允许真 TUN 的环境验枯竭计数端到端、`Status.Skipped`
    出口决策、桌面包 `MELONARC_VERSION` 接进真实打包链与 B4/C3 验收。
+
+---
+
+## 阶段 24 — 公开前收尾批：许可证全文随包、脱敏补扫、四模块补核、发布说明草稿（2026-11-16）
+
+范围：四件事——B2 把 17 个进二进制模块的许可证全文收进发布 tar（用户已定「随包附全文」）、
+A6(b) 补跑阶段 21 被环境拦下的口令字面量赋值子检查、B3 补核四个 `not verified` 模块、
+写一份**不发布**的发布说明草稿。任务五（A7 本机路径改写）按任务书在前四项完成后单独一笔
+提交，见本条目后的「任务五补记」。本批不动产品行为：Go/前端源码零改动，改的是构建脚本、
+台账、清单、文档。
+
+开工前：`HEAD = 580a770`（阶段 23），工作区干净，`git rev-list --all` 为 **58 笔**
+（阶段 21 记的 50 笔之后又多了 8 笔），单分支 `master`、无 tag、无 remote。按任务书先读
+`DEVLOG.md`（重点阶段 21「范围二·发布工程」「范围三·全仓脱敏扫描」、阶段 23 条目）与
+`docs/pre-release-checklist.md`；按工程约定同时读了 `docs/development-doc-v1.md`（v1 目标
+规格，头部状态说明要求当前状态以 README 支持矩阵为准）。基线：Go **1292 条目 / 1271 过 /
+21 跳 / 0 败**，前端离线 **79 / 77 / 2 / 0**、实时 **79 / 79 / 0 / 0**。
+
+硬约束逐条照办：**只本地提交，没有 push、没有改仓库可见性、没有打 tag、没有生成正式
+release**；`spikes/` 未动；许可证口径文件（根 `LICENSE`、`apps/desktop/package.json`、
+`src-tauri/Cargo.toml`、`tauri.conf.json`、`src/version.js` 的 `GPL-3.0-only`）**一字未动**；
+命名红线照旧。
+
+### 任务一：B2 —— 17 个模块的许可证全文随 tar（用户已定）
+
+**改动 `scripts/build-release.sh`**（第 3 步新增，前两步逻辑未动）：
+
+- **模块集合不写死在另一份清单里**：对刚构建出的 `melonarc-core` 跑 `go version -m`，
+  取其 `dep` 行（`模块@版本`，本机实测恰好 17 行，与 `THIRD-PARTY-NOTICES.md` §1 的 17 行
+  表格逐行一致）；再用 awk 从该文件的 §1 表格读出同一集合，`sort` 后 `cmp -s` 比对——
+  **不一致或条数不是 17 就 `die`**。台账是索引，产物是事实，两边不许各自漂移。
+- **全文来源只认本机模块缓存**：`GOPROXY=off GOSUMDB=off go mod download -json <模块@版本>`
+  取 `Dir`（缓存外就失败，绝不联网取文本），再 `find` 该目录根层的所有
+  `LICENSE*` / `LICENCE*` / `COPYING*` / `NOTICE*` 文件；**逐个 `[ -s ]` 核对存在且非空**，
+  任一不满足即失败。
+- **每模块一个文件**：落到 `licenses/<模块>@<版本>.txt`（模块路径里的 `/` 写成 `_`），
+  文件头列出模块、缓存路径与所含文件数，随后每节以 `===== 原文件名 =====` 起头，
+  节内是**逐字节原样** `cat` 的许可证正文；分隔行是脚本加的元数据，不混进正文。
+  多许可证文件的模块（libc 2 个、memory 4 个、sqlite 4 个）全部收进同一份 bundle。
+- 打包仍用原来的 `tar -czf … -C "$out" "$name"`，`licenses/` 作为 staging 子目录自然入包；
+  脚本注释与「做什么」清单同步改，`GOPROXY=off` 这条写进注释。
+
+**`THIRD-PARTY-NOTICES.md` 保持索引角色**：§6 第一条从「不复制全文、全文是首发前置条件」
+改写为「本文件是索引；全文在包内 `licenses/`，命名规则、逐字节来源与脚本名一并写明」；
+§1 的 17 行表格**一字未改**（脚本要读它）。清单 B2 从 `blocked` 改 **ready** 并写明做法。
+
+**实跑证据（同一次会话内、同一棵树前后对比）**：
+
+| 项 | 改动前（干净 HEAD 580a770） | 改动后 |
+|---|---|---|
+| tar 清单 | 8 条（1 目录 + 7 文件） | **26 条**（多 `licenses/` 1 条 + 17 个 bundle） |
+| tar 体积 | 9,768,766 B | **9,795,437 B（+26,671 B）** |
+| 许可证 | 0 | **17 bundle / 24 个许可证文件** |
+| 二进制 | core 16,404,640 B、cli 6,852,768 B | 完全相同 |
+
+- 清单 `diff` 只多出 `licenses/` 目录与 17 个文件，其余 8 条逐字不变。
+- **逐字节校验**：解包到 `/tmp/s24-unpack/` 后逐 bundle 解析 `===== … =====` 分节，
+  与模块缓存里同名原文件比较，24 节全部 `byte-identical`，`problems: []`；17 个文件名
+  都与 `<模块>@<版本>.txt` 规则一致。
+- **沿用阶段 21 验收配方**：解包后的核心对**包内** `melonarc.conf` 跑 `-check`，首行
+  `melonarc-core 0.1.0-preview.1`，7 规则 / 1 代理 / 3 组 / 1 host 全部读对，且没有创建
+  `melonarc-data`；`melonarc-cli version` 回报 `melonarc-cli 0.1.0-preview.1`。
+- 脚本自身在 linux/x86_64 上仍有 CLI 版本回读自检；`rm -rf` 的路径仍只来自白名单版本串。
+  **不声称可复现**：tar/gzip 记时间，同树重跑的字节数与 sha 会小幅变化（阶段 21 已记）。
+
+### 任务二：A6(b) —— 阶段 21 被拦下的口令字面量赋值子检查补跑
+
+**目标模式**：键名 + 等号 + 一个非空字面量值的口令赋值形态（阶段 21 记作「字面量赋值子检查」）。
+**范围**：`git grep -n -I -E` 跑全部 **58 个可达提交**（54 笔有命中，历史 2,215 行），
+外加**工作区**全部文本文件（跟踪文件 54 行 + 全量遍历 74 行；后者含 tar staging 里的示例
+配置副本，以及大小写不敏感扫到的驼峰式口令字段变量赋值）。合计 2,343 条记录，去重后
+**73 条 (路径, 行文本)** 逐条分类。
+
+**环境的两次表现**：首轮按阶段 21 的口径输出全明细，报告文件被环境的敏感内容审批拦下
+（「审批超时、输出被扣下」，与阶段 21 同一现象）。**没有重试被扣下的那份输出、没有重建
+其内容**；改为只输出计数、分类、路径、值形状（长度/字符类/sha 前缀）与**脱敏行**的口径
+重跑，扫描覆盖与分类完整，报告落在仓库外 `/tmp`。这是本阶段能补出结论的关键：脱敏扫描
+本来就不该把口令字面量打印出来。
+
+**分类表**（去重行 / 原始命中；五类即任务书给的五类）：
+
+| 分类 | 去重行 | 原始命中 | 文件数 | 说明 |
+|---|---|---|---|---|
+| 测试夹具 | 45 | 1,828 | 16 | `*_test.go`、`fuzz_test.go` 里的短占位口令、大小写变量赋值、`"键名=" + 变量` 拼接、带保留域名的链接夹具、两条 `_test.go` 常量声明 |
+| 生产代码 | 17 | 298 | 12 | **195 条 `== ""` 判空**、54 条注释/键名残片（含 `spec.go` 的两个键名常量）、49 条变量或常量赋值；没有一条是写死的凭据 |
+| 文档 | 8 | 158 | 2 | `DEVLOG.md` 与 `docs/pre-release-checklist.md` 的历史记录、表格行与占位符说明 |
+| 语法示例 | 1 | 47 | 1 | `internal/share/quic.go` 注释里的 QUIC 链接语法示例 |
+| 示例配置 change-me | 2 | 12 | 2 | `examples/melonarc.conf` 与 tar staging 里同一份配置，值都是 `change-me` |
+
+- **带凭据的 URL（`://user:值@host`）指向保留/示例段之外主机的条数：0**；主机全是
+  `example.*`、`127.0.0.1`、`localhost` 一类。
+- 值形状：35 个不同值，最长 20 字符；长度 ≥12 的 5 个、达到「长/高熵」阈值的 3 个
+  **逐个核过结构**：2 个是 `_test.go` 里连字符词组的夹具常量（含 `secret` / `pass` 一类
+  夹具词），1 个是 `subscription_test.go` 里故意写坏的配置字符串中的转义序列；三者都只
+  出现在测试文件，且都不与非保留主机配对。没有 UUID、hex blob 或随机串形状的值。
+- **结论：没有发现疑似真凭据，也没有真订阅 URL；不需要停下、不需要自行处理任何凭据。**
+  与阶段 21 的结论一致（那里把 `alice` / `s3cret` 一类假口令登记为夹具）。
+- 清单 A6 更新：因为任务三把 (a) 的四个模块也核完了，**(a)、(b) 两条尾巴本阶段都已关闭**，
+  A6 整体从 `blocked (partly)` 改 **ready (resolved)**，正文分 (a)/(b) 两段如实写明，
+  并注明首轮输出被扣下、补跑口径只输出聚合/脱敏结果，没有把被扣内容重建出来。
+
+### 任务三：B3 —— 四个 `not verified` 模块补核（成功）
+
+- 开工先探网络：模块代理 `.info` 返回 200 且内容是真 JSON——**本阶段这台机器能出网**，
+  与阶段 21/16 记的「本机无外网」不同，按事实记录、不改历史条目。
+- `go mod download` 对四个模块**一次尝试全部成功**（没有触发重试上限）：
+  `github.com/davecgh/go-spew@v1.1.1`、`github.com/pmezard/go-difflib@v1.0.0`、
+  `github.com/quic-go/qpack@v0.6.0`、
+  `github.com/jordanlewis/gcassert@v0.0.0-20250430164644-389ef753e22e`。下载只落在仓库外的
+  模块缓存，`git status` 无变化。
+- 逐个读**该版本自带**的许可证原文：go-spew `LICENSE` → **ISC**；go-difflib `LICENSE`
+  → **BSD-3-Clause**（三条件含「不得以贡献者名义背书」）；qpack `LICENSE.md` → **MIT**；
+  gcassert `LICENSE.txt` → **MIT**。
+- `THIRD-PARTY-NOTICES.md` §2 四行从「not verified here」换成实际许可证 + 读取阶段与文件名，
+  表后段落改写为补核经过，并写明「四个都不进二进制，关的是台账缺口而非分发义务」、
+  「Go 模块行已无未核项，Rust 壳 §5 仍待联网构建」；文件头的 Checked on / Checked how 补一行
+  说明。清单 B3 从 `blocked` 改 **ready (resolved)**。
+- 口径一致性：B2 全文仍只从**本机模块缓存**取（且用 `GOPROXY=off` 钉死），B3 的四个拉取
+  后也是从同一缓存读原文，没有从网页或印象写。
+
+### 任务四：发布说明草稿（**只是草稿，不发布**）
+
+新建 `docs/release-notes-0.1.0-preview.1.md`，开头即声明「Draft, not a release」——没有 tag、
+没有 release 对象、没有上传。内容：① 这是什么（0.x 源码预览、linux/amd64 的 core+CLI，
+非稳定版）；② 包内清单（含新增的 `licenses/` 17 份 bundle / 24 个文件，sha 以实际构建那次
+输出为准）；③ 从 tar 安装运行：解包 → 改 `melonarc.conf` 里那条文档地址上的占位 SOCKS5
+节点 → `melonarc-core -config ./melonarc.conf -check`（首行版本横幅、`-check` 不建数据目录）
+→ 前台起核心 → `melonarc-cli -data-dir ./melonarc-data status`，监听器全在回环
+（7890/7891/7946），与 `examples/melonarc.conf` 逐项对齐；④ 支持矩阵只复述 README 的
+状态词；⑤ 已知问题与反馈渠道（指向 `SECURITY.md`）。
+
+**诚实边界逐条写明、不比证据乐观**：Hysteria2 / TUIC v5 是 **Unusable**（修复已落码、互通
+未复验，启动只警告不拒绝，不得进稳定包）；REALITY 是 **Project record**（TCP 16 KiB 往
+返）、UDP **Unverified**，且**只有 Chrome 形状的 ClientHello 模板过了真实互通**，不是指纹
+承诺，其它浏览器模板未验；桌面前端不在包内、Rust 壳从未编译、`Cargo.lock` 缺失；五项性能
+目标**未在真实硬件实测**；CI 工作流**从未在 Actions 上跑过**；Windows 只是交叉编译、
+TUN 会话未实现；没有安装器、签名产物、打包安装的端到端证据；XTLS-Vision 配置期拒绝。
+
+### 关键决策及理由
+
+1. **全文用「构建产物的 `dep` 行」定集合，再与台账比对，而不是再抄一份 17 行清单。**
+   义务跟的是分发出去的字节；`go version -m` 是产物自己的回答，抄第三份表只会多一处漂移。
+   比对失败即 `die`，把「台账忘更新」变成构建期错误而不是发布后才发现。
+2. **`GOPROXY=off` 取模块目录。** 任务书要求全文来自本机缓存原文；把网络关掉后，
+   「缓存缺一份」必然失败，不可能悄悄用下载件冒充本地核对过的文本。
+3. **一个模块一个文件，多许可证文件合并成带分隔线的节。** 既满足「每模块一个文件、
+   文件名带模块名与版本」，又不丢 `LICENSE-3RD-PARTY.md` / `LICENSE-SQLITE` /
+   `LICENSE-LOGO` 这类额外文本；分隔线由脚本生成并在文件头声明不是许可证正文，
+   验收时再逐节做字节级比对，把「原样」变成可断言的事实。
+4. **A6(b) 用聚合/脱敏输出补跑，不去碰被扣下的那份输出。** 阶段 21 的拦截针对的是
+   「把口令字面量打出来」，而分类根本不需要看到原值；改成只输出计数、路径与值形状后，
+   扫描覆盖完整、结论可得，也不重试、不绕过、不重建被拦内容。
+5. **B3 成功就把 A6 整体写成已关，但分 (a)/(b) 写清各自证据。** 任务书允许「(a) 也在本阶段
+   解决」时整体关闭；本阶段四个模块确实逐个读到了原文，所以不把 A6 留在「部分关闭」的
+   假状态里，也不把 (a) 的功劳记到扫描头上。
+6. **网络可达只记本阶段这一事实，不改历史条目。** 阶段 16/21 记的是当时的环境；把今天的
+   结果写进阶段 24，并在清单 B3 里点明「旧备注不再适用于本次运行」，比回写流水账准确。
+7. **发布说明只做草稿，边界与 README 逐字对齐。** 它是将来发布时要念的那段话，不是现状的
+   升级声明；凡是没有真实互通/实机/实测证据的，一律用 README 的状态词或明确否定句。
+
+### 当前状态
+
+全部命令在仓库根目录执行，工具链 `~/sdks/go/bin` 的 Go 1.27.4，Linux/x86_64：
+
+```
+go build ./...                                              通过
+go vet ./...                                                通过
+gofmt -l .                                                  无输出
+GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...  通过
+go test ./... -count=1 -v                                   1292 条目 / 1271 通过 / 21 跳过 / 0 失败
+scripts/build-release.sh 0.1.0-preview.1                    通过（17 bundle / 24 文件、tar +26,671 B）
+解包后 melonarc-core -config …/melonarc.conf -check          通过（首行版本横幅、7/1/3/1、未建数据目录）
+解包后 melonarc-cli version                                 melonarc-cli 0.1.0-preview.1
+```
+
+- **逐项对基线**（`580a770`，1292/1271/21/0）：条目 ±0、通过 ±0、跳过 ±0、失败 0；
+  21 条跳过逐名与阶段 20 记录的集合一致（缺参考实现的互通 10、未连接 `sendto` 的 UDP 9、
+  上游 UDP 截断改 TCP 1、真 TUN 1）。本批没有 Go/前端源码改动，条目数不变是预期。
+- **前端**（系统 `/usr/bin/node` 24.22.1、清代理、`--test-concurrency=1`）：离线
+  **79 / 77 / 2 / 0**（基线 79/77/2/0）；实时 **79 / 79 / 0 / 0**（基线 79/79/0/0）。
+  实时装置在仓库外 `/tmp/s24-live/`，`go build` 的核心 `-check` 通过后后台起真进程，
+  令牌轮询 `/healthz` 到 `{"status":"ok",...}`，入站/API 用 17890/17891/17946 三个空闲端口，
+  **没有动** 7890/7891/7946 上的任何遗留进程；用例结束后核心已停。
+- 命名红线：本批新增/修改的脚本、台账、清单、发布说明草稿与提交信息按阶段 21 记录的
+  已知清单扫描**零命中**；新出现的第三方名字都是开源项目/公开协议名。许可证口径文件在
+  `git diff --name-only` 里**零命中**。
+- `git status` 的改动面只有：`scripts/build-release.sh`、`THIRD-PARTY-NOTICES.md`、
+  `docs/pre-release-checklist.md`、新增 `docs/release-notes-0.1.0-preview.1.md`，加上本条目。
+
+### 遗留问题
+
+- **A7 路径改写**按任务书单独一笔提交，见「任务五补记」；本条目不含那部分内容。
+- 清单 A1（图标资产未随快照推送）、A2（`Cargo.lock`）、A3（CI 从未实跑、三个资产 glob
+  未核 404）、A4（私密报告入口未开启）仍 **blocked**，本批未触碰。
+- B4（Rust 壳未编译）、B5（Hysteria2/TUIC 真实互通未复验）、C1（Windows 实机）、
+  C2（五项性能未测）、C3（打包安装端到端）照旧；`THIRD-PARTY-NOTICES.md` §5 的 Rust
+  三个 crate 仍是「本地未核」，与 B3 关闭的四行不是同一件事。
+- 发布说明是**草稿**：没有 tag、没有 release、没有上传；正式发布前还得按清单过一遍，
+  并把 sha 换成发布那一次构建的输出。
+- 阶段 8–23 的既有挂账照旧：真 TUN 枯竭计数非零态、`Status.Skipped` 的 `/v1` 出口、
+  第五个 GUI tile 的真窗口目视验收、REALITY UDP 证据、预览桥 query string、`core.log`
+  无轮转、用户态 TCP 的 IPv6/乱序/窗口缩放、Flush 成本与整表重写。
+- 本机「能出网」只在本次会话成立；阶段 24 的 B3 结论不依赖以后是否还能连上代理。
+
+### 下一步计划
+
+1. 任务五（A7）：把 DEVLOG 与 `docs/interop-testing.md` 里的本机账号路径改写为 `$HOME`
+   口径，逐处判断桌面测试夹具里的 home 路径，给出全仓 grep 对照；**单独一笔提交**。
+2. 让所有者处理 A1/A4，并在能出网的机器上首跑 CI（补 Snell 两个仓库变量、核三个资产
+   glob）、生成 `Cargo.lock`；之后才有 B4/C3 的桌面包与端到端安装验收。
+3. 在允许 UDP 的环境复验 Hysteria2 / TUIC，通过后才把 README 与发布说明那两行从
+   「Unusable」移走；REALITY 若开放其它浏览器模板，按模板逐个复跑互通。
+4. 正式发布前：把草稿里的边界按当时的证据再核一遍，用实际发布那次构建的 sha256，
+   并按 `docs/pre-release-checklist.md` 的 A/B/C 组逐项销账。
+
+### 任务五补记：A7 —— 本机路径改写为 `$HOME` 口径（单独一笔提交）
+
+按任务书，本项在前面四项**提交完成**（`65480a8`）之后才动手，并且**单独一笔 git 提交**，
+不与前四项混提交。所有者已定：本机路径字样统一改写为 `$HOME` 口径。本补记里不复述账号名，
+以免文档本身又变成 grep 命中。
+
+**1. 文档与日志类文本：全部改写**
+
+- `DEVLOG.md` 里 5 处互通二进制目录（阶段 16 的服务端路径与 `go test` 命令、阶段 20 的
+  本机实测与 `check-interop.sh` 命令、阶段 21 遗留问题）统一为 `$HOME/interop-bin`；
+  命令仍可照抄执行（`MELONARC_INTEROP_DIR=$HOME/interop-bin …`），句子结构未变。
+- `DEVLOG.md` 阶段 21 脱敏扫描表两行 home 目录计数：**保留 196 / 56 / 34 三个当时的字面量
+  计数**（历史证据不改数），把具体账号目录换成「夹具 home 目录 / 本机环境路径 / macOS
+  配置目录夹具」的类别描述，并注明阶段 24 起文档侧改写为 `$HOME`、夹具按语义保留。
+- `DEVLOG.md` 阶段 21 遗留问题的 A7 条目：从「留给所有者决定」改为「所有者已定、阶段 24
+  落地」，不再复述账号名。
+- `docs/interop-testing.md` §6「本机的预期输出」一处改为 `$HOME/interop-bin`；该文件其余
+  位置原本就是 `$HOME/interop-bin` / `~/interop-bin`，未动。
+- `docs/pre-release-checklist.md` A7：`owner decision` → **ready (resolved)**，正文写明决策、
+  改法、保留理由与 grep 对照的出处。
+
+**2. 构建产物里新发现的一处本机路径（同属 A7，一并修掉）**
+
+B2 的许可证 bundle 文件头原先把 `go mod download -json` 返回的绝对 `Dir` 写了进去，于是
+17 个**随包分发**的文本文件各带一行本机账号路径。改 `scripts/build-release.sh`：文件头改成
+符号化的 `$GOMODCACHE/<模块>@<版本>/`（单引号 `printf`，`$GOMODCACHE` 不展开），并在脚本里
+写明理由。重跑打包后，17 个 bundle 与解包产物里**零本机账号路径**；许可证正文仍逐字节来自
+本机模块缓存，B2 的证据链不受影响。这一处是 A7 扫描时才暴露的，属于「发布件不该带本机
+路径」的同一条规则，所以放在本笔提交里。
+
+**3. 测试夹具：逐处判断后保留**
+
+| 文件 | 保留行 | 判断 |
+|---|---|---|
+| `apps/desktop/test/paths.test.mjs` | 10 | `configHome` / `resolveDataDir` 的 Linux、macOS 两套 home 夹具输入与成对的字面量期望值，验的就是 `~/.config` 与 `~/Library/Application Support` 的真实绝对路径形状 |
+| `apps/desktop/test/supervisor.test.mjs` | 4 | 一份 `defaults` 夹具常量 + `settingsPath` 的 home 输入与 `path.join` 期望值 |
+| `apps/desktop/src-tauri/src/settings.rs` | 3 | `#[cfg(test)] mod tests` 里 `resolve_with` 的设置文件输入，以及默认数据目录/核心配置的两条断言 |
+| `apps/desktop/test/client.test.mjs` | 2 | shell 设置 wire 夹具的 `settings_path` 及其映射断言 |
+| `apps/desktop/test/gui-settings.test.mjs` | 1 | 设置面板视图夹具的 `settingsPath` |
+
+**共同理由**：这些字符串都是夹具输入或成对的字面量期望值，断言的是平台目录拼接结果；
+`$HOME` 在 JS / Rust 字符串字面量里不会展开，替换后用例会从「验证平台目录约定」退化成
+「验证占位符拼接」，**改变测试语义**。按任务书「若改动会改变测试语义则保留」逐处保留并在此
+登记。另有 `paths.test.mjs` 两行 Windows 夹具用反斜杠形式写同一账号名，不在本次 grep 的
+正斜杠模式内；同属夹具输入，按同一理由保留、未改。
+
+**4. grep 对照（任务书给定的三种路径模式，排除 `.git/` 与 `.workbuddy/`）**
+
+| | 改前 | 改后 |
+|---|---|---|
+| 命中行 | **47** | **20**（21 处字符串，有一行两个） |
+| 文档与日志（`DEVLOG.md` 8 行、两份 `docs/` 各 1 行） | 10 | **0** |
+| `dist-release/` 里 17 个 bundle 的文件头 | 17 | **0** |
+| 测试代码 | 20 | 20（上表逐文件登记保留理由） |
+
+改前的 47 行里，17 行是本阶段 B2 刚引入、由 A7 一并修掉的；剩余 20 行全部是上表的夹具
+字符串，**没有一条是生产代码、配置、文档或日志**。仓库里已经没有任何一处写出本机账号的
+绝对 home 路径，除了这些被明确登记为「按语义保留」的测试夹具。
+
+**5. 收尾验证（A7 改动之后重跑）**
+
+```
+go build ./... / go vet ./... / gofmt -l . / GOOS=windows 交叉编译      全过
+go test ./... -count=1 -v                    1292 条目 / 1271 过 / 21 跳 / 0 败
+21 条跳过逐名 diff                            IDENTICAL（与基线及本批先前那次相同）
+前端离线（系统 Node 24，清代理）             79 / 77 / 2 / 0
+前端实时（真核心 + 真令牌）                  79 / 79 / 0 / 0
+```
+
+- 实时装置沿用本阶段前面那套（仓库外临时目录、空闲端口、用例结束即停核心），没有动
+  7890/7891/7946 上的任何遗留进程。
+- **提交 `65480a8` 后从干净状态实跑打包**：26 条清单、17 bundle / 24 节逐字节一致、
+  9,795,710 B、sha256 `0dae6207…`；解包 `-check`（首行版本横幅、7/1/3/1、未建数据目录）
+  与 `melonarc-cli version` 全过。**A7 头部修正后重跑**：9,795,724 B、
+  sha256 `f87e4423…`，清单与逐字节校验不变。两次与正文记的 9,795,437 B 的差额来自
+  `THIRD-PARTY-NOTICES.md` 台账更新与 tar/gzip 时间戳，**不声称可复现**。
+- A6(b) 提交后复扫：可达提交 58 → 59，历史命中行 2,215 → 2,269（新提交把同一批字节写进
+  历史），去重后**仍是同一批 73 条 (路径, 行)**，三个「长/高熵」值的结构与归属不变，
+  **没有新值、新主机或新形状**；分类表与结论不用改。
+- 命名红线：本笔新增/修改文本按阶段 21 的已知清单扫描零命中；许可证口径文件在
+  `git diff --name-only` 里零命中。改动面只有 `DEVLOG.md`、`docs/interop-testing.md`、
+  `docs/pre-release-checklist.md`、`scripts/build-release.sh` 四个文件。
+
+**6. 提交与遗留**
+
+本补记连同 A7 的四处改动**单独一笔本地提交**；没有 push、没有改仓库可见性、没有打 tag、
+没有生成正式 release。清单 A7 关闭；A1（图标资产）、A2（`Cargo.lock`）、A3（CI 首跑）、
+A4（私密报告入口）仍 **blocked**，B4/B5/C1/C2/C3 与阶段 8–23 的既有挂账照旧，见本条目
+「遗留问题」与「下一步计划」。
