@@ -5343,3 +5343,883 @@ go test ./... -count=1 -v                                   1292 条目 / 1271 �
 3. REALITY 若要离开 Project record，先补 UDP 证据与其它浏览器模板的互通复跑。
 4. 正式发布前：按 `docs/pre-release-checklist.md` 的 A/B/C 组逐项销账，用实际构建的 sha256，
    并把发布说明里「Draft, not a release」的头部换成发布版本的声明。
+
+---
+
+## 阶段 26 — 订阅跳过明细的 `/v1` 只读出口（2026-11-16）
+
+范围：阶段 22 留下的那条挂账——「`Status.Skipped` 要不要有 `/v1` 出口（若要，先定分页与保留
+窗口）」。阶段 22 已经让订阅刷新按条目记录跳过原因（`share.ParseAll` 返回 `[]Rejection`、
+`Status.Skipped` 计数、日志里逐条 Warn 但**只打前 8 条**），但这份明细没有任何出口：GUI 与
+CLI 只能看到一个数字，看不到「第几条、为什么」。本阶段按 2026-11-16 的所有者决策 A 补一个
+独立的只读端点，并让它同时被 CLI 与桌面 UI 用上。
+
+本阶段**不改**解析与跳过的判定逻辑（一个字都没动 `share` / `outbound` 的判定），**不改**现有
+订阅响应的结构（明细单独成端点，摘要仍然只有计数），不新增第三方依赖，`spikes/` 与 `docs/`
+未动；只本地提交，没有 push、没有打 tag。
+
+开工前：`HEAD = 37577fb`（阶段 25），工作区干净，`git rev-list --all` 为 **70 笔**，单分支
+`master`、无 tag、无 remote。按任务书先读 `DEVLOG.md`（重点阶段 22 的保留语义与阶段 25 的
+遗留清单）与 `docs/development-doc-v1.md`。基线按阶段 25 记录：Go 全量 **1292 / 1271 / 21 / 0**，
+前端离线 **79 / 77 / 2 / 0**、实时 **79 / 79 / 0 / 0**；动手前先跑了一次 Go 全量，四个数字与
+基线逐项相同，21 条跳过逐名一致。
+
+### 完成了什么
+
+**核心保留（`internal/subscription`）**
+
+- `state.skipped` 的语义写进类型注释：它是**最近一次完成的刷新**的**完整**跳过明细，不是日志
+  里那前 8 行；日志有上界是怕坏订阅刷屏，明细不设上界、按页送出。
+- 成功路径（`refresh`）：整份替换，**包括替换成空**——供应商修好了列表就必须停止「看起来坏着」，
+  于是节点与明细永远描述同一份响应体。
+- 失败路径（`refresh`）：**故意不动**明细。理由写在代码里：明细描述的是「正在生效的节点」，
+  而这次失败恰恰保留了那些节点；把一次被拒的响应体的拒收原因换成明细，等于让端点解释一份
+  守护进程并未使用的列表。从缓存读回的旧响应体也不是「完成的刷新」，因此不带自己的明细。
+- `maxReportedSkips` 的注释改成「上界属于日志，不属于管理器保留的东西」，避免下一个人把它当成
+  明细的长度上限。
+- 新增 `Status(name) (Status, bool)`（按名取一份状态，`Skipped` 是拷贝）与 `statusOf(st)`，
+  让 `Snapshot` 与 `Status` 共用同一个渲染点，不会一处改了另一处忘了。
+- 新增分页出口：
+
+  ```go
+  const (
+      DefaultSkippedPage = 100
+      MaxSkippedPage     = 500
+  )
+  type SkippedPage struct {
+      Name      string
+      Refreshed bool
+      FetchedAt time.Time
+      Total     int
+      Offset    int
+      Limit     int
+      Items     []Skip
+  }
+  func (m *Manager) Skipped(name string, offset, limit int) (SkippedPage, bool)
+  func ClampSkippedPage(offset, limit int) (offset, limit int)
+  ```
+
+  `Skipped` 的 `Items` 恒为非 nil（空页是 `[]Skip{}` 而不是 `null`），`Refreshed` 取
+  `!fetchedAt.IsZero()`，未知名字返回 `false` 让调用方能与「没跳过」区分。窗口钳制抽成导出的
+  `ClampSkippedPage`，因为守护进程层在「配置声明了这个订阅、但管理器还没见过它」时也要给出
+  一个空页，那一页必须报**调用方本来会拿到**的窗口，而不是自己另定一个尺寸。
+
+**API（`internal/api`）**
+
+- 两条新路由，沿用既有 `/v1` 命名与 `only(method, handler)` 包装：
+
+  ```go
+  mux.HandleFunc("/v1/subscriptions", s.only(http.MethodGet, s.handleSubscriptions))
+  mux.HandleFunc("/v1/subscriptions/{name}/skipped", s.only(http.MethodGet, s.handleSubscriptionSkipped))
+  ```
+
+- 新文件 `internal/api/subscriptions.go`：`maxSkippedPage = 500`、两个 handler、`parseSkippedPage`、
+  `parseOffset`。`server.go` 里把原来的 `parseLimit` 拆成 `parseLimit`（用 `maxRulePage`）与
+  `parseLimitWithin(raw, max)`，于是跳过明细对 `limit=501` 回的是**带原因的 400**
+  （`limit 501 is above the maximum of 500`），而不是悄悄截断。
+- 线上类型（`views.go`）与内部类型分开：`SubscriptionView` / `SubscriptionListView` /
+  `SkippedListView` / `SkippedEntryView`，`Provider` 接口加两个方法。摘要里**没有** `skipped`
+  明细数组，**也没有** `URL`（订阅地址常带 token，不能顺手送进只读视图）。
+- 名字是路径段，配置名允许含 `/`，因此客户端按单段转义（`airport%2Fus`）；Go 1.22+ 的 mux 会把
+  `%2F` 解码回一个段、不再当成多段（开工前单独写了一个 6 行程序验过）。空名字不服务：`//` 会被
+  mux 以 307 折叠，handler 对空名字另给 404 `unknown_subscription`。
+- 错误沿用既有风格：未知订阅 404 `unknown_subscription`、参数非法 400 `bad_request`、无令牌 401、
+  非 GET 405 带 `Allow: GET`；响应照旧 `Cache-Control: no-store`。
+
+**守护进程（`cmd/melonarc-core`）**
+
+- `daemonState` 加 `subs *subscription.Manager`，注释说明它**不进**重载快照：管理器跨重载保留
+  状态（阶段 11 的语义），所以一次重载不重取、明细也跟着活下来。
+- `Subscriptions` 按**当前生效的配置**列，不按管理器记忆列：重载删掉一个订阅后，管理器还留着它
+  的上一次结果，照记忆列会报出一个守护进程已经不再有的订阅。
+- `subscriptionView` 对「配置里有、管理器还没见过」给零值（计数 0、时间空串），这是诚实的答案，
+  首次导入尚未完成时就会出现。
+- `SubscriptionSkipped` 先查配置声明（`declaresSubscription`），再取页；管理器不认识时返回空页 +
+  `refreshed:false`，而不是 404——「有订阅但还没刷新完」与「根本没有这个订阅」是两件事。
+
+**CLI（`internal/cli`）**
+
+- 新命令 `subscriptions [name] [offset] [limit]`：无参时一张摘要表
+  （`NAME NODES SKIPPED LAST REFRESH NEXT ATTEMPT ATTEMPTS ERROR`，空配置打印
+  `no subscription is configured`）；带名字时按页打印 `ITEM REASON` 两列，页脚
+  `1-1 of 2 skipped entries`，后面还有时给一行 `next: melonarc-cli subscriptions <name> <to> <limit>`。
+- 三种空答案分别有话说：「还没完成过一次刷新」/「最近一次刷新没有跳过任何条目」/
+  「offset N 之后没有条目」。`-json` 原样透传。名字用 `url.PathEscape` 拼进路径。
+- usage 文本补了这条命令与两行示例；原本只查一条命令的 `TestUsageDocumentsHistory` 改名
+  `TestUsageDocumentsEveryCommand` 并同时校验 `history` 与 `subscriptions` 的用法行。
+
+**GUI（`apps/desktop`）**
+
+- 新面板 `subscriptions`（`order: 25`，落在 policies 20 与 connections 30 之间），图标、标题键、
+  注册表一并补齐。摘要每 10s 轮询一次（面板可见时才轮）；**明细只在点开时取一页**，不预加载，
+  收起即丢。每个打开动作带票号，晚到的应答直接丢弃，不会把上一页画到这一页上。
+- 明细卡片按五种状态渲染：取数错误 / 载入中 / `refreshed:false`（还没刷新完）/ `total:0`
+  （最近一次没跳过）/ 表格 + 分页条。分页条用**服务端回的 `limit`** 走下一页，不自己假设页大小。
+- 文案 en / zh-CN 各加 24 键（`nav.subscriptions` + 23 条 `subscriptions.*`），两份包现在各
+  **270 键**；两处文件都是按行插入，没有重排既有分组。
+- `client.js` 加 `Paths.subscriptions`、`subscriptions()`、`subscriptionSkipped(name, {offset, limit})`；
+  `panels.css` 加 `/* ---- subscriptions */` 一段列宽与分页条样式。
+
+**测试**
+
+- `internal/subscription`（+8 条）：完整性与分页（12 条拒收、四页、条目号 1..12）、默认页与大页
+  上限、下一次完成的刷新整体替换（脏→干净→部分脏）、刷新失败时明细与 `FetchedAt` 不变、
+  明细不受日志 8 条上界影响（日志 8 行 / `count=4` / 明细 12 条）、未知名字、从未完成的刷新，
+  以及 `ClampSkippedPage` 的窗口表。
+- `internal/api`（+5 条）：摘要只有计数（响应体里没有 `"reason"`）、单页与参数透传（含
+  `airport%2Fus` 的解码）、空与未知分开、非法分页（`offset=-1/abc`、`limit=-1/abc/501` 全部 400，
+  边界值 `""`/`0`/`500`/`offset=12&limit=1` 全部 200）、方法与令牌契约（405 + `Allow: GET`、401）。
+- `internal/cli`（+4 条参数表用例 + 3 条用例）：摘要表、两页明细（断言请求的 offset 依次是
+  `0|2`、`2|2`）、三种空答案不混。新增的假核心需要错误体，补了 `writeErrorBody` 小助手。
+- `cmd/melonarc-core`（+1 条）：装配级用例——摘要 2 节点 / 2 跳过且不含 `"reason"`，翻页拿到
+  条目号 2 与 3，理由不引用被拒主机名，`typo` 404，`limit=999` 400。
+- 前端（+3 条）：点开才取（断言 `calls` 只有一次 `{name:"airport",offset:0,limit:20}`，翻页后
+  才出现 offset 2）、三种空答案分开、收起之后再到的应答被丢弃（用可控 promise 制造晚到）。
+  实时套件加了订阅摘要与一页明细的断言（配置里有订阅时才深入明细）。
+- 两条按面板数量写死的旧断言随新面板更新：`app-smoke-run.mjs` 的导航 7 项（并新增点开
+  「跳过明细」、翻页条文案、收起后明细消失三段断言，末尾日志改为 7 panels）、`registry.test.mjs`
+  的「至少七个面板」与前三个 id 改为 `overview, policies, subscriptions`。这不是放宽断言，
+  是新面板的应有结果。
+
+### 关键决策及理由
+
+1. **两个端点，而不是把明细塞进 `GET /v1/subscriptions`。** 任务书红线是「现有订阅响应保持
+   轻量」，而且一份坏订阅的明细可以是几千条：摘要回答「有几个节点、跳过几个」，明细回答
+   「第几条为什么」，两个问题的读者与频率完全不同。
+2. **路径 `/v1/subscriptions/{name}/skipped`。** 名字是配置名（可含 `/`），用单段 `%2F` 表达；
+   明细属于某个订阅，放在名字下面比 `?name=` 更贴合既有 `/v1/rules/explain?name=` 之外的路由
+   习惯（explain 是查询语义，这里是资源语义）。
+3. **保留窗口 = 最近一次完成的刷新；成功即整体替换（含空），失败不动。** 这条是为了让「明细」
+   与「节点」永远同源。若失败也换明细，用户会看到一份解释「没被采用的列表」的原因表；若成功
+   空结果不覆盖，供应商修好后端点仍旧报旧错误，排障方向被带偏。
+4. **日志上界与保留分离。** `maxReportedSkips = 8` 是打印预算，不是保留预算；两者混用会让
+   「端点只给 8 条」变成一条看不见的静默截断。
+5. **默认 100 / 上限 500，两处都实现。** API 对 `limit>500` 回 400 并说明原因（客户端能改），
+   管理器再钳一次（防绕过 API 的调用方把一次应答变成整张表）。默认值存在的理由是「有人打开
+   屏幕」不该触发一次全量序列化。
+6. **三种空答案必须分开。** `refreshed:false`（从未完成）、`total:0`（最近一次没跳过）、
+   偏移越界（空页但 `total` 还在）；未知名字走 404。全合成一个空数组，会让「订阅没生效」和
+   「订阅很干净」长得一模一样。
+7. **摘要不含 `URL`，明细不含链接。** 订阅地址常带凭据；跳过理由由链接解析产生，用例断言理由
+   不引用被拒主机名（阶段 22 的 warn 口径在这里继续成立）。
+8. **GUI 单开一个面板。** 订阅名不在任何既有载荷里，塞进连接面板要么改结构、要么让连接面板
+   去猜名字；新面板 25 位既符合导航顺序，也让「点开才取」有一个自然的位置。
+9. **`subs` 不进重载快照。** 管理器本来就是跨重载保留状态的（阶段 11），明细跟着它走才对；
+   把管理器塞进快照会在每次重载时把明细重置成「还没刷新」。
+10. **导出 `ClampSkippedPage`。** 守护进程层要为「还没见过」的订阅合成一页空答案，窗口必须与
+    真页一致；与其在 `cmd/` 里抄一份 100/500，不如把这条规则留在一个地方。
+
+### 当前状态
+
+```
+go build ./...                                     通过（go1.27.4）
+go vet ./...                                       通过
+gofmt -l .                                         无输出
+GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...
+                                                   通过
+go test ./... -count=1 -v                          1313 条目 / 1292 通过 / 21 跳过 / 0 失败
+前端离线（系统 Node 24.22.1，清代理，--test-concurrency=1）
+                                                   82 条目 / 80 通过 / 2 跳过 / 0 失败
+前端实时（真核心 + 真实令牌文件）                  82 条目 / 82 通过 / 0 跳过 / 0 失败
+node scripts/build.mjs                             通过，29 文件 / 221.4 KiB
+```
+
+Go 条目 **1313 / 1292 / 21 / 0**（基线 1292 / 1271 / 21 / 0，+21 条，跳过集合逐名一致，
+21 条仍是「缺参考实现的互通 10 + 未连接 `sendto` 的 UDP 9 + 上游 UDP 截断改 TCP 1 +
+`TestTUNLinuxLoopback` 1」）。新增逐项：
+
+| 包 | 新增条目 | 内容 |
+|---|---|---|
+| `internal/subscription` | +8 | 7 条跳过明细用例 + `ClampSkippedPage` |
+| `internal/api` | +5 | 摘要、单页、空与未知、非法分页、方法与令牌 |
+| `internal/cli` | +7 | 4 条参数表用例 + 摘要/翻页/三种空答案 |
+| `cmd/melonarc-core` | +1 | 装配级端到端（含翻页与 404/400） |
+
+对照全量 `=== RUN` 名单，**减少的只有两条**：`TestUsageDocumentsHistory`（改名成
+`TestUsageDocumentsEveryCommand`，一减一增）与 `TestSOCKS5Connect/<addr>:<port>` 的两个子用例
+（子用例名字里带随机端口，每次跑都不同，属既有噪声，不是用例增减）。
+
+前端离线 **82 / 80 / 2 / 0**（基线 79 / 77 / 2 / 0，+3 = 三条新面板用例；2 条跳过仍是
+`live-core.test.mjs` 的两条），实时 **82 / 82 / 0 / 0**（基线 79 / 79 / 0 / 0，同样 +3）。
+
+实时装置（仓库外 `/tmp/s26-live/`）：`go build` 出核心与 CLI，配置用 17946（API）/17890（HTTP）
+/17891（SOCKS5），另起一个 `python3 -m http.server` 在 17947 上提供订阅体（5 行：3 条可用、
+2 条被拒），`-check` 通过后后台起核心、带令牌轮询 `/healthz` 到 200，再跑前端实时套件；
+**没有动** 7890/7891 上更早阶段留下的演示核心。实测四个答案与预期一致：
+
+```
+GET /v1/subscriptions
+{"subscriptions":[{"name":"airport","nodes":3,"skipped":2,"fetched_at":"...","next_at":"...","attempts":0}]}
+
+GET /v1/subscriptions/airport/skipped?offset=0&limit=1
+{"subscription":"airport","refreshed":true,"total":2,"offset":0,"limit":1,
+ "skipped":[{"item":2,"reason":"ss link: the link has no method:password pair"}]}
+
+GET /v1/subscriptions/typo/skipped          → 404 unknown_subscription
+GET /v1/subscriptions/airport/skipped?limit=501 → 400 "limit 501 is above the maximum of 500"
+```
+
+CLI 对同一个真核心：摘要表一行 `airport 3 2 ...`；`subscriptions airport 0 1` 打印
+`2  ss link: ...` 与页脚 `1-1 of 2 skipped entries` + `next:` 提示；`offset=1` 打印第 3 条与
+`2-2 of 2 skipped entries`（无提示）；`subscriptions typo` 退出码 1 且 stderr 只有
+`unknown_subscription: no subscription is named "typo"`。跑完两个进程都已停，端口已释放。
+
+### 遗留问题
+
+- **阶段索引表停在阶段 22**（23/24/25 三条都没有行）。本阶段按最近三阶段的做法只追加记录、
+  不擅自回填别人的摘要；要不要补齐由所有者定。
+- 条目数 +21 是本阶段唯一的结构性变化：以后若同一批文件再改测试，仍以「条目无增减」为对照
+  基准时，要记得基线已从 1292 变成 1313。
+- 明细的**理由文本**由链接解析产生，用例断言它不引用主机名/凭据；这是用例守着的性质，不是
+  类型保证——以后改解析错误文案时不能把链接片段带进去。
+- 桌面侧只在无头 DOM（假 DOM + 实时核心）里验过；新面板的真窗口目视验收仍属 B4 的挂账
+  （Rust 壳本机编不出来）。
+- 实时装置用的是回环 `http.server` 提供订阅体，**真实供应商**的路径（gzip、重定向、大响应体）
+  仍未覆盖；这些走的是 `internal/subscription` 既有取数路径，本阶段没改它。
+- 摘要里没有 `refreshed` 字段（只有 `fetched_at` 为空表示没刷新过），明细页才有。这是有意的：
+  摘要要保持「计数 + 时间」的最小形状，若以后 GUI 需要在摘要上直接区分，得另议。
+- 阶段 8–25 的既有挂账照旧：A1/A2 打包资产与 `Cargo.lock`、B4 Rust 壳、C1 Windows 实机、
+  C2 性能实测、C3 端到端安装、真 TUN 枯竭计数非零态、第五个 GUI tile 的真窗口目视验收、
+  `core.log` 无轮转、用户态 TCP 的 IPv6/乱序/窗口缩放、Flush 成本与整表重写、预览桥 query string。
+  **本阶段关闭了「`Status.Skipped` 的 `/v1` 出口」这一条。**
+
+### 下一步计划
+
+1. 若要收尾 GUI：先解决 B4（联网生成 `Cargo.lock` 并编译壳），订阅面板的真窗口验收才可做。
+2. 订阅侧下一件有价值的事是「供应商真实形态」的取数覆盖（gzip/重定向/超大响应体），以及
+   明细的理由文案统一（现在直接来自各协议解析器的错误文本）。
+3. 发布侧仍按 `docs/pre-release-checklist.md` 推进；本次改动不涉及打包清单，但 `core.log`
+   仍无轮转，订阅刷新的警告量一旦变大值得一并处理。
+4. 索引表回填、发布说明里对订阅明细的描述，等所有者确认口径后再动（避免与 README 矩阵、
+   发布说明草稿的说法打架）。
+
+## 阶段 M1 — macOS 构建打通（2026-11-17）
+
+范围：macOS 桌面端 MVP 的第一步，按仓库外计划 `~/workspace/projects/melonarc-macos-plan.md`
+的 M1 节与 D1（A：只做系统代理）、D2（A：ad-hoc 签名）推进。本阶段**只做构建链路**：让 CI
+能产出一份 arm64 的 `.app` 与首份 `Cargo.lock`。不改核心逻辑、不改订阅与解析、不改壳的 Rust
+代码，不碰 `spikes/` 与 `docs/`，不新增 Go / npm / Rust 依赖，不推进 macOS 的系统代理与 TUN
+实现（那是 M2）。只本地提交，不 push、不打 tag、不发 release。
+
+开工前：`HEAD = c229437`（阶段 26），工作区干净，`git rev-list --all` **71 笔**，单分支
+`master`、无 remote、无 tag。按任务书先读 `DEVLOG.md`（阶段 13/17 的壳、21 的发版工程、
+24/25/26 的清单与口径）、计划文档 M1 与 D1/D2、`docs/development-doc-v1.md`。基线按阶段 26：
+Go 全量 **1313 / 1292 / 21 / 0**，前端离线 **82 / 80 / 2 / 0**。
+
+### 完成了什么
+
+**CI：`.github/workflows/ci.yml` 追加第 4 个 job `macos`**（`runs-on: macos-15`，12 步）
+
+- 工具链：`setup-go@v5` 用 `go-version-file: go.mod`（`go 1.27`，与既有 job 同一口径）、
+  `setup-node@v4` Node 22、rustup 装 stable 并 `rustup target add aarch64-apple-darwin`，
+  显式断言 `rustc >= 1.89`（`Cargo.toml` 的 `rust-version` 下限）后打印 host triple。
+- 构建：`GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w"` 分别产出
+  `cmd/melonarc-core`（落到 `src-tauri/binaries/melonarc-core-aarch64-apple-darwin`）与
+  `cmd/melonarc-cli`（落到 runner 临时目录，只证明能编译，不上传）。
+- 锁文件：`Cargo.lock` 不存在时 `cargo generate-lockfile`；已提交时先
+  `cargo metadata --locked --format-version 1` 做一致性闸门。随后把 CLI 装在仓库外的临时目录、
+  直接调用其二进制执行 `tauri build --target aarch64-apple-darwin --bundles app -- --locked`，
+  使锁文件成为构建的硬输入。
+- 校验：`Contents/MacOS/melonarc-core` 必须存在且可执行、两个 Mach-O 必须是 arm64、
+  `Info.plist` 的 `LSMinimumSystemVersion` 必须是 `13.0`、`codesign -dv` 必须报
+  `Signature=adhoc` 且 `codesign --verify` 通过；再用包内核心对一份最小配置跑 `-check`
+  （只解析、不监听、不落盘）。
+- 产物：`ditto -c -k --keepParent` 把 `.app` 打成 zip，与 `Cargo.lock` 一起由
+  `upload-artifact@v4` 上传（`melonarc-macos-arm64`，保留 14 天），并打印 SHA-256。
+- 现有 go / frontend / interop 三个 job **一字未改**：与 `HEAD:ci.yml` 逐字节对照，原 9416
+  字节完全相同，追加段之前只多了一个分隔空行。
+
+**打包配置：`apps/desktop/src-tauri/tauri.conf.json`**
+
+- `bundle.targets` 由 `["deb","appimage","nsis"]` 变成 `["deb","appimage","nsis","app"]`；
+  新增 `externalBin: ["binaries/melonarc-core"]`；新增
+  `macOS: { minimumSystemVersion: "13.0", signingIdentity: "-" }`。
+- `license` 仍是 `GPL-3.0-only`；`productName` / `version` / `identifier` 全部未动。
+
+**配套：`apps/desktop/.gitignore` 与 `apps/desktop/src-tauri/binaries/README.md`（新文件）**
+
+- 忽略 `src-tauri/binaries/*`，只放行那张说明卡；卡上写明三元组命名规则、生成命令、
+  sidecar 落点与「`cargo run` 不需要、`tauri build` 需要」。二进制产物永不进版本库。
+
+### 关键决策及理由
+
+1. **选 `externalBin`，不选 bundle 资源。** 查上游 `tauri-bundler` 源码确认：
+   `app.rs` 把 `bin_dir = Contents/MacOS` 交给 `settings.copy_binaries`，而
+   `settings.rs::copy_binaries` 用 `.replace("-<target>", "")` 去掉三元组后缀，于是
+   `binaries/melonarc-core-aarch64-apple-darwin` 最终落在
+   `MelonARC.app/Contents/MacOS/melonarc-core`。这**恰好**是 `settings::core_search_paths`
+   的第一个候选（`env::current_exe().parent()` 拼上核心名，壳自身也在 `Contents/MacOS/`），
+   所以 2200 行 Rust 壳一行都不用改，也不需要 shell 插件或 capability。反过来，bundle 资源
+   落在 `Contents/Resources/`，不在现有查找顺序里，必须改 `core.rs` / `settings.rs`——本机
+   无 rustc，写一段编不了、测不了的 Rust 代码是本阶段最不该冒的险。附带收获：同一份源码里
+   sidecar 被收进 `sign_paths`，在签 `.app` 之前由内向外逐个签名，包里不会留一个未签名的
+   Mach-O。
+2. **ad-hoc 签名按 D2 落到配置而不是命令行。** `"signingIdentity": "-"` 是官方文档给出的
+   ad-hoc 写法；job 因此不需要任何证书、密钥或公证凭据。`hardenedRuntime` 不显式写，保留
+   默认 `true`：以后按 D2 的触发条件升级正式签名时不必再翻这个开关；真机放行流程归 M5。
+3. **`minimumSystemVersion = "13.0"` 有实测依据。** 本阶段交叉编译出的核心与 CLI，其
+   `LC_BUILD_VERSION` 是 `platform=1 minos=13.0.0 sdk=26.2.0`；另外 CLI 源码会把这个值设成
+   `MACOSX_DEPLOYMENT_TARGET` 再构建 Rust 侧。核心、壳、对外声明三者对齐，而不是照抄计划
+   文档里的结论。
+4. **只加 `app`，不动其它 target；只打 `app`。** 保留 deb/appimage/nsis 是任务书的红线，
+   `--bundles app` 让本次 CI 只产 .app；DMG 与下载说明属于发布阶段（M5），M1 不预先承诺。
+5. **CLI 不做 npm devDependency。** `apps/desktop` 是零依赖前端，现有 frontend job 的
+   `npm ci` 因此不需要网络；往 `package.json` 加一条会改变那条 job 的语义。改成装到
+   `$RUNNER_TEMP` 再直接调用二进制，还有一个实际好处：`npx <cmd> -- --flag` 的尾部 `--`
+   是否被转发给子命令并不确定，直接调用才能保证 `--locked` 原样交给 `cargo build`。
+6. **产物先打包再上传。** 裸目录上传会丢可执行位，一个双击不起来的 `.app` 没有验收价值；
+   `ditto` 保留 bundle 的权限与符号链接。上传 `.app` 的 zip 与 `Cargo.lock` 两件。
+7. **Runner 与目标都锁 arm64。** `macos-15` + 显式 `--target aarch64-apple-darwin` + Go 的
+   `GOOS/GOARCH`，Go 侧再关掉 CGO（纯 Go，不依赖 SDK）；即使 runner 标签哪天换了架构，
+   产物仍由显式三元组决定。
+8. **M1 不加 `cargo test --locked`。** 壳的测试从未在任何机器上编过；首跑若因测试代码失败，
+   会把「构建是否打通」这个唯一要回答的问题搅浑。`cargo test` 列为下一步第一件。
+9. **文件头 "Three jobs" 注释也保留不改。** 它现在与 4 个 job 不符，但任务书要求现有 job
+   一个字都不动，连同注释一起留给所有者在网页端维护时顺手改。
+
+### 构建与测试结果
+
+| 检查 | 结果 |
+| --- | --- |
+| `go build ./...` | exit 0 |
+| `go vet ./...` | exit 0 |
+| `gofmt -l .` | 0 行 |
+| `GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...` | exit 0 |
+| `go test ./... -count=1 -v` | **1313 / 1292 / 21 / 0**，与阶段 26 基线逐项相同，0 FAIL |
+| 前端离线套件（系统 node，`--test-concurrency=1`） | **82 / 80 / 2 / 0**，与基线一致 |
+| `GOOS=darwin GOARCH=arm64` 核心 + CLI | 两者均为 `Mach-O 64-bit arm64 executable, flags:<\|DYLDLINK\|PIE>`（15,298,002 B / 6,490,146 B） |
+| Mach-O 部署目标 | `LC_BUILD_VERSION platform=1 minos=13.0.0 sdk=26.2.0`（核心与 CLI 相同） |
+| `tauri.conf.json` | `python3 -m json.tool` 通过；`externalBin`、`macOS.signingIdentity`、`macOS.minimumSystemVersion`、`BundleType` 的 `app` 逐个对官方 schema 核过 |
+| `ci.yml` | 用模块缓存里的 `gopkg.in/yaml.v3@v3.0.1` 离线做真解析：4 个顶层键、4 个 job（7 / 11 / 6 / 12 步）、`runs-on=macos-15`；12 步中 8 个 `run:` 块逐个 `bash -n` 全过 |
+| 既有 job 对照 | 原 9416 字节逐字节相同 |
+| CI 用的最小 smoke 配置 | 本机用真核心跑 `-check`：打印 `melonarc-core 0.1.0-dev` 后 exit 0，`data-dir` 目录未被创建 |
+
+前端离线套件里有一条用例读 `tauri.conf.json` / `Cargo.toml` 与 `src/version.js` 对齐，改完
+配置仍绿；`go.mod` / `go.sum` / `package.json` / `package-lock.json` / `Cargo.toml` 均未进入
+改动集。本机没有 PyYAML / ruby / yq，pip 装包被代理 502 挡下，所以 YAML 解析改走 Go 模块
+缓存里的 `yaml.v3`（`replace` 到 `$GOMODCACHE`，`GOPROXY=off`）。
+
+本地踩到并当场修掉两处：① `-s -w` 是链接器参数，直接给 `go build` 会报
+`flag provided but not defined: -s`，改成 `-ldflags "-s -w"`（与 `scripts/build-release.sh`
+一致），CI 与说明卡同时改；② 尾部 `--` 经 `npx` 转发的语义不确定，换成仓库外安装 CLI 后
+直接调用，避免 `--locked` 被包装器吃掉。
+
+**没有验的，如实列出**：Rust 壳编译、`cargo generate-lockfile`、Tauri 打包、`codesign` /
+`plutil` / `ditto`、图形界面双击启动、原生桥读核心状态。本机无 rustc / cargo / macOS SDK /
+网页视图依赖，也没有 macOS 运行环境；这些正是新 job 与 M5 存在的理由，不得当作已通过。
+
+### 遗留问题
+
+- **macos job 首跑是否绿，本阶段不知道**：`ci.yml` 由所有者经网页端维护，这里只负责本地改对
+  并提交，无 CI 运行权。首跑可能暴露的真问题：从未编译过的 `src-tauri` Rust 代码、首次解析
+  出的依赖版本、icns 生成、ad-hoc 签名与 sidecar 的封印。
+- **`Cargo.lock` 尚未提交**：要等首跑绿后从 artifact 取回并提交，再按清单 A2 的要求据锁定
+  版本重写 `THIRD-PARTY-NOTICES.md` 第 5 节。在那之前 **A2 仍 blocked**；**B4 也仍 blocked**
+  —— 本 job 只做 `cargo build --release`，没有 `cargo test --locked` 与真窗口验收。计划文档
+  说的「A2/B4 顺带销账」是**机制到位**，不是已经销账。
+- **图标**：bundler 的 `create_icns_file` 会把现有 512/256/128/32 PNG 打包成 icns（非 2 的幂
+  尺寸会 `resize_exact`，不要求 1024），所以 M1 没有新增 icns；但缺 1024 条目，大图标观感与
+  icns 确认仍按计划归 M3。
+- macOS 上核心的系统代理仍是 unsupported，TUN 仍无实现；按 D1=A，MVP 只做系统代理模式，
+  TUN 在矩阵标未实现。M1 的 `.app` 因此**至多只能**用于验启动与读一次状态，不能验接管与恢复。
+- `hardenedRuntime` 取默认 `true`；ad-hoc + 硬化运行时在干净系统上的首次放行流程只能由 M5
+  实测。
+- 分发形态：M1 只产 `.app`（任务书指定的 `app` bundle target），DMG、下载处的 ad-hoc 说明与
+  SHA-256 是 M5 / 发布阶段的事。
+- 文件头 "Three jobs" 注释因「现有 job 一字不改」而保留，现已与实际 4 个 job 不符。
+- 阶段索引表仍停在阶段 22（23–26 与 M1 都没有行），沿用阶段 26 的做法不擅自回填。
+- 其余阶段 8–26 的既有挂账照旧：Windows 实机 C1、性能实测 C2、端到端安装 C3、真 TUN 枯竭
+  计数非零态、`core.log` 无轮转、用户态 TCP 的 IPv6 / 乱序 / 窗口缩放、Flush 与整表重写、
+  预览桥 query string、订阅明细理由文案统一。
+
+### 下一步计划
+
+1. 由所有者触发 CI 看 macos job 首跑：绿了就下载 `Cargo.lock` 提交、按 A2 重写 notices
+   第 5 节；红了按日志**只修 job 与壳的构建问题**，不动订阅与解析。
+2. 给 job 补 `cargo test --locked`（B4 的第一半），再谈真窗口、单实例锁与设置文件路径验收。
+3. M2：datadir 路径核对 + 系统代理 macOS 后端（按网络服务记录 HTTP / HTTPS / SOCKS / PAC /
+   旁路列表，快照、接管、恢复，专测部分写入成功且回滚也失败），M3：干净账户首启、首份配置
+   与令牌路径定死、icns 确认。
+4. M4/M5：完整网页视图 → invoke → Rust → Go 链路（读状态 + 一次写操作）、强杀与代理恢复、
+   干净虚拟机的 ad-hoc 首次放行流程；通过后才动 README 四语矩阵与预发布清单。
+
+## 阶段 M2 — macOS 核心适配：`networksetup` 后端与数据目录核对（2026-11-18）
+
+范围：仓库外计划 `~/workspace/projects/melonarc-macos-plan.md` 的 M2 节，按 D1（A：MVP 只做
+系统代理，TUN 标未实现）与 D2（A：ad-hoc 签名，M1 已配好）推进。本阶段只动核心：
+`internal/sysproxy`（新增 darwin 后端、修控制器的一条恢复语义）与 `internal/datadir`（只加
+用例，不改实现）。不碰 `.github/workflows/ci.yml`、不碰 `apps/desktop`（壳适配是 M3）、不实现
+TUN、不改 `examples/melonarc.conf` 的 `data-dir` 语义（首份配置的生成策略在 M3 定死）、不新增
+依赖。只本地提交，不 push、不打 tag、不发 release。
+
+开工前：`HEAD = 7ee76d5`（M1），工作区干净，go1.27.4，单分支 `master`。按任务书先读
+`DEVLOG.md`（M1 与阶段 22–26）、计划文档 M2 与 D1/D2、`internal/sysproxy` 全部源文件与
+`sysproxy_test.go`、`internal/config` 的 `data-dir` 处理、`apps/desktop/src-tauri/src/` 的
+`settings.rs` 与 `core.rs`。基线用 `git worktree` 在 7ee76d5 上重跑确认：Go
+**1313 / 1292 / 21 / 0**，前端离线 **82 / 80 / 2 / 0**。
+
+### 完成了什么
+
+**一、darwin 路径与数据目录逐项核对**
+
+| 项 | 核心（Go） | 壳（Rust） | 结论 |
+|---|---|---|---|
+| 配置目录根 | `os.UserConfigDir()`；Go 1.27 源码的 darwin 分支是 `$HOME/Library/Application Support` | `config_home()` 返回同一目录 | 一致 |
+| 默认 data-dir | `<配置根>/melonarc`（`datadir.Default`） | `shell.json` 的父目录，默认同一路径 | 一致，前提是 `shell.json` 没改 `data_dir` |
+| 令牌文件 | `<data-dir>/api-token`，0600，临时文件 + rename | `settings.token_path()` = `<data_dir>/api-token` | 一致；名字由新用例守着 |
+| 核心配置 | 只认 `-config` 给的路径 | 默认 `<data-dir>/melonarc.conf`，经 `-config` 传 | 一致 |
+| API 地址 | 配置里的 `api-listen` | 每次启动都传 `-api-listen` 覆盖 | 壳优先（M1 起如此） |
+| `core.log` | 核心只写 stdout/stderr | 壳打开 `<data-dir>/core.log` 作为子进程的 stdout/stderr | 一致 |
+| 系统代理快照 | `<data-dir>/system-proxy.json` | 不读 | 核心独占 |
+| 观察历史 | `<data-dir>/history.sqlite3` | 不读 | 核心独占 |
+| 订阅缓存 | `<data-dir>/subscriptions/` | 不读 | 核心独占 |
+
+核对出四件事，都只记录、不改：
+
+1. **核心没有 `-data-dir` 旗标**（只有 CLI 有，用来找令牌）。壳启动核心时只传 `-config` 与
+   `-api-listen`，所以核心的 data-dir 完全由配置文件决定：`data-dir` 为空 → OS 默认；相对路径
+   → **相对配置文件所在目录**（`cfg.BaseDir`）。两侧是两套独立计算，谁都没有核对谁。
+2. **示例配置的陷阱确认成立**：`examples/melonarc.conf` 写的是 `data-dir = ./melonarc-data`。
+   若 M3 把这份示例复制成 `~/Library/Application Support/melonarc/melonarc.conf`，核心会把令牌
+   写到 `.../melonarc/melonarc-data/api-token`，而壳读 `.../melonarc/api-token`：壳能把核心拉
+   起来，但它的 API 客户端拿不到令牌（请求 401），面板看起来是「核心在跑、读不到状态」。
+   同一份 `data-dir` 还会带走历史库、订阅缓存与系统代理快照。
+3. **反向也成立**：若 `shell.json` 的 `data_dir` 改成非默认值而配置里 `data-dir` 留空，核心写
+   OS 默认目录、壳读新目录，同样错位。也就是说两侧一致只在两种情况下成立——都用默认值，或者
+   配置里写了与壳 effective data_dir 相同的**绝对**路径。M3 定首份配置策略时要在这两条里选。
+4. 快照在核心 data-dir 内：配置里的 `data-dir` 一旦变化，上一次残留的接管记录就留在旧目录，
+   下次启动不会去那里恢复。M3 若允许改 data-dir，这条要一起处理。
+
+**二、`networksetup` 后端（新文件 `internal/sysproxy/networksetup.go`）**
+
+- 平台接线：新增 `platform_darwin.go`（`//go:build darwin`，`platform()` 返回
+  `newNetworkSetup(osRunner)`）；`platform_other.go` 的构建标签从 `!linux && !windows` 收紧为
+  `!linux && !windows && !darwin`，unsupported 后端只留给其余系统。后端实现本身**不带构建
+  标签**（与 `gsettings.go` / `registry.go` 同构），所以整套用例能在 Linux 上跑。
+- 作用范围：`-listallnetworkservices` 列出的**每个启用中的网络服务**（首行说明跳过、`*` 前缀
+  表示禁用即跳过）。理由见决策 2/3。
+- 每个服务写入的字段与顺序（也就是快照 `Fields` 的顺序）：
+
+  ```
+  1 autoproxy-state      -setautoproxystate <svc> off          PAC 先关
+  2 autoproxy-url        仅记录（Observed），不写
+  3 auto-discovery       -setproxyautodiscovery <svc> off
+  4 bypass-domains       -setproxybypassdomains <svc> d1 [d2…] 或 Empty
+  5 web-proxy            -setwebproxy <svc> host port  + -setwebproxystate <svc> on
+  6 secure-web-proxy     同上（HTTPS 用的就是 HTTP 入站，它答 CONNECT）
+  7 socks-proxy          -setsocksfirewallproxy … + -setsocksfirewallproxystate …
+  ```
+
+  配置里没有某一类监听时，对应的字段只剩开关（`web-proxy-enabled` / `socks-proxy-enabled`），
+  只写 `-set<kind>proxystate <svc> off`，不动原来的地址。
+- 快照值：一个代理的三部分合成一个值 `"on|127.0.0.1|7890"`，因为工具没有「只写地址不动开关」
+  的命令，`-setwebproxy` 本身会把代理打开。所有权判断因此按整个代理做：用户改了地址或端口，
+  这个字段就整个不还原。
+- 恢复：`restoreFields` 反向走（socks → secure → web → bypass → discovery → PAC），每步先读回
+  当前值，只有等于本程序写的值才动。原来地址为空的代理只还原开关，不写空地址（工具没有清空
+  地址的命令；与 registry 后端「留着地址、关掉开关」的处理一致）。
+- `Clear`：只把每个启用服务的三个开关关掉，PAC 与旁路列表不动（它们从不指向本程序的监听），
+  单个失败不中断其余服务，错误用 `errors.Join` 汇总。
+- `Enabled`：任一启用服务上，web / secure / socks / PAC / 自动发现有一个开着就算开。
+- 读的命令与容错：`-getautoproxyurl`（URL + Enabled）、`-getproxyautodiscovery`、
+  `-get{web,secureweb,socksfirewall}proxy`（Enabled / Server / Port / Authenticated Proxy
+  Enabled）、`-getproxybypassdomains`（有列表时是 `Bypass Domain(s): a, b`，空列表时是
+  `There aren't any …` 一句整句）。缺 `Enabled` 行、端口不是数字、旁路两种形状都不是 →
+  **报错而不是当成空值**：错的 Before 值比没有更危险。标签分隔按第一个冒号切，所以
+  `Server: fe80::1%en0` 与带端口的 PAC URL 都不会被截坏。
+- 认证代理：读到 `Authenticated Proxy Enabled: 1` 且配置要求替换这一类代理时，`Plan` 直接
+  拒绝并点名服务（见决策 8）。
+- 权限与等待：全程用 `/usr/sbin/networksetup`、进程自身权限，不 sudo、不装 helper、不弹自定义
+  对话框、不写偏好设置 plist。写批次有 12 秒预算（决策 10），超时把「signal: killed」翻成一句
+  能行动的话：`networksetup did not finish in time; macOS may be waiting for an administrator…`。
+
+**三、控制器：部分写入成功且回滚也失败时保留恢复依据**
+
+- 原来的 `Controller.Enable` 在 `Commit` 报错后无条件 `removeSnapshot`，注释写的是「Commit 已经
+  回滚，机器上没有我们的值了」。这句话在回滚**也**失败时不成立：机器上还留着本程序写的一半
+  值，而唯一描述它们的文件被删掉，下次启动无从恢复。
+- 新增 `ErrRollbackIncomplete`；三个后端在回滚有字段没还原时用双 `%w` 的 `fmt.Errorf` 同时包住
+  原始错误与这个哨兵（`errors.Is` 两处都看得见）。`Enable` 见到哨兵时**保留**记录、打一条
+  Error 日志、返回明说「记录已保留，下次启动可以恢复」的错误；同时把内存快照与 `Applied()` 置
+  为真，让同进程内仍会发生的优雅关停还有一次机会。回滚成功的那条路径行为不变，只是删除记录
+  失败时从 `_ =` 改成记一条 Warn。
+- 三个后端都改：`gsettings`（回滚在第一个失败处停下）、`registry`（add 或 delete 失败）、
+  `networksetup`（反向逐字段重写 Before，失败即 incomplete）。
+
+**四、15 秒启动预算：代码层面的等待路径**
+
+`core.rs` 的事实：`STARTUP_BUDGET = 15s`、`TICK = 500ms`、`MAX_FAILURES = 5`、退避
+1/2/5/5 秒，第 5 次失败后状态变 `crashed` 且不再自动重试；子进程自己退出或超预算都算一次失败。
+核心侧的顺序是「入站 → TUN → 系统代理 → … → API 开始应答」，所以系统代理的写入**在预算之内**。
+
+原来这条路径没有上界：`networksetup` 的第一次写可能停在授权对话框上等人，核心既不应答 API 也
+不退出，15 秒一到壳把子进程杀掉——对话框被连根拔掉，下一次尝试再弹一个。现在的代码层面约定：
+
+- 写入批次 12 秒（`writeBudget`）< 壳的 15 秒，中间留给读取阶段与进程退出。超时由核心**自己**
+  结束并带原因退出，壳永远不会在对话框中途杀它。
+- 核心内部**不重试**：一次 `Enable` 只写一遍，失败就报。
+- 读取路径不设预算：读设置不需要授权，也不可能弹出对话框。
+- 残留：壳仍会退避重试最多 5 次（这是 `apps/desktop` 的行为，本阶段不许改），所以「每次都
+  弹窗」的极端情况最坏是 5 次。macOS 通常会记住刚授予的授权，但这一条本机无法验证，记在
+  「没有验的」里；壳侧的一次性策略留给 M3。
+
+### 关键决策及理由
+
+1. **后端实现不带构建标签，只有 `platform()` 在 `platform_darwin.go` 里。** 与 gsettings /
+   registry 同构，换来的是整套解析、快照、回滚、预算逻辑都能在 Linux 上跑用例；darwin 独有的
+   只剩一行接线，另有一个 `//go:build darwin` 的小用例在真机上验它。
+2. **覆盖每个启用中的服务，不只挑一个「主服务」。** 要判断哪个服务在承载流量，得把默认路由
+   的接口映射回服务名，多一层易错的推断；笔记本在 Wi-Fi 与有线之间切换时，只改一个服务等于
+   换个网络就失效。逐服务记录、逐服务恢复，范围变大但语义不变。
+3. **禁用服务（`*` 前缀）不碰。** 它不在承载流量，写它只是给用户添一条看不见的改动。
+4. **一个代理的地址与开关合成一个快照值。** 工具的两条命令无法分开写：`-setwebproxy` 会顺手
+   把代理打开。若拆成两个字段，恢复顺序里「先还原开关、后还原地址」会把刚关掉的代理又打开；
+   合成一个值后，写入与恢复都以「这个代理当时是什么样」为单位，所有权判断也以它为单位。
+5. **写入顺序：PAC → 自动发现 → 旁路 → 三个代理。** PAC 关掉是因为客户端优先用脚本，不关就
+   等于没接管；旁路列表先于任何代理打开，是因为本机流量不该在接管过程中绕一圈；恢复反向，
+   于是三个代理先关、旁路与脚本最后回。
+6. **PAC 只记地址、只写开关。** `-setautoproxyurl` 会「设置并启用」，用它来关就等于把地址也
+   改了；`-setautoproxystate` 只动开关不动 URL，正是需要的那一半。地址记进快照（`Observed`）
+   是为了让人看记录时知道原来指向哪里，恢复时没有它的事。
+7. **`-setautoproxystate` 在旧 man page 里没有条目，仍然用它。** 没有别的命令能在不碰 URL 的
+   前提下关掉 PAC；新系统上这条命令存在且被广泛使用，但本机无从验证，M5 真机必查（见「没有
+   验的」）。
+8. **认证代理直接拒绝，不接管。** `-getwebproxy` 只说「要口令」，从不给口令；接管后再恢复，
+   地址回来了、口令没有，用户的代理会开始 407。宁可让启动失败并点名哪个服务要关掉认证代理，
+   也不做这种静默破坏。M5 若证明 `-setwebproxy` 不会清掉钥匙串里的口令，这条可以放宽成「记录
+   认证标志并照常接管」。
+9. **空的旧地址不还原成空。** 工具没有「清空地址」的命令；把开关关掉、留一个指向本程序的旧
+   地址，危害与 registry 后端 `Clear` 留下的旧地址同级（代理关着，不会有人走它）。这一条有
+   用例守着，免得以后有人以为是漏写。
+10. **12 秒预算按「写批次」而不是按命令或整个 `Enable`。** 弹窗只可能出现在写上，读不会；按
+    命令设预算会让「9 次写 × N 个服务」累加成几十秒，按整个 `Enable` 设又要把预算塞进控制器
+    （Linux/Windows 不需要）。一个批次一个上界，最坏路径是 Plan（快）+ Commit（≤12s），仍在
+    15 秒内。
+11. **给控制器而不是给后端加「保留记录」的判断。** 快照归控制器管，后端只负责「我有没有把
+    自己写的东西收干净」，用哨兵错误表达；这样三个后端的失败语义一致，删除与否只有一处决定。
+12. **不在本阶段给核心加 `-data-dir` 旗标。** 加了就等于替 M3 定死首份配置策略（示例配置的
+    相对 `data-dir` 还要不要保留、`shell.json` 与配置谁赢）。本阶段只把不变量写清楚：两侧一致
+    ⇔ 都用默认值，或配置里是与壳 effective data_dir 相同的绝对路径。
+
+### 构建与测试结果
+
+| 检查 | 结果 |
+| --- | --- |
+| `go build ./...` | exit 0 |
+| `go vet ./...` | exit 0 |
+| `gofmt -l .` | 0 行 |
+| `GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...` | exit 0 |
+| `GOOS=darwin GOARCH=arm64 go build ./cmd/... ./internal/...` | exit 0；核心与 CLI 均为 `Mach-O 64-bit arm64 executable, flags:<\|DYLDLINK\|PIE>`（未加 `-trimpath -s -w`，22,964,562 B / 9,641,746 B） |
+| `GOOS=darwin GOARCH=arm64 go vet ./internal/sysproxy ./internal/datadir` | exit 0（两个 darwin-only 用例文件也过了类型检查） |
+| `go test ./... -count=1 -v` | **1338 条目 / 1317 通过 / 21 跳过 / 0 失败** |
+| 前端离线（系统 Node 24，清代理，`--test-concurrency=1`） | **82 / 80 / 2 / 0**，与基线逐项相同 |
+| 与基线名单对照（`git worktree` 在 7ee76d5 上重跑） | 基线 1313 / 1292 / 21 / 0；减少的只有两条带随机端口的 `TestSOCKS5Connect/<addr>:<port>` 子用例（既有噪声），其余 +25 条全部是新增 |
+
+跳过集合仍是固定那 21 条（缺参考实现的互通 10、未连接 `sendto` 的 UDP 9、上游 UDP 截断改 TCP
+1、`TestTUNLinuxLoopback` 1），逐名一致。新增 25 条：
+
+| 包 | 新增条目 | 内容 |
+|---|---|---|
+| `internal/sysproxy` | +24 | `networksetup` 13 条用例 + `Enabled` 1 条（含 6 条子用例）+ 3 条控制器 + 1 条 gsettings 回滚 |
+| `internal/datadir` | +1 | 壳/核心常量交叉核对 |
+
+`networksetup` 的用例覆盖：整套写入的命令行与顺序（含禁用服务不被碰）、`Plan` 的字段顺序与
+Before/Written 值、只配置一类监听时另一类只关开关、写失败后逐字段回滚到原值、回滚也失败时报
+`ErrRollbackIncomplete`、用户改过的字段不被覆盖、旧地址为空时只还原开关、`Enabled` 的六种输入、
+`Clear` 的三条命令与服务覆盖、没有启用服务时报错、认证代理被拒绝（且拒绝时一个写都没发生）、
+等待授权的写入被预算截断并给出可行动的文案、`Restore` 会先读回每个字段、快照值的字符串往返。
+控制器三条：回滚失败时记录仍在、`Applied()` 为真、随后的 `Release` 仍能收尾并删掉记录；同一个
+文件被**下一个**控制器 `Recover` 读到时能真的恢复（这条直接对应「下次启动仍有恢复依据」）；
+回滚成功时记录被删、`Applied()` 为假。
+
+前端实时套件**没有重跑**（本阶段没动 `apps/desktop`，M1 也未重跑），口径同 M1。
+
+### 没有验的（如实列出）
+
+- **真机 `networksetup` 接管与恢复**：本机没有 macOS、没有 `networksetup`，全部写入路径只在
+  fake 上跑过，命令字符串与解析是按手册与文档写的。
+- **授权路径**：授权弹窗的出现条件、拒绝后的行为、拒绝是否会被记住、12 秒预算够不够一个人
+  读完并点「允许」——这台机器没有可测的标准账户或管理员账户。
+- **15 秒启动预算的真机表现**：壳在真实弹窗存在时的表现（是否真的不会中途杀进程、重试期间
+  弹窗是否叠加）只能上 Mac 才能看。
+- **`-setautoproxystate`**：目标系统上是否可用未验（旧 man page 无此条目）。
+- **`-setwebproxy` 对钥匙串口令的影响**：是否会清掉已保存的认证口令未知，所以本阶段选择拒绝
+  认证代理（决策 8）。这一条决定以后能不能放宽。
+- **干净账户下的路径**：首次启动时目录创建、0700/0600 在 APFS 上的实际效果、`os.UserConfigDir`
+  在真实 `$HOME` 下的返回值——只有 darwin-only 用例能在 Mac 上验，本机只保证它能编译。
+- **多个服务同时活动**（Wi-Fi + 有线）时的接管与切换行为。
+- **打包后的核心**在 `.app` 内的查找（M1 的 `externalBin` 结论未变，本阶段没有复验）。
+- **两个 darwin-only 用例**（`TestDefaultMatchesTheShellOnMacOS`、
+  `TestPlatformIsTheNetworkSetupBackend`）本机不运行，也不在 1338 条里。
+
+### 遗留问题
+
+- **M3 必须定死首份配置的 `data-dir` 策略**：三条候选是（a）省略 `data-dir`，两侧都用 OS 默认；
+  （b）写与壳 effective data_dir 相同的绝对路径；（c）给核心加 `-data-dir` 旗标、由壳传值，
+  让 `shell.json` 成为唯一来源。本阶段只把不变量与陷阱写清楚，没有动示例配置。
+- 若 M3 允许用户改 data-dir：核心 data-dir 里的 `system-proxy.json` 会留在旧目录，旧接管记录
+  失去恢复入口；历史库与订阅缓存同理。
+- 认证代理的拒绝是保守选择，代价是这类机器开不了系统代理；M5 真机复验后再决定是否放宽。
+- 壳的 5 次重启策略不受核心控制：预算只保证「不死在对话框里」，不保证「只弹一次」。壳侧是否
+  改成首启单次或读退出码，归 M3。
+- `-setautoproxystate` 是否存在、`-getproxybypassdomains` 空列表那句的确切文案随系统版本可能
+  变化；自动发现的解析只依赖「标签里带 discovery 的行」，旁路列表两种形状都认，但真机文案
+  仍可能不同。
+- 阶段索引表仍停在阶段 22（23–26、M1、M2 都没有行），沿用既有做法不擅自回填。
+- 其余阶段 8–26 的既有挂账照旧：Windows 实机 C1、性能实测 C2、端到端安装 C3、`Cargo.lock`
+  与 A2/B4、Rust 壳编译与真窗口验收、真 TUN 枯竭计数非零态、`core.log` 无轮转、用户态 TCP 的
+  IPv6 / 乱序 / 窗口缩放、Flush 与整表重写、预览桥 query string、订阅明细理由文案统一。
+
+### 下一步计划
+
+1. M3：壳适配与首次启动——把首份配置的 `data-dir` 策略定死（在上面三条里选一条并写进壳与
+   文档）、复核 `core.rs` 的查找顺序与 bundle 布局、icns 生成、单实例锁与 `shell.json` 路径。
+2. 有 Mac 时先跑两个 darwin-only 用例，再按「Wi-Fi 单服务 → 有线 → 两者同时」的顺序验接管与
+   恢复；授权拒绝、等待超时、弹窗次数一并记下来。
+3. 若 M1 的 macos job 首跑已绿：取回 `Cargo.lock` 提交、据锁定版本重写 notices 第 5 节，销
+   A2/B4 的第一半；再给 job 补 `cargo test --locked`。
+4. M4/M5 按计划：完整链路与写操作、强杀后的代理恢复、干净虚拟机的 ad-hoc 首次放行流程。
+
+## 阶段 M3 — 最小原生 macOS 应用：Xcode 工程、托管核心与 xcodebuild 入口（2026-11-18）
+
+范围：仓库外计划 `~/workspace/projects/melonarc-macos-plan.md` 与决策附录
+`~/workspace/projects/melonarc-gpt-answers-native-shell-20261118.md` 的 M3 节，按 D4/D5/D6/D7/D8/
+D9/D10/D11 推进。只新增 `apps/macos/`、给核心加两个托管旗标及其用例、把 `.github/workflows/
+ci.yml` 的 macOS job 换成 xcodebuild 入口；`apps/desktop`（Windows/Linux 的 Tauri 壳）、
+`spikes/`、`docs/`、`examples/melonarc.conf` 都不动，TUN 仍标未实现，不新增依赖。不 push、不打
+tag、不发 release。
+
+开工前 `HEAD = 95fc25e`（M2），基线 Go **1338 / 1317 / 21 / 0**、前端离线
+**82 / 80 / 2 / 0**。本机是 Linux 虚拟机：没有 Xcode、macOS、Swift 编译器、codesign、hdiutil，
+Swift 代码从未被编译过，`.app` 从未被启动过；凡属这部分一律写进「没有验的」，不冒充验过。
+
+### 完成了什么
+
+**一、首份配置的 `data-dir` 策略定死：选 (c)——核心加旗标，壳每次显式传值**
+
+- `cmd/melonarc-core/main.go` 新增两个旗标：
+  - `-data-dir <path>`：覆盖配置文件里的 `data-dir`，与配置值一样经 `datadir.Resolve` 解析
+    （相对路径仍相对配置文件所在目录）。旗标优先；若配置也写了且不相等，启动日志打一条 Warn
+    同时点名两个目录，不静默选一个。
+  - `-supervise-stdin`：仅在托管模式启用。要求标准输入是具名管道（`/dev/null` 与普通文件直接
+    拒绝启动），EOF 即视为父进程消失，走与正常退出相同的优雅关停；管道里若有杂字节只计数、
+    不当命令解析。
+- 新增 `cmd/melonarc-core/supervise.go` 与 7 条用例（`supervise_test.go`）：旗标优先、两者一致
+  时静默、缺省落到平台默认、管道形状校验、EOF 关停、写端未关时不误判、`-check` 报旗标的目录。
+- 壳侧 `FirstRunConfig.contents` **不写 `data-dir`**，并把理由写进文件注释；`CoreSupervisor.makeChild`
+  每次启动都显式传
+  `-config <path> -api-listen <addr> -data-dir <path> -supervise-stdin`。
+  `ShellSettings` 解析出的 effective data-dir（`shell.json` 的 `data_dir` → 环境变量
+  `MELONARC_DATA_DIR` → 平台默认，沿用旧壳优先级）就是这一项的值；令牌、日志、锁、配置、
+  历史库、订阅缓存与系统代理快照都从同一目录读。`shell.json` 是规范来源，环境变量只作兼容
+  覆盖，壳把**解析后的最终值**传给核心，不再让两侧各自算一遍。
+- `examples/melonarc.conf` 里的 `data-dir = ./melonarc-data` 保持原样（不改示例语义）：它不再是
+  首份配置的来源；即使有人手抄成首份配置，旗标也赢，且那条 Warn 会点名目录分歧。
+- 本机实核验证：`-check -data-dir <dir>` 首行仍为 `melonarc-core 0.1.0-dev`，`data:` 与
+  `token:` 都指向旗标的目录且不建文件；真实启动的 `api token file:` 也落在该目录；
+  `( sleep 2 ) | core … -supervise-stdin` 在约 3 秒内自行退出 0，`< /dev/null` 被明确拒绝并
+  退出 1。
+
+**二、原生工程与最小界面**
+
+- `apps/macos/MelonARC.xcodeproj`：app target + `MelonARCTests` target，共享 scheme
+  `xcshareddata/xcschemes/MelonARC.xcscheme`，`project.xcworkspace/contents.xcworkspacedata`；
+  `MACOSX_DEPLOYMENT_TARGET = 13.0`、`ARCHS = arm64`、`CODE_SIGN_IDENTITY = "-"`、
+  `ENABLE_HARDENED_RUNTIME = YES`、`ENABLE_APP_SANDBOX = NO`。CopyFiles 阶段
+  `dstSubfolderSpec = 6` 把 `Core/melonarc-core` 放进 `Contents/MacOS`，带 `CodeSignOnCopy`。
+- `App/MelonARCApp.swift`：一个 `Window` + `NavigationSplitView`，一个 `Settings` scene，
+  一个 `MenuBarExtra`。关闭最后一个窗口不退出（`applicationShouldTerminateAfterLastWindowClosed
+  → false`），只有「退出」停核心；macOS 13 用原生「设置…」与 ⌘,，不用需要 macOS 14 的
+  `SettingsLink`。`AppDelegate` 用 `NSApplicationDelegateAdaptor` 接管激活、Dock 重开、
+  第二实例的窗口唤起，并在 `applicationShouldTerminate` 里 `.terminateLater` 等核心恢复代理。
+- `Services/CoreSupervisor.swift`：`Foundation.Process` 托管真实核心，15 秒启动预算、500 ms
+  心跳、1/2/5 秒退避、连续 5 次失败上限与手动重试；私有管道确认「本次子进程」已绑定端口并写
+  好令牌，再用带 Bearer 的 `/v1/status` 判就绪；`terminationHandler` 区分主动/意外退出；
+  端口占用从核心输出的 `address already in use` 归类。正常退出先取消自动重启、关管道、
+  SIGTERM，再异步等最多 12 秒（核心自身 5 秒预算 + 系统工具余量）；强杀 GUI 时写端 EOF 让
+  核心自己走同一条退出路径。
+- `Services/APIClient.swift`：专用 `.ephemeral` `URLSession`、`connectionProxyDictionary = [:]`
+  （空字典＝不用系统代理/PAC，`nil` 才是跟随系统）、无缓存无 Cookie、重定向委托一律拒绝；
+  `Codable` + `convertFromSnakeCase`，`APIError` 只回稳定 `code` 与英文 `detail`，不回显令牌。
+  `Info.plist` 的 ATS 例外**只有 `127.0.0.1`**；`APIAddress.parse` 相应只接受 127.0.0.0/8 与
+  `localhost`（映射到 127.0.0.1），`[::1]` 明确拒绝并指引改用 IPv4 回环，避免出现第二个需要
+  例外的地址。
+- `Services/FirstRunConfig.swift`：干净数据目录首次启动写最小直连配置（只监听回环、
+  `FINAL,DIRECT`、无代理/订阅/系统代理/TUN），目录 0700、文件 0600，已有配置绝不覆盖。
+  `SingleInstanceLock.swift`：`flock(LOCK_EX|LOCK_NB)` 的 `shell.lock`，占用时唤起已有进程后
+  退出，锁文件不可用则显示原因但继续运行（沿用旧壳的宽容策略）。
+- `UI/PanelRegistry.swift` 先注册 7 个面板（总览 + 六个业务/设置），总览读鉴权后的
+  `/v1/status` 与 `/v1/config`，其余先给占位页；2 秒轮询在离开窗口时停，列表有界。
+  `Resources/Localizable.xcstrings` 59 个 key、en + zh-Hans；`AppIcon.png` 由现有图标用图像
+  工具重采样为 1024×1024 sRGBA（见「没有验的」：Xcode 的 icns 编译未跑）。
+
+**三、订阅能力按 D9 先核对再决定**
+
+- 工作树里只有 `GET /v1/subscriptions` 与 `GET /v1/subscriptions/{name}/skipped` 两条只读
+  出口，没有刷新/启用/删除端点；公开版本确实没有专用订阅管理接口。因此本阶段**不在 Swift
+  里另造一套订阅逻辑**：订阅面板只注册、显示占位；缺失的能力留到后续补进 Go API，再由
+  `APIEndpoint` 增一个 case 和一个方法接上。阶段 26 的 `Status.Skipped` 出口与三种空答案语义
+  没有改动。
+
+**四、CI macOS job 换入口（D10 顺序）**
+
+`.github/workflows/ci.yml` 第四个 job 从 Tauri 构建整体替换为：
+
+1. 单一环境变量 `XCODE_APP` 锁定 Xcode，不存在就报出候选列表并失败；`xcode-select -s` 后把
+   Xcode/Go/Swift/`sw_vers`/`uname -m` 原样记进 `toolchain.txt` 并上传。
+2. 跑 `apps/macos/scripts/check-project.py`（工程对象闭包、引用完整、源文件归属）与
+   `check-strings.py`（catalog JSON、双语占位符一致、源码字面引用）。
+3. `build-core.sh` 按 `go.mod` 构建 `darwin/arm64`、`CGO_ENABLED=0`、`-trimpath -s -w`、
+   `MACOSX_DEPLOYMENT_TARGET=13.0` 的核心，输出即 Xcode 的 `Core/melonarc-core` 输入。
+4. `xcodebuild test -destination 'platform=macOS,arch=arm64'`，注入 `MELONARC_TEST_CORE` 跑真
+   sidecar 用例；日志里若出现「MELONARC_TEST_CORE is not set」直接判失败，不让跳过冒充通过。
+5. `xcodebuild -configuration Release build`，再 `verify-binaries.sh` 用 `lipo`/`vtool` 分别查
+   主程序与核心的架构和 `minos 13.0`。
+6. `package-dmg.sh` 先签核心再签 `.app`（ad-hoc + Hardened Runtime、无额外 entitlement），
+   `codesign --verify --deep --strict` 递归校验并检查两个二进制的 runtime 标志；
+   `hdiutil create -format UDZO` → `hdiutil verify` → 只读挂载后再验包结构与签名 → 卸载；
+   最后对 `.dmg` 文件本身 `shasum -a 256`，DMG、校验文件与日志一起上传。
+
+Tauri 壳继续留在 `apps/desktop` 供 Windows/Linux 使用；本阶段既不删它的打包配置，也不再在
+macOS job 里生成 `Cargo.lock`/`.app.zip`。M1 计划里「取回 Cargo.lock」那一步因此不再属于
+macOS 主线，A2/B4 仍挂在跨平台壳上。
+
+### 关键决策及理由
+
+1. **首份配置选 (c)，并让旗标赢。** (a) 只靠「双方都用默认」在用户编辑配置或 `shell.json` 后
+   立刻失效；(b) 要求用户维护一份绝对路径，示例里的相对 `data-dir` 就是反例。(c) 把唯一来源
+   放在壳解析出的 effective data-dir，核心按旗标使用，两侧不可能再各算一遍；配置里若写错，
+   警告点名两个目录，不静默吞掉。代价是核心多一个旗标、旧配置里的 `data-dir` 对新壳不再具有
+   决定性——这正是要的效果。改动 data-dir 后的旧快照不迁移，见遗留问题。
+2. **存活管道用独立旗标而不是默认行为。** 手工运行核心时 stdin 常是终端或 `/dev/null`，默认
+   把它当关停信号会误伤；只有壳显式加 `-supervise-stdin` 且 stdin 确为管道才启用。
+3. **退出等 12 秒而不是旧壳的 3 秒。** D7 要求先给 Go 完整恢复代理的机会；核心自身 5 秒预算
+   加上每次 `networksetup` 的 12 秒写批次上界，留 12 秒才不至于把「等待恢复」变成「杀掉恢复」。
+4. **ATS 只开一个例外。** D5 明确只允许 `127.0.0.1`，所以解析器也随之收紧：与其在 plist 里
+   为 IPv6 回环再开一个洞，不如把地址限制在唯一有例外的回环字面量上，令牌不会被送到没有例外
+   的地址。
+5. **控制会话不用系统代理、不跟随重定向。** 该会话要在「本程序刚把机器代理改错」的状态下仍
+   能工作；`connectionProxyDictionary = [:]` 是苹果文档定义的「无代理」，`nil` 才是跟随系统。
+   重定向会把 Bearer 带去另一个 origin，因此委托一律拒绝。
+6. **AppKit 管生命周期、SwiftUI 管界面，不引 XPC。** 只有 `.terminateLater` 能异步回答
+   `applicationShouldTerminate`；XPC 会为这一版引入额外的服务安装与权限面，D5 的回环 HTTP
+   已经够用。菜单、设置、窗口都由原生 scene 承担，不嵌 WKWebView。
+7. **M3 只填总览。** D11 把「原生菜单栏 → 真核心 → 安全退出」定为最高优先级，其余面板按计划
+   在 M4 接；面板注册表先把位置占住，后面新增面板不用改导航代码。
+8. **签名与打包全用苹果工具。** ad-hoc + Hardened Runtime、沙盒关、不预加调试/JIT/禁用库校验
+   entitlement；先签核心再签 `.app`，`codesign --verify --deep --strict` 递归验；DMG 用
+   `hdiutil`，只读挂载复验，哈希取 `.dmg` 文件本身。预览不公证，首次放行留给 M5 干净 VM。
+9. **CI 里保留「跳过即失败」的显式闸门。** 真核心用例若因环境变量没传进而跳过，日志会被抓出
+   来让 job 变红；这与 interop job 的 Gate 同一口径。
+10. **Xcode 版本锁在一个变量上，但本机无法证明版本号对。** 选 `Xcode_16.4.app` 作为可审计的
+    默认值；runner 镜像换了版本时第一跑会明确失败并列出候选，届时只改这一行，不让工具链悄悄
+    漂移。
+
+引用的苹果官方文档（按任务书决策附录登记）：
+[Foundation Process](https://developer.apple.com/documentation/foundation/process) ·
+[URLSessionConfiguration.connectionProxyDictionary](https://developer.apple.com/documentation/foundation/urlsessionconfiguration/connectionproxydictionary) ·
+[信息属性列表 NSAppTransportSecurity / NSExceptionDomains](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity) ·
+[Hardened Runtime](https://developer.apple.com/documentation/security/hardened-runtime) ·
+[macOS 代码嵌套签名](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac) ·
+[String Catalog](https://developer.apple.com/documentation/xcode/localizing-and-varying-text-with-a-string-catalog) ·
+[xcodebuild（TN2339）](https://developer.apple.com/library/archive/technotes/tn2339/_index.html) ·
+[macOS 软件打包](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution) ·
+[首次打开指引](https://support.apple.com/zh-cn/102445) ·
+[SwiftUI Window](https://developer.apple.com/documentation/swiftui/window) ·
+[SwiftUI MenuBarExtra](https://developer.apple.com/documentation/swiftui/menubarextra) ·
+[NSApplicationDelegate](https://developer.apple.com/documentation/appkit/nsapplicationdelegate)。
+除标准库与苹果工具外没有引入第三方运行时；`flock`/`lipo`/`vtool`/codesign/hdiutil 的分工都写在
+对应脚本注释里，便于以后复核。
+
+### 留出的扩展点
+
+- **面板**：`PanelRegistry.all` 一项即一个面板（`id` / `titleKey` / `symbol` / `order` /
+  `availability`），`RootView` 从 `navigation()` 生成侧栏，不数数量、不写死顺序；新面板只加
+  描述符和视图。
+- **API 客户端**：`APIEndpoint` 一个 case + `APIClient` 一个方法；`APIError.code` 与
+  `Localizable.xcstrings` 的 `error.*` 对齐。新增端点不改会话、令牌与重定向策略。
+- **出站协议**：核心 `outbound.New` 的唯一注册点没动；Swift 不认识协议名，只显示核心返回的
+  成员与状态。
+- **规则类型与策略组**：`internal/rules` / `internal/policy` 的既有扩展点没动；壳只消费
+  `ConfigurationView` 与 `PolicyView`，不复制规则表。
+- **设置键**：`ShellOverrides` 四个 `CodingKeys` + `ShellPaths` 常量；新增键只改这两处和
+  `SettingsView` 的展示，不改启动与令牌路径的计算顺序。
+- **i18n**：`Localizable.xcstrings` 的 key + `Localization.text/format`；核心状态与失败原因用
+  `rawValue` 拼出 `core.state.*` / `core.failure.reason.*`，新增状态自带 key。
+- **数据目录**：旗标与 shell.json 优先级集中在 `resolveDataDir` 与 `ShellSettings.load` 两处，
+  以后要迁移目录只改这两个入口。
+
+### 构建与测试结果
+
+| 检查 | 结果 |
+| --- | --- |
+| `go build ./...` | exit 0 |
+| `go vet ./...` | exit 0 |
+| `gofmt -l .` | 0 行 |
+| `GOOS=windows GOARCH=amd64 go build ./cmd/... ./internal/...` | exit 0 |
+| `GOOS=darwin GOARCH=arm64 go build ./cmd/... ./internal/...` | exit 0 |
+| `go test ./... -count=1 -v` | **1345 条目 / 1324 通过 / 21 跳过 / 0 失败** |
+| 前端离线（系统 Node 24，清代理，`--test-concurrency=1`） | **82 / 80 / 2 / 0**，与基线逐项相同 |
+| 前端实时（临时配置 17890/17891/17946，真核心 + 真令牌） | **82 / 82 / 0 / 0**，与阶段 26 一致 |
+| `check-project.py` | `ok: project has 102 objects, 19 app sources, 17 test sources` |
+| `check-strings.py` | `ok: 59 keys, 42 literal references, 2 languages`（`common.on` 以运行时拼接引用，catalog 内有） |
+| `ci.yml` YAML 解析（yaml.v3 离线） | 4 个 job：7 / 11 / 6 / 10 steps，macos = `macos-15` |
+| 全部 `run: |` 块 `bash -n` | 13 块，0 失败；新增 3 个脚本各自的 `bash -n` 也通过 |
+| `Info.plist` 解析（plistlib） | ATS 例外仅 `127.0.0.1` |
+
+Go 条目比 M2 基线 +7，全部来自 `cmd/melonarc-core/supervise_test.go`；21 条跳过仍是固定名单
+（缺参考实现的互通 10、未连接 `sendto` 的 UDP 9、上游 UDP 截断改 TCP 1、`TestTUNLinuxLoopback`
+1），逐名不变。前端实时套件用本阶段新增的 `-data-dir` 旗标把令牌指向临时目录，端口没有占用
+7890/7891/7946 上的遗留进程。
+
+**没有验的（如实列出）**
+
+- **Swift 编译、XCTest 与 `.app` 启动**：本机没有 Xcode/macOS，19 个 app 源文件与 8 个
+  测试文件从未过编译器；语法、API 可用性与 target 成员资格只由 `check-project.py` 做静态核对，
+  这不是编译。
+- **xcodebuild 入口本身**：只验了 YAML 结构、`bash -n` 与项目文件引用闭包；`xcodebuild test /
+  build`、`-destination 'platform=macOS,arch=arm64'`、派生目录产品路径、共享 scheme 是否被
+  正确发现，都要 CI 首跑才知道。
+- **Xcode 版本**：`Xcode_16.4.app` 是锁定的默认选择，runner 镜像是否安装未验；失败信息与
+  候选列表已写好，第一跑按实际版本改那一行。
+- **bundle 布局与查找顺序**：CopyFiles 的目标 `Contents/MacOS` 与 `coreSearchPaths` 的首个候选
+  （壳自身同目录）是按苹果 bundle 规范推的，运行时是否真找到核心未验。
+- **icns 与资源编译**：`AppIcon.png` 的像素尺寸与色彩空间已核对，asset catalog 编译成 icns、
+  `CFBundleIconName` 生效、String Catalog 在真机上的占位符/复数形式都未验。
+- **签名、DMG、Gatekeeper**：ad-hoc 签名的实际结果、`--deep --strict` 的递归校验、runtime
+  标志、只读挂载复验、`shasum` 产物都只在脚本里写死，未在本机执行；首次打开的放行流程归 M5。
+- **菜单栏与关窗行为**：`MenuBarExtra` 常驻、关窗后核心继续、退出时才恢复代理、第二实例唤起
+  与强杀后的 EOF 关停，都是 D11 的目标，但只有 CI/M5 能确认。
+- **系统代理四态**：`ConfigView` 目前只暴露 `system_proxy` 与 `pending_restart`，「已接管」与
+  「恢复失败」没有可读的 API 字段；总览只能显示前两态，后两态需要给 Go API 补出口，见遗留。
+- **macOS 13 与 Apple Silicon 真机**：最低版本、架构、ATS 在数字 IP 上的实际行为、授权弹窗
+  次数与 12 秒预算都未验。
+
+### 遗留问题
+
+- **CI 首跑待办**：上传后先看 macOS job 的 `toolchain.txt` 与 Xcode 路径；若锁版不对，改
+  `XCODE_APP` 一行；若派生目录产品路径或 scheme 发现失败，按日志修工程而不是放宽检查。
+- **系统代理四态与开关**：M4 要给 `internal/api` 的 `ConfigView` 增加「本次接管中 / 快照恢复
+  失败」出口（缺失能力补在 Go，不在 Swift 重算），再把保存配置 → 受控重启 → 按实际结果更新的
+  开关接上；本阶段总览只显示已配置的开关与 `pending_restart`。
+- **订阅刷新等操作**：公开版本仍没有写端点；按 D9 先补 Go API，再接 `APIEndpoint`。
+- **data-dir 变更不迁移**：改 `shell.json` 的 `data_dir` 后，旧目录的 `system-proxy.json`、
+  历史库与订阅缓存不会跟过来，旧接管记录失去恢复入口。本阶段只保证解析唯一、不造迁移逻辑；
+  是否提供迁移或拒绝变更留到 M4/M5 决定。
+- **5 次重启策略**：本阶段沿用旧壳的 1/2/5 与连续 5 次上限，没有改成首启单次或读退出码；
+  授权弹窗叠加的极端情况仍可能发生。
+- 阶段索引表仍停在阶段 22（23–26、M1、M2、M3 都没有行），沿用既有做法不擅自回填。
+- 其余既有挂账照旧：Windows 实机 C1、性能实测 C2、端到端安装 C3、跨平台 Tauri 壳的
+  `Cargo.lock` 与 A2/B4、真 TUN 枯竭计数非零态、`core.log` 无轮转、用户态 TCP 的 IPv6/
+  乱序/窗口缩放、Flush 与整表重写、预览桥 query string、订阅明细理由文案统一。
+
+### 下一步计划
+
+1. 上传新 CI 后跑 macOS job 首跑：按日志校准 Xcode 锁版与产品路径，确认真核心用例没有被跳过，
+   取回 DMG 与 `.dmg.sha256` 存档；第一跑之前不声称原生构建通过。
+2. M4：补 Go 侧系统代理状态出口与订阅写端点，接上六个业务面板的读写；日志/连接页保持有界、
+   离窗停刷新；把中英文案与错误码全部迁移完。
+3. M5：干净 arm64 VM 下载 DMG、先验哈希，按 ad-hoc 首次放行说明安装并验收系统代理接管/恢复、
+   强杀后的代理恢复、最低版本兼容性。
+4. Windows/Linux 主线另排：决定跨平台 Tauri 壳的 `Cargo.lock` 与 A2/B4 收尾方式，不把 macOS
+   的 xcodebuild 结果套到那一边。

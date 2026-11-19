@@ -420,6 +420,65 @@ type AuditView struct {
 	Remote string `json:"remote,omitempty"`
 }
 
+// SubscriptionView is one subscription's refresh state.
+//
+// It is a summary on purpose: how many nodes the last refresh produced, how
+// many entries it skipped and how the attempt ended — never the skipped entries
+// themselves. Those are a page of their own, served by
+// /v1/subscriptions/{name}/skipped, so a client that only wants the list does
+// not pay for a detail it never shows and the ordinary answer stays small.
+type SubscriptionView struct {
+	Name string `json:"name"`
+	// Nodes is how many nodes the subscription contributes, and Skipped how
+	// many entries of that same body were rejected. Both describe the last
+	// refresh that completed; a failed refresh leaves them as they were.
+	Nodes   int `json:"nodes"`
+	Skipped int `json:"skipped"`
+	// FetchedAt is when that refresh finished, absent when none ever did.
+	FetchedAt string `json:"fetched_at,omitempty"`
+	// NextAt is when the next attempt is due, including a backoff after a
+	// failure.
+	NextAt string `json:"next_at,omitempty"`
+	// Attempts counts the failed refreshes since the last success, and Error
+	// carries the most recent failure.
+	Attempts int    `json:"attempts"`
+	Error    string `json:"error,omitempty"`
+}
+
+// SubscriptionListView is every subscription the loaded configuration declares,
+// in the order the file declares them.
+type SubscriptionListView struct {
+	Subscriptions []SubscriptionView `json:"subscriptions"`
+}
+
+// SkippedListView is one page of a subscription's skip detail.
+//
+// Refreshed separates "nothing was skipped" from "no refresh has completed
+// yet": both carry an empty list, and only one of them means the configuration
+// is clean.
+type SkippedListView struct {
+	Subscription string `json:"subscription"`
+	Refreshed    bool   `json:"refreshed"`
+	// FetchedAt is when the refresh that produced this detail finished.
+	FetchedAt string `json:"fetched_at,omitempty"`
+	// Total is how many entries that refresh skipped, over the whole list;
+	// Offset and Limit describe the window that Skipped holds.
+	Total  int `json:"total"`
+	Offset int `json:"offset"`
+	Limit  int `json:"limit"`
+	// Skipped is the page itself, in the order the body carried the entries.
+	// The item number is the 1-based position among the links of that body, so
+	// a page keeps the positions the log used.
+	Skipped []SkippedEntryView `json:"skipped"`
+}
+
+// SkippedEntryView is one entry of a subscription body that was not imported.
+// It carries the position and the reason, never the link.
+type SkippedEntryView struct {
+	Item   int    `json:"item"`
+	Reason string `json:"reason"`
+}
+
 // Provider supplies the daemon state the API serves. Every method must be safe
 // for concurrent use. The read methods never mutate anything; the two write
 // methods are the operations the local API accepts, and each of them either
@@ -441,6 +500,17 @@ type Provider interface {
 	Failures(ctx context.Context, limit int) FailureListView
 	// DNS reports the resolver counters.
 	DNS(ctx context.Context) DNSView
+	// Subscriptions reports every subscription the configuration declares, with
+	// the outcome of its last refresh. The skipped entries are not part of it:
+	// a list that carried them would be large exactly when a provider is
+	// broken, which is when the list is read most.
+	Subscriptions(ctx context.Context) SubscriptionListView
+	// SubscriptionSkipped returns one page of the skip detail of a
+	// subscription's last completed refresh. A name the configuration does not
+	// declare is reported as NotFound; a subscription that has never completed
+	// a refresh answers an empty page with Refreshed false, which is not an
+	// error.
+	SubscriptionSkipped(ctx context.Context, name string, offset, limit int) (SkippedListView, error)
 	// History describes the observation history: how much it holds and
 	// whether its last write succeeded.
 	History(ctx context.Context) HistoryView

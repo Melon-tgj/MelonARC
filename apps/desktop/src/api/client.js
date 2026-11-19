@@ -21,6 +21,7 @@ export const Paths = Object.freeze({
   explain: "/v1/rules/explain",
   audit: "/v1/audit",
   select: "/v1/policies/select",
+  subscriptions: "/v1/subscriptions",
 });
 
 /**
@@ -131,6 +132,32 @@ export function createApiClient({ bridge }) {
      * @returns {Promise<any>}
      */
     audit: (limit = 64) => request("GET", withQuery(Paths.audit, { limit })),
+
+    /**
+     * The subscriptions the configuration declares, with the outcome of each
+     * last refresh. Counts only: the skipped entries are a page of their own,
+     * fetched when a reader asks for them.
+     *
+     * @returns {Promise<any>}
+     */
+    subscriptions: () => request("GET", Paths.subscriptions),
+
+    /**
+     * One page of a subscription's skipped entries. The name is a configuration
+     * name and may contain a slash, so it is escaped as a single path segment.
+     *
+     * @param {string} name
+     * @param {{ offset?: number, limit?: number }} [page]
+     * @returns {Promise<any>}
+     */
+    subscriptionSkipped: (name, page = {}) =>
+      request(
+        "GET",
+        withQuery(`${Paths.subscriptions}/${encodeURIComponent(name)}/skipped`, {
+          offset: page.offset,
+          limit: page.limit,
+        }),
+      ),
 
     /**
      * Metadata about where the shell looks for the core. This comes from the

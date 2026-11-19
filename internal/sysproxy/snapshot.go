@@ -26,8 +26,12 @@ const SnapshotFile = "system-proxy.json"
 type Field struct {
 	// Schema is the gsettings schema. It is empty for a registry value.
 	Schema string `json:"schema,omitempty"`
-	// Key is the gsettings key or the registry value name.
+	// Key is the gsettings key or the registry value name. On macOS it is the
+	// kind of proxy setting within one network service.
 	Key string `json:"key"`
+	// Service is the network service a macOS field belongs to. It is empty for
+	// the other backends, whose setting is not per service.
+	Service string `json:"service,omitempty"`
 
 	// Before is the value in force before the takeover, in the same form the
 	// backend writes it. BeforeKind is its registry value type.
@@ -41,6 +45,12 @@ type Field struct {
 	// registry value type. Both are used only for the equality check.
 	Written     string `json:"written"`
 	WrittenKind string `json:"written_kind,omitempty"`
+
+	// Observed marks a value that is recorded but never written, so a restore
+	// has nothing to put back. macOS keeps the PAC address in a field that can
+	// only be written together with "switch it on"; the takeover therefore only
+	// switches PAC off and records the address for whoever reads the file.
+	Observed bool `json:"observed,omitempty"`
 }
 
 // Snapshot is one takeover, persisted so a hard kill cannot lose it.
@@ -77,9 +87,12 @@ func restoreFields[T any](
 	var problems []error
 	for i := len(fields) - 1; i >= 0; i-- {
 		f := fields[i]
+		if f.Observed {
+			continue
+		}
 		current, present, err := read(f)
 		if err != nil {
-			problems = append(problems, fmt.Errorf("read %s %s: %w", f.Schema, f.Key, err))
+			problems = append(problems, fmt.Errorf("read %s: %w", fieldName(f), err))
 			continue
 		}
 		if !present || !same(f, current) {
@@ -92,12 +105,25 @@ func restoreFields[T any](
 			err = del(f)
 		}
 		if err != nil {
-			problems = append(problems, fmt.Errorf("restore %s %s: %w", f.Schema, f.Key, err))
+			problems = append(problems, fmt.Errorf("restore %s: %w", fieldName(f), err))
 			continue
 		}
 		result.Restored++
 	}
 	return result, errors.Join(problems...)
+}
+
+// fieldName is how a field is named in an error message: the network service
+// and the kind of setting on macOS, the schema and the key elsewhere.
+func fieldName(f Field) string {
+	switch {
+	case f.Service != "":
+		return f.Service + " " + f.Key
+	case f.Schema != "":
+		return f.Schema + " " + f.Key
+	default:
+		return f.Key
+	}
 }
 
 // saveSnapshot replaces the takeover record atomically. A partial file would be

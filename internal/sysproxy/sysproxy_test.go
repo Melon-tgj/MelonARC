@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,6 +21,11 @@ type fakeTool struct {
 	// failAt makes the nth mutating call fail, counted from 1. Zero fails
 	// nothing.
 	failAt int
+	// failFrom makes every mutating call fail from the nth one on, which is the
+	// case where the rollback cannot run either. Zero disables it.
+	failFrom int
+	// mutations counts the mutating calls, for failFrom.
+	mutations int
 	// calls is every command line, in order.
 	calls []string
 }
@@ -33,6 +39,12 @@ func (f *fakeTool) run(_ context.Context, name string, args ...string) (string, 
 	line := name + " " + strings.Join(args, " ")
 	f.calls = append(f.calls, line)
 	mutation := isMutation(args)
+	if mutation {
+		f.mutations++
+		if f.failFrom > 0 && f.mutations >= f.failFrom {
+			return "", errors.New("the settings tool refused")
+		}
+	}
 	if f.failAt > 0 && mutation {
 		f.failAt--
 		if f.failAt == 0 {
@@ -567,6 +579,131 @@ func TestRecoverRejectsAForeignRecord(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("the foreign record was discarded: %v", err)
+	}
+}
+
+// TestGSettingsRollbackReportsAnIncompleteRestore checks that a rollback which
+// cannot put a value back says so. The controller keeps the takeover record on
+// that answer, because the next start is then the only thing that can still
+// restore the machine.
+func TestGSettingsRollbackReportsAnIncompleteRestore(t *testing.T) {
+	tool := &fakeTool{answers: gsettingsAnswers(), failFrom: 3}
+	err := newGSettings(tool.run).Apply(context.Background(), Settings{HTTP: "127.0.0.1:7890"})
+	if err == nil {
+		t.Fatal("Apply succeeded although every write from the third one on failed")
+	}
+	if !errors.Is(err, ErrRollbackIncomplete) {
+		t.Errorf("a failed rollback was not reported as incomplete: %v", err)
+	}
+}
+
+// stubBackend is a backend a controller test drives directly: it hands out a
+// fixed plan and fails Commit the way the test asks.
+type stubBackend struct {
+	name      string
+	commitErr error
+	calls     []string
+}
+
+func (s *stubBackend) Name() string {
+	if s.name != "" {
+		return s.name
+	}
+	return "stub"
+}
+
+func (s *stubBackend) Enabled(context.Context) (bool, error) { return false, nil }
+
+func (s *stubBackend) Plan(context.Context, Settings) (Snapshot, error) {
+	return Snapshot{Fields: []Field{{Key: "mode", Before: "off", Written: "on", Present: true}}}, nil
+}
+
+func (s *stubBackend) Commit(context.Context, Snapshot) error {
+	s.calls = append(s.calls, "commit")
+	return s.commitErr
+}
+
+func (s *stubBackend) Restore(context.Context, Snapshot) (RestoreResult, error) {
+	s.calls = append(s.calls, "restore")
+	return RestoreResult{Restored: 1}, nil
+}
+
+func (s *stubBackend) Clear(context.Context) error { return nil }
+
+// TestEnableKeepsTheRecordWhenTheRollbackFailed is the case the stage exists
+// for: the write failed, the undo failed too, and the machine is therefore still
+// carrying values this program wrote. Deleting the record would throw away the
+// only description of them, so it has to stay for the next start.
+func TestEnableKeepsTheRecordWhenTheRollbackFailed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SnapshotFile)
+	backend := &stubBackend{commitErr: fmt.Errorf("%w: the tool stopped answering", ErrRollbackIncomplete)}
+	c := WithBackend(backend, nil, path)
+
+	err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"})
+	if !errors.Is(err, ErrRollbackIncomplete) {
+		t.Fatalf("Enable = %v, want it to report the incomplete rollback", err)
+	}
+	if !strings.Contains(err.Error(), "record is kept") {
+		t.Errorf("the error does not say the record was kept: %v", err)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("the takeover record was removed after a rollback that failed: %v", statErr)
+	}
+	if !c.Applied() {
+		t.Error("the controller does not report the values that are still in force")
+	}
+
+	// A shutdown that still happens gets a chance to put the machine back, and
+	// the record goes away with it.
+	if err := c.Release(context.Background()); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the record survived a successful release: %v", statErr)
+	}
+}
+
+// TestTheKeptRecordIsWhatTheNextStartRestores is the acceptance criterion of the
+// stage, stated as a test: after a takeover that failed and could not be undone,
+// a *new* controller reading the same file puts the machine back. Without the
+// record it would have nothing to work from.
+func TestTheKeptRecordIsWhatTheNextStartRestores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SnapshotFile)
+	backend := &stubBackend{commitErr: fmt.Errorf("%w: the tool stopped answering", ErrRollbackIncomplete)}
+	first := WithBackend(backend, nil, path)
+	if err := first.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err == nil {
+		t.Fatal("Enable succeeded although the write failed")
+	}
+
+	// The process dies here. The next start has the backend back and only the
+	// file to go on.
+	next := WithBackend(backend, nil, path)
+	if err := next.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if !containsCall(backend.calls, "restore") {
+		t.Errorf("the next start did not restore anything: %v", backend.calls)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the record survived the recovery it was kept for: %v", statErr)
+	}
+}
+
+// TestEnableRemovesTheRecordWhenTheRollbackSucceeded keeps the other half of the
+// rule: a failure that undid everything leaves nothing to restore, so the record
+// must not make the next start restore values that are no longer there.
+func TestEnableRemovesTheRecordWhenTheRollbackSucceeded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SnapshotFile)
+	c := WithBackend(&stubBackend{commitErr: errors.New("the tool refused")}, nil, path)
+
+	if err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err == nil {
+		t.Fatal("Enable succeeded although the write failed")
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("a record survived a failure that was fully rolled back: %v", statErr)
+	}
+	if c.Applied() {
+		t.Error("the controller reports a setting it did not write")
 	}
 }
 

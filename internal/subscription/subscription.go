@@ -56,6 +56,12 @@ type Options struct {
 }
 
 // state is one subscription's history.
+//
+// skipped is the complete skip detail of the last refresh that completed, not
+// the first few lines the log carried: the log is bounded so a bad provider
+// cannot flood it, while the detail is kept whole and served in pages by
+// Skipped. A refresh that completes replaces it as a unit; a refresh that fails
+// leaves it alone, exactly like the nodes it describes.
 type state struct {
 	entry     config.Subscription
 	nodes     []config.Proxy
@@ -178,6 +184,10 @@ func (m *Manager) refresh(ctx context.Context, sub config.Subscription) ([]confi
 		m.mu.Lock()
 		previous := m.state[sub.Name]
 		changed := previous == nil || previous.signature != signature
+		// The detail of this refresh replaces the previous one as a whole,
+		// including when it is empty: a provider that fixed its list must stop
+		// looking broken. The nodes and the detail therefore always describe
+		// the same body.
 		m.state[sub.Name] = &state{
 			entry: sub, nodes: proxies, skipped: copySkips(skips), signature: signature,
 			fetchedAt: now, next: now.Add(sub.Interval),
@@ -190,6 +200,12 @@ func (m *Manager) refresh(ctx context.Context, sub config.Subscription) ([]confi
 
 	// The fetch or the parse failed. The previous result, or the cached body
 	// from an earlier successful run, is still the best answer available.
+	//
+	// The skip detail is deliberately not touched here. It describes the nodes
+	// in force, and those are the ones this failure kept; replacing it with the
+	// rejects of a body that was refused would leave the endpoint explaining a
+	// list the daemon is not using. A body read back from the cache is not a
+	// completed refresh either, so it does not bring a detail of its own.
 	m.mu.Lock()
 	st := m.state[sub.Name]
 	if st == nil {
@@ -228,7 +244,8 @@ func (m *Manager) refresh(ctx context.Context, sub config.Subscription) ([]confi
 // maxReportedSkips bounds the log lines of one refresh. A provider can serve a
 // thousand bad links; the first few reasons are enough to diagnose it, and the
 // rest are counted. Every reason, including those past the bound, is still
-// available in Status.Skipped.
+// available in Status.Skipped and in pages from Skipped — the bound is a
+// property of the log, not of what the manager keeps.
 const maxReportedSkips = 8
 
 // reportSkips is the per-entry answer to a link that could not be imported.
@@ -297,18 +314,130 @@ func (m *Manager) Snapshot() []Status {
 	defer m.mu.Unlock()
 	out := make([]Status, 0, len(m.state))
 	for _, st := range m.state {
-		out = append(out, Status{
-			Name:      st.entry.Name,
-			URL:       st.entry.URL,
-			Nodes:     len(st.nodes),
-			Skipped:   copySkips(st.skipped),
-			FetchedAt: st.fetchedAt,
-			NextAt:    st.next,
-			Attempts:  st.attempts,
-			Error:     errorText(st.lastErr),
-		})
+		out = append(out, statusOf(st))
 	}
 	return out
+}
+
+// Status reports one subscription's state. The second result is false when this
+// manager has never heard of the name: a subscription the configuration no
+// longer declares, or one that was never imported.
+func (m *Manager) Status(name string) (Status, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.state[name]
+	if st == nil {
+		return Status{}, false
+	}
+	return statusOf(st), true
+}
+
+// Page sizes for the skip detail.
+//
+// DefaultSkippedPage is what a client that names no limit gets: a body with a
+// thousand rejected links should not be serialised because someone opened a
+// screen. MaxSkippedPage is the largest page this package will produce; the API
+// refuses a larger request before it gets here, and the clamp is what keeps a
+// caller that bypasses the API from turning one answer into the whole list.
+const (
+	DefaultSkippedPage = 100
+	MaxSkippedPage     = 500
+)
+
+// SkippedPage is one page of a subscription's skip detail.
+type SkippedPage struct {
+	// Name is the subscription the page belongs to.
+	Name string
+	// Refreshed reports whether a refresh has ever completed. A subscription
+	// whose first fetch failed is known but has no detail yet: it never
+	// described a body, so there is nothing truthful to report but emptiness.
+	Refreshed bool
+	// FetchedAt is when the refresh that produced the detail finished.
+	FetchedAt time.Time
+	// Total is how many entries that refresh skipped, over the whole list. It
+	// does not depend on the page: a client pages until Offset+len(Items)
+	// reaches it.
+	Total int
+	// Offset and Limit describe the page that was returned. Limit is the page
+	// size that was applied, not the number of entries in Items.
+	Offset int
+	Limit  int
+	// Items are the skipped entries of this page, in the order the body carried
+	// them. They are copies.
+	Items []Skip
+}
+
+// ClampSkippedPage turns a requested window into the one this package applies:
+// a missing or negative limit becomes DefaultSkippedPage, a limit above
+// MaxSkippedPage becomes MaxSkippedPage, and a negative offset becomes zero.
+//
+// It is exported because the API layer reports an empty page for a subscription
+// the manager has not seen yet, and that answer has to name the window the
+// caller would have got from a real one rather than a size of its own.
+func ClampSkippedPage(offset, limit int) (int, int) {
+	if limit <= 0 {
+		limit = DefaultSkippedPage
+	}
+	if limit > MaxSkippedPage {
+		limit = MaxSkippedPage
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return offset, limit
+}
+
+// Skipped returns one page of a subscription's skip detail.
+//
+// The detail is what the last completed refresh rejected, by 1-based position
+// and reason, and it is the same list the refresh logged — without the log's
+// bound of maxReportedSkips lines. A refresh that fails keeps the detail of the
+// refresh before it, just as it keeps the nodes.
+//
+// The second result is false when this manager has never heard of the name, so
+// a caller can tell "no such subscription" from "nothing was skipped".
+func (m *Manager) Skipped(name string, offset, limit int) (SkippedPage, bool) {
+	offset, limit = ClampSkippedPage(offset, limit)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.state[name]
+	if st == nil {
+		return SkippedPage{}, false
+	}
+	total := len(st.skipped)
+	page := SkippedPage{
+		Name:      name,
+		Refreshed: !st.fetchedAt.IsZero(),
+		FetchedAt: st.fetchedAt,
+		Total:     total,
+		Offset:    offset,
+		Limit:     limit,
+		Items:     []Skip{},
+	}
+	if offset >= total {
+		return page, true
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page.Items = append(page.Items, st.skipped[offset:end]...)
+	return page, true
+}
+
+// statusOf renders one state as the read-only answer both callers serve. The
+// skip detail is copied: a caller must not be able to write into the state.
+func statusOf(st *state) Status {
+	return Status{
+		Name:      st.entry.Name,
+		URL:       st.entry.URL,
+		Nodes:     len(st.nodes),
+		Skipped:   copySkips(st.skipped),
+		FetchedAt: st.fetchedAt,
+		NextAt:    st.next,
+		Attempts:  st.attempts,
+		Error:     errorText(st.lastErr),
+	}
 }
 
 // Skip is one entry of a subscription body that was not imported.
@@ -321,7 +450,9 @@ type Skip struct {
 	Reason string
 }
 
-// Status is one subscription's state, without the nodes themselves.
+// Status is one subscription's state, without the nodes themselves. Skipped
+// carries the whole detail of the last completed refresh; it is what the CLI
+// and the desktop UI show in pages, through Skipped.
 type Status struct {
 	Name      string
 	URL       string

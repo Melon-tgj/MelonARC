@@ -2,16 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/melon-tgj/melonarc/internal/api"
 	"github.com/melon-tgj/melonarc/internal/config"
 	"github.com/melon-tgj/melonarc/internal/inbound"
 	"github.com/melon-tgj/melonarc/internal/subscription"
@@ -248,5 +251,75 @@ func TestSubscriptionRefreshKeepsThePinnedMember(t *testing.T) {
 	}
 	if got := last.Active(); got != "airport/NodeC" {
 		t.Fatalf("with the pinned node gone the group routes to %q, want the remaining member", got)
+	}
+}
+
+// TestAssembledCoreServesTheSkipDetail drives the two read-only subscription
+// endpoints through a real daemon: the summary carries counts only, the detail
+// is a page of the last completed refresh with the item numbers the log used,
+// and a name the file does not declare is refused with its own code.
+func TestAssembledCoreServesTheSkipDetail(t *testing.T) {
+	// Two good nodes and two entries the importer refuses. The refused ones
+	// carry a method it does not implement and a type it has never heard of,
+	// and neither carries a credential: the reasons must not quote a link, and
+	// a fixture without one keeps that property visible in the answer.
+	body := strings.Join([]string{
+		"ss://YWVzLTI1Ni1nY206c2VjcmV0@node-a.example.com:8388#NodeA",
+		"ss://aes-999@bad.example.com:8388#Bad",
+		"wireguard://key@host:1",
+		"ss://YWVzLTI1Ni1nY206c2VjcmV0@node-b.example.com:8388#NodeB",
+	}, "\n") + "\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, body)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "melonarc.ini")
+	if err := os.WriteFile(cfgPath, []byte(subscriptionConfig(freePort(t), server.URL)), 0o600); err != nil {
+		t.Fatalf("write configuration: %v", err)
+	}
+	core := assembleCore(t, cfgPath)
+
+	listRec := apiGet[json.RawMessage](t, core.api, "/v1/subscriptions")
+	if strings.Contains(string(listRec), `"reason"`) {
+		t.Fatalf("the summary carries skip details: %s", listRec)
+	}
+	var list api.SubscriptionListView
+	if err := json.Unmarshal(listRec, &list); err != nil {
+		t.Fatalf("decode the summary: %v", err)
+	}
+	if len(list.Subscriptions) != 1 {
+		t.Fatalf("subscriptions = %+v, want the one the file declares", list.Subscriptions)
+	}
+	summary := list.Subscriptions[0]
+	if summary.Name != "airport" || summary.Nodes != 2 || summary.Skipped != 2 {
+		t.Fatalf("summary = %+v, want two nodes and two skipped entries", summary)
+	}
+	if summary.FetchedAt == "" || summary.NextAt == "" || summary.Error != "" {
+		t.Fatalf("summary = %+v, want a completed refresh with its next attempt", summary)
+	}
+
+	first := apiGet[api.SkippedListView](t, core.api, "/v1/subscriptions/airport/skipped?offset=0&limit=1")
+	if !first.Refreshed || first.Total != 2 || first.Offset != 0 || first.Limit != 1 {
+		t.Fatalf("first page = %+v", first)
+	}
+	if len(first.Skipped) != 1 || first.Skipped[0].Item != 2 {
+		t.Fatalf("first page holds %+v, want item 2", first.Skipped)
+	}
+	if first.Skipped[0].Reason == "" || strings.Contains(first.Skipped[0].Reason, "bad.example.com") {
+		t.Fatalf("reason = %q, want a reason that does not quote the link", first.Skipped[0].Reason)
+	}
+
+	second := apiGet[api.SkippedListView](t, core.api, "/v1/subscriptions/airport/skipped?offset=1&limit=1")
+	if second.Total != 2 || second.Offset != 1 || len(second.Skipped) != 1 || second.Skipped[0].Item != 3 {
+		t.Fatalf("second page = %+v, want item 3", second)
+	}
+
+	if code, _ := apiStatus(t, core.api, "/v1/subscriptions/typo/skipped"); code != http.StatusNotFound {
+		t.Fatalf("an unknown name answered %d, want 404", code)
+	}
+	if code, body := apiStatus(t, core.api, "/v1/subscriptions/airport/skipped?limit=999"); code != http.StatusBadRequest {
+		t.Fatalf("a page above the cap answered %d (%s), want 400", code, body)
 	}
 }

@@ -109,8 +109,34 @@ test("every panel's endpoints answer a real core", { skip }, async () => {
     assert.ok(["ok", "failed"].includes(entry.result), `unexpected result ${entry.result}`);
   }
 
+  // The subscriptions panel reads a summary, then one page of the detail when
+  // someone opens it. A configuration without a subscription is a valid answer,
+  // so the detail is only driven when there is something to open.
+  const subscriptions = await client.subscriptions();
+  assert.ok(Array.isArray(subscriptions.subscriptions));
+  for (const subscription of subscriptions.subscriptions) {
+    assert.ok(typeof subscription.name === "string" && subscription.name !== "");
+    assert.equal(typeof subscription.nodes, "number");
+    assert.equal(typeof subscription.skipped, "number");
+  }
+  const payloads = [status, config, policies, inbound, failures, rules, byName, byAddr, audit, subscriptions];
+  if (subscriptions.subscriptions.length > 0) {
+    const first = subscriptions.subscriptions[0];
+    const page = await client.subscriptionSkipped(first.name, { offset: 0, limit: 5 });
+    assert.equal(page.subscription, first.name);
+    assert.equal(typeof page.refreshed, "boolean");
+    assert.ok(Array.isArray(page.skipped) && page.skipped.length <= 5);
+    assert.ok(page.total >= page.skipped.length, "the total covers the page");
+    for (const entry of page.skipped) {
+      assert.equal(typeof entry.item, "number");
+      assert.ok(entry.item >= 1, "the item number is 1-based");
+      assert.ok(typeof entry.reason === "string" && entry.reason !== "");
+    }
+    payloads.push(page);
+  }
+
   // The token is a credential: nothing the API returns may contain it.
-  for (const payload of [status, config, policies, inbound, failures, rules, byName, byAddr, audit]) {
+  for (const payload of payloads) {
     assert.ok(!JSON.stringify(payload).includes(token), "a payload leaked the token");
   }
 });

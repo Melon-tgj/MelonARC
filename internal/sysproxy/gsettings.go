@@ -186,13 +186,15 @@ func sameGVariant(current, written string) bool {
 }
 
 // rollback puts the captured values back and reports both the original failure
-// and whatever the restore could not do.
+// and whatever the restore could not do. A restore that stops half way leaves
+// values of this program in force, which is what ErrRollbackIncomplete tells the
+// controller to keep the takeover record for.
 func (g *gsettings) rollback(ctx context.Context, before []write, cause error) error {
 	restored := make([]write, 0, len(before))
 	for _, w := range before {
 		if _, err := g.run(ctx, "gsettings", "set", w.schema, w.key, w.value); err != nil {
-			return fmt.Errorf("%w (and %d of %d settings could not be restored: %v)",
-				cause, len(before)-len(restored), len(before), err)
+			return fmt.Errorf("%w: %w (and %d of %d settings could not be restored: %v)",
+				cause, ErrRollbackIncomplete, len(before)-len(restored), len(before), err)
 		}
 		restored = append(restored, w)
 	}

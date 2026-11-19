@@ -19,6 +19,7 @@ import logsPanel from "../src/panels/logs.js";
 import overviewPanel from "../src/panels/overview.js";
 import rulesPanel from "../src/panels/rules.js";
 import settingsPanel from "../src/panels/settings.js";
+import subscriptionsPanel from "../src/panels/subscriptions.js";
 import { FakeNode, FakeText } from "./lib/fake-dom.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -518,3 +519,157 @@ async function inDom(run) {
 function define(key, value) {
   Object.defineProperty(globalThis, key, { value, writable: true, configurable: true });
 }
+
+// ----------------------------------------------------------- subscriptions
+
+const subscriptions = {
+  subscriptions: [
+    {
+      name: "airport",
+      nodes: 12,
+      skipped: 3,
+      fetched_at: "2026-11-16T08:00:00Z",
+      next_at: "2026-11-16T14:00:00Z",
+    },
+    { name: "spare", nodes: 0, skipped: 0, attempts: 2, error: "the server answered 502 Bad Gateway" },
+  ],
+};
+
+/** The first page of "airport", two entries of a list of twelve. */
+const skippedFirst = {
+  subscription: "airport",
+  refreshed: true,
+  fetched_at: "2026-11-16T08:00:00Z",
+  total: 12,
+  offset: 0,
+  limit: 2,
+  skipped: [
+    { item: 1, reason: "the cipher is not implemented" },
+    { item: 2, reason: "unsupported link type" },
+  ],
+};
+
+test("the subscriptions panel fetches the skipped detail only when it is asked for", async () => {
+  await inDom(async () => {
+    const calls = [];
+    const ctx = context({
+      subscriptions: async () => subscriptions,
+      subscriptionSkipped: async (name, page) => {
+        calls.push({ name, ...page });
+        if ((page.offset ?? 0) === 0) return skippedFirst;
+        return { ...skippedFirst, offset: 2, skipped: [{ item: 3, reason: "unsupported link type" }] };
+      },
+    });
+    const mounted = subscriptionsPanel.mount(ctx);
+    try {
+      await settle();
+      const list = ctx.root.textContent;
+      assert.match(list, /airport/, "the summary names the subscription");
+      assert.match(list, /12/, "the node count is shown");
+      assert.match(list, /the server answered 502 Bad Gateway/, "a failed refresh is shown with its reason");
+      assert.equal(calls.length, 0, "looking at the list must not fetch a detail");
+      assert.doesNotMatch(list, /unsupported link type/, "no detail is rendered before it is asked for");
+
+      const show = find(ctx.root, (node) => node.tagName === "button" && node.textContent === "Skipped entries");
+      assert.ok(show, "each subscription offers the detail");
+      show.dispatch("click");
+      await settle();
+
+      assert.deepEqual(calls, [{ name: "airport", offset: 0, limit: 20 }], "the first page is opened on demand");
+      const detail = ctx.root.textContent;
+      assert.match(detail, /Skipped entries of airport/);
+      assert.match(detail, /the cipher is not implemented/);
+      assert.match(detail, /1–2 of 12/);
+      assert.match(detail, /Only the last completed refresh is kept/);
+
+      const next = find(ctx.root, (node) => node.tagName === "button" && node.textContent === "Next");
+      assert.ok(next, "a page that is not the last offers the next one");
+      next.dispatch("click");
+      await settle();
+      assert.deepEqual(calls[1], { name: "airport", offset: 2, limit: 20 }, "the next page starts where this one ended");
+
+      const close = find(ctx.root, (node) => node.tagName === "button" && node.textContent === "Close");
+      assert.ok(close, "the detail can be dismissed");
+      close.dispatch("click");
+      await settle();
+      assert.doesNotMatch(ctx.root.textContent, /Skipped entries of airport/, "closing drops the detail");
+      assert.match(ctx.root.textContent, /Configured subscriptions/, "the list stays");
+    } finally {
+      mounted.dispose();
+    }
+  });
+});
+
+test("the subscriptions panel keeps the empty answers apart", async () => {
+  await inDom(async () => {
+    const fresh = context({
+      subscriptions: async () => ({ subscriptions: [{ name: "fresh", nodes: 0, skipped: 0 }] }),
+      subscriptionSkipped: async () => ({ subscription: "fresh", refreshed: false, total: 0, offset: 0, limit: 20, skipped: [] }),
+    });
+    const mountedFresh = subscriptionsPanel.mount(fresh);
+    try {
+      await settle();
+      find(fresh.root, (node) => node.tagName === "button" && node.textContent === "Skipped entries").dispatch("click");
+      await settle();
+      assert.match(fresh.root.textContent, /has not completed a refresh yet/);
+    } finally {
+      mountedFresh.dispose();
+    }
+
+    const clean = context({
+      subscriptions: async () => ({ subscriptions: [{ name: "clean", nodes: 4, skipped: 0 }] }),
+      subscriptionSkipped: async () => ({ subscription: "clean", refreshed: true, total: 0, offset: 0, limit: 20, skipped: [] }),
+    });
+    const mountedClean = subscriptionsPanel.mount(clean);
+    try {
+      await settle();
+      find(clean.root, (node) => node.tagName === "button" && node.textContent === "Skipped entries").dispatch("click");
+      await settle();
+      assert.match(clean.root.textContent, /skipped no entry/);
+    } finally {
+      mountedClean.dispose();
+    }
+
+    const none = context({ subscriptions: async () => ({ subscriptions: [] }) });
+    const mountedNone = subscriptionsPanel.mount(none);
+    try {
+      await settle();
+      assert.match(none.root.textContent, /No subscription is configured/);
+    } finally {
+      mountedNone.dispose();
+    }
+  });
+});
+
+// A page that arrives after the reader closed it must not reappear: the click
+// that closed it happened later, and the answer belongs to a screen that is gone.
+test("the subscriptions panel drops a page it no longer shows", async () => {
+  await inDom(async () => {
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const ctx = context({
+      subscriptions: async () => ({ subscriptions: [{ name: "airport", nodes: 12, skipped: 2 }] }),
+      subscriptionSkipped: async () => {
+        await gate;
+        return skippedFirst;
+      },
+    });
+    const mounted = subscriptionsPanel.mount(ctx);
+    try {
+      await settle();
+      find(ctx.root, (node) => node.tagName === "button" && node.textContent === "Skipped entries").dispatch("click");
+      await settle();
+      // The button already says "Hide": the click opened the page optimistically.
+      const hide = find(ctx.root, (node) => node.tagName === "button" && node.textContent === "Hide");
+      assert.ok(hide, "the open page can be closed while it is loading");
+      hide.dispatch("click");
+      release();
+      await settle();
+      assert.doesNotMatch(ctx.root.textContent, /the cipher is not implemented/, "a late answer is not rendered");
+    } finally {
+      mounted.dispose();
+    }
+  });
+});

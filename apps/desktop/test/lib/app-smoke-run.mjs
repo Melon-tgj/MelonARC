@@ -82,6 +82,42 @@ const answers = {
       },
     ],
   },
+  "/bridge/v1/subscriptions": {
+    subscriptions: [
+      {
+        name: "airport/us",
+        nodes: 12,
+        skipped: 2,
+        fetched_at: "2026-11-14T11:00:00Z",
+        next_at: "2026-11-14T12:00:00Z",
+        attempts: 0,
+        error: "",
+      },
+      {
+        name: "metro",
+        nodes: 0,
+        skipped: 0,
+        fetched_at: null,
+        next_at: "2026-11-14T11:00:30Z",
+        attempts: 3,
+        error: "the body held no usable entry",
+      },
+    ],
+  },
+  // The detail is one page of one subscription: two refused entries, both fit
+  // in a page, so the pager has nowhere to go and says so.
+  "/bridge/v1/subscriptions/airport%2Fus/skipped?offset=0&limit=20": {
+    subscription: "airport/us",
+    refreshed: true,
+    fetched_at: "2026-11-14T11:00:00Z",
+    total: 2,
+    offset: 0,
+    limit: 20,
+    skipped: [
+      { item: 4, reason: "unknown cipher" },
+      { item: 9, reason: "port out of range" },
+    ],
+  },
   "/bridge/v1/inbound": {
     inbounds: [{ protocol: "http", open: 2, accepted: 12, datagram_associations: 0 }],
     open: 2,
@@ -239,7 +275,7 @@ async function main() {
   assert.equal(shell.className, "app-shell");
 
   const nav = shell.querySelectorAll("[data-panel]");
-  assert.equal(nav.length, 6, "the navigation is generated from the registry");
+  assert.equal(nav.length, 7, "the navigation is generated from the registry");
 
   let text = shell.textContent;
   assert.match(text, /概览/, "the default language is Chinese");
@@ -271,6 +307,29 @@ async function main() {
   await clickPanel("policies");
   assert.match(shell.textContent, /manual/, "the policies panel lists the group");
   assert.match(shell.textContent, /office-b/, "the policies panel lists its members");
+
+  await clickPanel("subscriptions");
+  assert.match(shell.textContent, /Configured subscriptions/, "the subscriptions panel lists what the config declares");
+  assert.match(shell.textContent, /airport\/us/, "a subscription name is shown as configured");
+  assert.match(shell.textContent, /the body held no usable entry/, "the last error of a refresh is carried through");
+
+  const showSkipped = find(shell, (node) => node.tagName === "button" && node.textContent === "Skipped entries");
+  assert.ok(showSkipped, "the skipped detail opens on a click");
+  showSkipped.dispatch("click");
+  await tick();
+  assert.match(shell.textContent, /Skipped entries of airport\/us/, "the open detail names its subscription");
+  assert.match(shell.textContent, /unknown cipher/, "a refused entry is listed with the reason the core kept");
+  assert.match(shell.textContent, /1–2 of 2/, "the pager counts the page against the total");
+  assert.ok(
+    seen.some((url) => url.endsWith("/bridge/v1/subscriptions/airport%2Fus/skipped?offset=0&limit=20")),
+    "a name with a slash travels as one escaped path segment",
+  );
+
+  const closeSkipped = find(shell, (node) => node.tagName === "button" && node.textContent === "Close");
+  assert.ok(closeSkipped, "the open detail can be closed again");
+  closeSkipped.dispatch("click");
+  await tick();
+  assert.doesNotMatch(shell.textContent, /unknown cipher/, "closing the detail drops what was fetched");
 
   await clickPanel("connections");
   assert.match(shell.textContent, /example\.invalid:80/, "the connections panel lists real failure rows");
@@ -428,7 +487,7 @@ async function main() {
   assert.match(downText, /核心未运行/, "the header pill shows the core is off");
   down.restore();
 
-  console.log("app-smoke-ok: 6 panels, zh-CN + en, six data panels and the offline notice");
+  console.log("app-smoke-ok: 7 panels, zh-CN + en, seven data panels and the offline notice");
   // The polling loops were deliberately left without timers; exit explicitly.
   process.exit(0);
 }

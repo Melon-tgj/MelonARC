@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -87,6 +88,10 @@ func TestArgumentCounts(t *testing.T) {
 		{name: "unknown network", args: []string{"-network", "sctp", "explain", "example.com"}, want: "neither tcp nor udp"},
 		{name: "bad explain target", args: []string{"explain", "example.com:99999"}, want: "outside 1-65535"},
 		{name: "non-positive timeout", args: []string{"-timeout", "0s", "status"}, want: "-timeout must be positive"},
+		{name: "subscriptions with a bad offset", args: []string{"subscriptions", "airport", "many"}, want: "not a non-negative offset"},
+		{name: "subscriptions with a bad limit", args: []string{"subscriptions", "airport", "0", "many"}, want: "not a non-negative limit"},
+		{name: "subscriptions with too many arguments", args: []string{"subscriptions", "a", "0", "1", "2"}, want: "at most a name, an offset and a limit"},
+		{name: "subscriptions with an empty name", args: []string{"subscriptions", " "}, want: "name is empty"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -830,14 +835,17 @@ func TestHumanBytes(t *testing.T) {
 	}
 }
 
-// TestUsageDocumentsHistory keeps the flag a command reads from being invisible
-// in the help text.
-func TestUsageDocumentsHistory(t *testing.T) {
+// TestUsageDocumentsEveryCommand keeps the arguments a command reads from being
+// invisible in the help text.
+func TestUsageDocumentsEveryCommand(t *testing.T) {
 	code, stdout, _ := runCLI("help")
 	if code != exitOK {
 		t.Fatalf("exit code = %d", code)
 	}
-	for _, want := range []string{"history [what] [limit]", "-since <duration>", "-data-dir"} {
+	for _, want := range []string{
+		"history [what] [limit]", "-since <duration>", "-data-dir",
+		"subscriptions [name] [offset] [limit]",
+	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("the usage text does not mention %q", want)
 		}
@@ -859,4 +867,179 @@ func TestVersionCommandReportsTheSharedVersion(t *testing.T) {
 	if want := "melonarc-cli 9.9.9-test\n"; stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
+}
+
+// TestSubscriptionsListsWhatTheCoreKept checks the summary command: one row per
+// subscription with the counts that make the detail worth asking for, and the
+// last failure of a subscription that is down.
+func TestSubscriptionsListsWhatTheCoreKept(t *testing.T) {
+	core := startCore(t, testToken, map[string]http.HandlerFunc{
+		"/v1/subscriptions": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.SubscriptionListView{Subscriptions: []api.SubscriptionView{
+				{
+					Name: "airport", Nodes: 12, Skipped: 3,
+					FetchedAt: "2026-11-16T08:00:00Z", NextAt: "2026-11-16T14:00:00Z",
+				},
+				{Name: "spare", Attempts: 2, Error: "the server answered 502 Bad Gateway"},
+			}})
+		},
+	})
+
+	code, stdout, stderr := runCLI("-api", core.URL, "-token", testToken, "subscriptions")
+	if code != exitOK {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{
+		"NAME", "NODES", "SKIPPED", "LAST REFRESH",
+		"airport", "12", "3", "2026-11-16T08:00:00Z",
+		"spare", "the server answered 502 Bad Gateway",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout does not mention %q:\n%s", want, stdout)
+		}
+	}
+
+	// -json is the same answer the core gave, so a script can read the counts
+	// without parsing a table.
+	code, stdout, _ = runCLI("-api", core.URL, "-token", testToken, "-json", "subscriptions")
+	if code != exitOK {
+		t.Fatalf("-json exit code = %d", code)
+	}
+	if !strings.Contains(stdout, `"name": "airport"`) || !strings.Contains(stdout, `"skipped": 3`) {
+		t.Errorf("-json stdout = %s", stdout)
+	}
+}
+
+// TestSubscriptionsPagesThroughTheSkippedEntries drives the detail command: it
+// prints the item numbers and reasons of one page, says how much of the list it
+// covered, and hands the reader the command for the next page.
+func TestSubscriptionsPagesThroughTheSkippedEntries(t *testing.T) {
+	var offsets []string
+	core := startCore(t, testToken, map[string]http.HandlerFunc{
+		"/v1/subscriptions/airport/skipped": func(w http.ResponseWriter, r *http.Request) {
+			offset := r.URL.Query().Get("offset")
+			offsets = append(offsets, offset+"|"+r.URL.Query().Get("limit"))
+			page := api.SkippedListView{
+				Subscription: "airport",
+				Refreshed:    true,
+				FetchedAt:    "2026-11-16T08:00:00Z",
+				Total:        12,
+				Limit:        2,
+			}
+			switch offset {
+			case "2":
+				page.Offset = 2
+				page.Skipped = []api.SkippedEntryView{
+					{Item: 3, Reason: "unsupported link type"},
+					{Item: 4, Reason: "the cipher is not implemented"},
+				}
+			default:
+				page.Skipped = []api.SkippedEntryView{
+					{Item: 1, Reason: "the cipher is not implemented"},
+					{Item: 2, Reason: "unsupported link type"},
+				}
+			}
+			writeJSON(w, page)
+		},
+	})
+
+	code, stdout, stderr := runCLI("-api", core.URL, "-token", testToken, "subscriptions", "airport", "0", "2")
+	if code != exitOK {
+		t.Fatalf("exit code = %d, stderr = %q", code, stderr)
+	}
+	for _, want := range []string{
+		"ITEM", "REASON",
+		"1", "the cipher is not implemented",
+		"2", "unsupported link type",
+		"1-2 of 12 skipped entries",
+		"next: melonarc-cli subscriptions airport 2 2",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout does not mention %q:\n%s", want, stdout)
+		}
+	}
+
+	code, stdout, _ = runCLI("-api", core.URL, "-token", testToken, "subscriptions", "airport", "2", "2")
+	if code != exitOK {
+		t.Fatalf("second page exit code = %d", code)
+	}
+	if !strings.Contains(stdout, "3-4 of 12 skipped entries") {
+		t.Errorf("the second page does not report its window:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "next: melonarc-cli subscriptions airport 4 2") {
+		t.Errorf("the second page does not point at the third:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "the cipher is not implemented") && strings.Contains(stdout, "unsupported link type") {
+		// Both reasons are on every page in this fixture; what must not appear
+		// is the first page's item numbers.
+		if strings.Contains(stdout, "\n1  ") {
+			t.Errorf("the second page repeats the first:\n%s", stdout)
+		}
+	}
+	if len(offsets) != 2 || offsets[0] != "|2" {
+		t.Errorf("the first request carried offset %q, want none", offsets[0])
+	}
+	if offsets[1] != "2|2" {
+		t.Errorf("the second request carried %q, want offset 2 and limit 2", offsets[1])
+	}
+}
+
+// TestSubscriptionsKeepsTheEmptyAnswersApart covers the three ways a detail can
+// be empty and the one refusal: a subscription that never refreshed, one whose
+// refresh skipped nothing, an offset past the end, and a name the file does not
+// declare.
+func TestSubscriptionsKeepsTheEmptyAnswersApart(t *testing.T) {
+	core := startCore(t, testToken, map[string]http.HandlerFunc{
+		"/v1/subscriptions/fresh/skipped": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.SkippedListView{Subscription: "fresh"})
+		},
+		"/v1/subscriptions/clean/skipped": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.SkippedListView{Subscription: "clean", Refreshed: true, Total: 0})
+		},
+		"/v1/subscriptions/past/skipped": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.SkippedListView{
+				Subscription: "past", Refreshed: true, Total: 3, Offset: 9, Limit: 5,
+			})
+		},
+		"/v1/subscriptions/typo/skipped": func(w http.ResponseWriter, _ *http.Request) {
+			writeErrorBody(w, http.StatusNotFound, "unknown_subscription", `no subscription is named "typo"`)
+		},
+	})
+
+	code, stdout, _ := runCLI("-api", core.URL, "-token", testToken, "subscriptions", "fresh")
+	if code != exitOK || !strings.Contains(stdout, "fresh has not completed a refresh yet") {
+		t.Errorf("a never-refreshed subscription gave %d %q", code, stdout)
+	}
+	code, stdout, _ = runCLI("-api", core.URL, "-token", testToken, "subscriptions", "clean")
+	if code != exitOK || !strings.Contains(stdout, "clean skipped no entry in its last refresh") {
+		t.Errorf("a clean subscription gave %d %q", code, stdout)
+	}
+	code, stdout, _ = runCLI("-api", core.URL, "-token", testToken, "subscriptions", "past", "9")
+	if code != exitOK || !strings.Contains(stdout, "no entry at offset 9: past skipped 3") {
+		t.Errorf("an offset past the end gave %d %q", code, stdout)
+	}
+	code, _, stderr := runCLI("-api", core.URL, "-token", testToken, "subscriptions", "typo")
+	if code != exitFailure || !strings.Contains(stderr, "unknown_subscription") {
+		t.Errorf("an unknown name gave %d %q", code, stderr)
+	}
+
+	// The list itself has an empty answer of its own: a configuration without a
+	// subscription is not an error.
+	var emptyCore = startCore(t, testToken, map[string]http.HandlerFunc{
+		"/v1/subscriptions": func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, api.SubscriptionListView{})
+		},
+	})
+	code, stdout, _ = runCLI("-api", emptyCore.URL, "-token", testToken, "subscriptions")
+	if code != exitOK || !strings.Contains(stdout, "no subscription is configured") {
+		t.Errorf("a configuration without subscriptions gave %d %q", code, stdout)
+	}
+}
+
+// writeErrorBody writes the JSON error shape the core uses, so a test can drive
+// a refused request through the client's decoder.
+func writeErrorBody(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprintf(w, `{"error":{"code":%q,"message":%q}}`, code, message)
 }

@@ -17,7 +17,7 @@ const appRoot = path.resolve(here, "..");
 
 test("the sidebar is built from the registry, in order", () => {
   const panels = listPanels();
-  assert.ok(panels.length >= 6, `expected at least six panels, found ${panels.length}`);
+  assert.ok(panels.length >= 7, `expected at least seven panels, found ${panels.length}`);
   assert.equal(panels[0].id, "overview");
 
   const ids = panels.map((panel) => panel.id);
@@ -25,7 +25,7 @@ test("the sidebar is built from the registry, in order", () => {
 
   const orders = panels.map((panel) => panel.order);
   assert.deepEqual(orders, [...orders].sort((a, b) => a - b), "panels are sorted by order");
-  assert.deepEqual(ids.slice(0, 3), ["overview", "policies", "connections"]);
+  assert.deepEqual(ids.slice(0, 3), ["overview", "policies", "subscriptions"]);
 });
 
 test("every panel has a translated title", async () => {

@@ -18,6 +18,7 @@ import (
 	"github.com/melon-tgj/melonarc/internal/policy"
 	"github.com/melon-tgj/melonarc/internal/rules"
 	"github.com/melon-tgj/melonarc/internal/store"
+	"github.com/melon-tgj/melonarc/internal/subscription"
 )
 
 // defaultRulePage is the number of rules returned when the client does not ask
@@ -71,6 +72,13 @@ type daemonState struct {
 	// and a reload must not swap the file out from under the records that are
 	// still arriving. Nil is valid and reports an empty history.
 	history *store.Store
+
+	// subs holds the last good result of every subscription, which is where the
+	// skip detail of the last completed refresh lives. It is not part of the
+	// snapshot a reload replaces: the manager keeps its state across reloads on
+	// purpose, so a reload inside an interval does not refetch and the detail
+	// survives a configuration swap. Nil is valid and reports no subscriptions.
+	subs *subscription.Manager
 
 	// baseline is the [General] section the process actually started with.
 	// A reload cannot apply every setting in that section, so the settings it
@@ -504,6 +512,101 @@ func formatOptionalTime(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// Subscriptions implements api.Provider. The list follows the configuration in
+// force rather than the manager's memory: a reload that removed a subscription
+// leaves the manager holding its last result, and reporting that entry would
+// describe a subscription the daemon no longer has.
+//
+// Each entry is a summary. The skipped entries are one page of their own, which
+// is what keeps this answer small exactly when a provider is serving a broken
+// list.
+func (s *daemonState) Subscriptions(context.Context) api.SubscriptionListView {
+	cfg := s.snapshot().cfg
+	view := api.SubscriptionListView{Subscriptions: make([]api.SubscriptionView, 0, len(cfg.Subscriptions))}
+	for _, sub := range cfg.Subscriptions {
+		view.Subscriptions = append(view.Subscriptions, s.subscriptionView(sub.Name))
+	}
+	return view
+}
+
+// subscriptionView reports one subscription, with the zero answer for a name the
+// manager does not know: a configuration can declare a subscription whose first
+// fetch has not finished, and "nothing yet" is the honest answer for it.
+func (s *daemonState) subscriptionView(name string) api.SubscriptionView {
+	view := api.SubscriptionView{Name: name}
+	if s.subs == nil {
+		return view
+	}
+	st, ok := s.subs.Status(name)
+	if !ok {
+		return view
+	}
+	view.Nodes = st.Nodes
+	view.Skipped = len(st.Skipped)
+	view.FetchedAt = formatOptionalTime(st.FetchedAt)
+	view.NextAt = formatOptionalTime(st.NextAt)
+	view.Attempts = st.Attempts
+	view.Error = st.Error
+	return view
+}
+
+// SubscriptionSkipped implements api.Provider: one page of the skip detail the
+// last completed refresh left behind.
+//
+// A name the loaded configuration does not declare is a 404 with its own code,
+// so a typo is not mistaken for a clean subscription. A subscription that never
+// completed a refresh answers an empty page with Refreshed false: it is a real
+// subscription, and "no refresh has finished" is a different fact from "the
+// last refresh skipped nothing".
+func (s *daemonState) SubscriptionSkipped(_ context.Context, name string, offset, limit int) (api.SkippedListView, error) {
+	name = strings.TrimSpace(name)
+	if !declaresSubscription(s.snapshot().cfg, name) {
+		return api.SkippedListView{}, api.NotFound("unknown_subscription",
+			fmt.Sprintf("no subscription is named %q", name))
+	}
+	// The page a caller would have got from a real subscription, so an empty
+	// answer does not report a window the caller never asked for.
+	offset, limit = subscription.ClampSkippedPage(offset, limit)
+	view := api.SkippedListView{
+		Subscription: name,
+		Offset:       offset,
+		Limit:        limit,
+		Skipped:      []api.SkippedEntryView{},
+	}
+	if s.subs == nil {
+		return view, nil
+	}
+	page, ok := s.subs.Skipped(name, offset, limit)
+	if !ok {
+		// Declared, but the manager has not seen it: the first import has not
+		// finished, or the reload that declared it kept the previous
+		// configuration. The page is empty and says no refresh completed.
+		return view, nil
+	}
+	view.Refreshed = page.Refreshed
+	view.FetchedAt = formatOptionalTime(page.FetchedAt)
+	view.Total = page.Total
+	view.Offset = page.Offset
+	view.Limit = page.Limit
+	for _, skip := range page.Items {
+		view.Skipped = append(view.Skipped, api.SkippedEntryView{Item: skip.Item, Reason: skip.Reason})
+	}
+	return view, nil
+}
+
+// declaresSubscription reports whether the configuration declares that name.
+func declaresSubscription(cfg *config.Config, name string) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, sub := range cfg.Subscriptions {
+		if sub.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Explain implements api.Provider. It goes through the pipeline rather than the

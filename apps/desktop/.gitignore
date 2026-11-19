@@ -6,3 +6,7 @@ dist/
 # Rust build output; Cargo.lock is tracked once it exists.
 src-tauri/target/
 src-tauri/gen/
+
+# Core binaries staged for externalBin. They are build output, never source.
+src-tauri/binaries/*
+!src-tauri/binaries/README.md

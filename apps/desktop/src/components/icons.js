@@ -15,6 +15,7 @@ const PATHS = {
   rules: ["M5 6h14", "M5 12h10", "M5 18h6"],
   connections: ["M3 12h4l2-5 3 10 2-5h5"],
   logs: ["M7 4h10v16H7z", "M10 8h4", "M10 12h4", "M10 16h3"],
+  subscriptions: ["M6 4h8l4 4v12H6z", "M14 4v4h4", "M9 12h6", "M12 15v4", "M9.5 16.5L12 19l2.5-2.5"],
   settings: ["M4 7h16", "M4 12h16", "M4 17h16", "M9 5v4", "M15 10v4", "M7 15v4"],
   power: ["M12 4v7", "M7 7a7 7 0 1 0 10 0"],
   warning: ["M12 4l9 16H3z", "M12 10v4", "M12 17h.01"],

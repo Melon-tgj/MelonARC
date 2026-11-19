@@ -56,12 +56,23 @@ var DefaultBypass = []string{"localhost", "127.0.0.1", "::1"}
 // how to write.
 var ErrUnsupported = errors.New("this platform has no system proxy setting this build can write")
 
+// ErrRollbackIncomplete reports that a failed takeover could not be undone: some
+// of the values this program wrote are still in force.
+//
+// It is the one case in which the takeover record must survive a failure. A
+// backend that undid everything leaves nothing to restore, so the record is
+// removed; a backend that could not (a tool that stopped answering, a permission
+// that was refused half way) leaves the machine partially configured, and the
+// next start needs the record to put it back.
+var ErrRollbackIncomplete = errors.New("the settings written before the failure could not all be undone")
+
 // ErrNoListener reports that there is nothing to point the desktop proxy at.
 var ErrNoListener = errors.New("no inbound listener is configured")
 
 // Backend is the proxy setting of one desktop.
 type Backend interface {
-	// Name identifies the setting in a log line: "gsettings", "registry".
+	// Name identifies the setting in a log line: "gsettings", "registry",
+	// "networksetup".
 	Name() string
 	// Enabled reports whether the desktop proxy is on.
 	Enabled(ctx context.Context) (bool, error)
@@ -70,7 +81,9 @@ type Backend interface {
 	// controller persist the snapshot before the machine is touched.
 	Plan(ctx context.Context, s Settings) (Snapshot, error)
 	// Commit performs the writes of a Plan. On a failure it restores what it
-	// already wrote and reports the reason.
+	// already wrote and reports the reason. When that rollback could not undo
+	// every field the error wraps ErrRollbackIncomplete, and the controller
+	// keeps the takeover record for the next start.
 	Commit(ctx context.Context, snap Snapshot) error
 	// Restore puts a snapshot back, skipping every field whose current value no
 	// longer equals what this program wrote. A value that was absent before the
@@ -118,7 +131,8 @@ func (c *Controller) Backend() Backend { return c.backend }
 // Any takeover a previous process did not release is put back first, then the
 // values about to be replaced are persisted before the first write. An error
 // leaves the setting as it was and removes the record that is no longer
-// needed.
+// needed — unless the backend could not undo what it had already written, in
+// which case the record is kept so the next start can finish the job.
 func (c *Controller) Enable(ctx context.Context, s Settings) error {
 	if err := s.Validate(); err != nil {
 		return err
@@ -136,9 +150,23 @@ func (c *Controller) Enable(ctx context.Context, s Settings) error {
 		return fmt.Errorf("the system proxy takeover could not be recorded: %w", err)
 	}
 	if err := c.backend.Commit(ctx, snap); err != nil {
+		if errors.Is(err, ErrRollbackIncomplete) {
+			// Part of what this program wrote is still in force. The record is
+			// the only description of it, so it stays on disk for the next
+			// start; this process also keeps it in memory, so a shutdown that
+			// does reach Release still gets a chance to put the machine back.
+			c.snapshot = snap
+			c.applied = true
+			c.logger.Error("the system proxy is only partly set and the partial write could not be undone; the takeover record is kept",
+				"backend", c.backend.Name(), "error", err)
+			return fmt.Errorf("the system proxy could not be set (%s), and what was written before the failure could not all be put back; the takeover record is kept so the next start can restore it: %w",
+				c.backend.Name(), err)
+		}
 		// Commit already rolled the fields back. Nothing is ours any more, so
 		// the record must not tell the next start to restore them again.
-		_ = removeSnapshot(c.path)
+		if rerr := removeSnapshot(c.path); rerr != nil {
+			c.logger.Warn("the system proxy takeover record could not be removed", "path", c.path, "error", rerr)
+		}
 		return fmt.Errorf("the system proxy could not be set (%s): %w", c.backend.Name(), err)
 	}
 	c.snapshot = snap

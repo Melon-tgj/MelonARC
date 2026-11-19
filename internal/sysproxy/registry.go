@@ -242,12 +242,15 @@ func (r *registry) add(ctx context.Context, v registryValue) error {
 }
 
 // rollback restores the captured values, deleting the ones that did not exist.
+// A restore that stops half way leaves values of this program in force, which is
+// what ErrRollbackIncomplete tells the controller to keep the takeover record
+// for.
 func (r *registry) rollback(ctx context.Context, before []registryValue, cause error) error {
 	seen := make(map[string]bool, len(before))
 	for _, v := range before {
 		seen[v.name] = true
 		if err := r.add(ctx, v); err != nil {
-			return fmt.Errorf("%w (and %s could not be restored: %v)", cause, v.name, err)
+			return fmt.Errorf("%w: %w (and %s could not be restored: %v)", cause, ErrRollbackIncomplete, v.name, err)
 		}
 	}
 	for _, name := range []string{valueEnable, valueServer, valueOverride} {
@@ -255,7 +258,7 @@ func (r *registry) rollback(ctx context.Context, before []registryValue, cause e
 			continue
 		}
 		if _, err := r.run(ctx, "reg", "delete", internetSettingsKey, "/v", name, "/f"); err != nil {
-			return fmt.Errorf("%w (and %s could not be removed again: %v)", cause, name, err)
+			return fmt.Errorf("%w: %w (and %s could not be removed again: %v)", cause, ErrRollbackIncomplete, name, err)
 		}
 	}
 	return fmt.Errorf("%w (the previous settings were restored)", cause)

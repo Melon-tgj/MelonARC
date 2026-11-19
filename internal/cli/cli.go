@@ -46,6 +46,10 @@ commands:
   reload                       re-read the configuration file and apply it
   explain <host[:port]>        show how the rules classify a destination
   audit [limit]                list the write operations the core carried out
+  subscriptions [name] [offset] [limit]
+                               list the subscriptions; with a name, print the
+                               entries its last refresh skipped, one page at a
+                               time, as item number and reason
   history [what] [limit]       read what the core kept: what is "summary",
                                "connections", "events" or "traffic"
   version                      print the client version
@@ -69,6 +73,8 @@ flags come before the command:
   melonarc-cli -json status
   melonarc-cli select manual proxy-b
   melonarc-cli explain example.com:443
+  melonarc-cli subscriptions
+  melonarc-cli subscriptions airport 0 20
   melonarc-cli -since 2h history connections 50
 `
 
@@ -141,6 +147,8 @@ func (o *options) dispatch(name string, args []string) int {
 		return o.explain(args)
 	case "audit":
 		return o.audit(args)
+	case "subscriptions":
+		return o.subscriptions(args)
 	case "history":
 		return o.history(args)
 	}
@@ -439,6 +447,129 @@ func (o *options) audit(args []string) int {
 			entry.Time, entry.Action, entry.Result, orDash(entry.Remote), oneLine(entry.Detail))
 	}
 	return o.flush(w)
+}
+
+// subscriptions lists the configured subscriptions, or the entries one of them
+// skipped in its last completed refresh.
+//
+// The detail is paged on purpose: the core keeps the whole list, and a provider
+// that rejected a thousand links would otherwise have to be printed in full to
+// be understood. The offset and the limit are positional, like the limit of the
+// history command, because they are arguments of one command rather than
+// settings of the client.
+func (o *options) subscriptions(args []string) int {
+	if len(args) > 3 {
+		return o.usageError("subscriptions takes at most a name, an offset and a limit: " +
+			"melonarc-cli subscriptions [name] [offset] [limit]")
+	}
+	name := ""
+	if len(args) > 0 {
+		name = strings.TrimSpace(args[0])
+		if name == "" {
+			return o.usageError("the subscription name is empty")
+		}
+	}
+	offset, limit := 0, 0
+	if len(args) > 1 {
+		n, err := strconv.Atoi(args[1])
+		if err != nil || n < 0 {
+			return o.usageError(fmt.Sprintf("%q is not a non-negative offset", args[1]))
+		}
+		offset = n
+	}
+	if len(args) > 2 {
+		n, err := strconv.Atoi(args[2])
+		if err != nil || n < 0 {
+			return o.usageError(fmt.Sprintf("%q is not a non-negative limit", args[2]))
+		}
+		limit = n
+	}
+	c, code := o.client()
+	if c == nil {
+		return code
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
+	defer cancel()
+	if name == "" {
+		return o.subscriptionList(ctx, c)
+	}
+	return o.subscriptionSkipped(ctx, c, name, offset, limit)
+}
+
+// subscriptionList prints one row per declared subscription.
+func (o *options) subscriptionList(ctx context.Context, c *client) int {
+	var view api.SubscriptionListView
+	if err := c.get(ctx, "/v1/subscriptions", &view); err != nil {
+		return o.fail(err)
+	}
+	if o.json {
+		return o.printJSON(view)
+	}
+	if len(view.Subscriptions) == 0 {
+		fmt.Fprintln(o.stdout, "no subscription is configured")
+		return exitOK
+	}
+	w := o.table()
+	fmt.Fprintln(w, "NAME\tNODES\tSKIPPED\tLAST REFRESH\tNEXT ATTEMPT\tATTEMPTS\tERROR")
+	for _, sub := range view.Subscriptions {
+		fmt.Fprintf(w, "%s\t%d\t%d\t%s\t%s\t%d\t%s\n",
+			sub.Name, sub.Nodes, sub.Skipped, orDash(sub.FetchedAt), orDash(sub.NextAt),
+			sub.Attempts, oneLine(sub.Error))
+	}
+	return o.flush(w)
+}
+
+// subscriptionSkipped prints one page of a subscription's skip detail.
+//
+// The three empty answers are kept apart: a subscription that never completed a
+// refresh, one whose last refresh skipped nothing, and an offset past the end of
+// a list that does have entries. Only the last one is a mistake in the request,
+// and none of them is a failure.
+func (o *options) subscriptionSkipped(ctx context.Context, c *client, name string, offset, limit int) int {
+	query := url.Values{}
+	if offset > 0 {
+		query.Set("offset", strconv.Itoa(offset))
+	}
+	if limit > 0 {
+		query.Set("limit", strconv.Itoa(limit))
+	}
+	path := "/v1/subscriptions/" + url.PathEscape(name) + "/skipped" + querySuffix(query)
+
+	var view api.SkippedListView
+	if err := c.get(ctx, path, &view); err != nil {
+		return o.fail(err)
+	}
+	if o.json {
+		return o.printJSON(view)
+	}
+	switch {
+	case !view.Refreshed:
+		fmt.Fprintf(o.stdout, "%s has not completed a refresh yet\n", view.Subscription)
+		return exitOK
+	case view.Total == 0:
+		fmt.Fprintf(o.stdout, "%s skipped no entry in its last refresh\n", view.Subscription)
+		return exitOK
+	case len(view.Skipped) == 0:
+		fmt.Fprintf(o.stdout, "no entry at offset %d: %s skipped %d\n",
+			view.Offset, view.Subscription, view.Total)
+		return exitOK
+	}
+
+	w := o.table()
+	fmt.Fprintln(w, "ITEM\tREASON")
+	for _, entry := range view.Skipped {
+		fmt.Fprintf(w, "%d\t%s\n", entry.Item, oneLine(entry.Reason))
+	}
+	if code := o.flush(w); code != exitOK {
+		return code
+	}
+	from := view.Offset + 1
+	to := view.Offset + len(view.Skipped)
+	fmt.Fprintf(o.stdout, "%d-%d of %d skipped entries\n", from, to, view.Total)
+	if to < view.Total {
+		fmt.Fprintf(o.stdout, "next: melonarc-cli subscriptions %s %d %d\n", name, to, view.Limit)
+	}
+	return exitOK
 }
 
 // historyWhat lists the parts of the history a command can ask for.

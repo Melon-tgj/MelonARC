@@ -59,6 +59,9 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("melonarc-core", flag.ContinueOnError)
 	configPath := fs.String("config", "", "path to the configuration file")
 	apiListen := fs.String("api-listen", "", "override the local API listen address")
+	dataDirFlag := fs.String("data-dir", "", "override the data directory of the configuration")
+	superviseStdin := fs.Bool("supervise-stdin", false,
+		"treat the end of standard input as a shutdown request (the desktop shell keeps the pipe open while it runs)")
 	check := fs.Bool("check", false, "validate the configuration and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -91,7 +94,7 @@ func run(args []string) error {
 
 	// The data directory holds the API token. It is resolved before the check
 	// exit so that -check can report the path without creating anything.
-	dataDir, err := datadir.Resolve(cfg.BaseDir, cfg.General.DataDir)
+	dataDir, err := resolveDataDir(cfg, *dataDirFlag, logger)
 	if err != nil {
 		return fmt.Errorf("the data directory is not usable:\n%w", err)
 	}
@@ -103,6 +106,20 @@ func run(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The desktop shell can be killed in a way that leaves no chance to send a
+	// signal: a crash, a force quit, a reboot of the session. The pipe it holds
+	// open on standard input is the one thing the kernel still closes for us, so
+	// its end of file is treated as the same request as SIGTERM and the daemon
+	// keeps its ordinary shutdown order. The flag is off by default: a terminal
+	// or a null device would report end of file at once, which would make an
+	// unsupervised start exit immediately.
+	if *superviseStdin {
+		if err := checkLivenessPipe(os.Stdin); err != nil {
+			return err
+		}
+		go watchLiveness(os.Stdin, logger, stop)
+	}
 
 	// The observation history is a side channel: it records what the daemon
 	// carried and never takes part in carrying it. It is opened before anything
@@ -230,6 +247,11 @@ func run(args []string) error {
 		startedAt: time.Now(),
 		baseline:  &baseline,
 		history:   history,
+		// The API reports the subscription state the daemon is running with,
+		// including the skip detail of each last refresh. It is the same
+		// manager the loader and the refresh loop use, so the detail a client
+		// reads is the one the refresh produced.
+		subs: subs,
 	}
 	// The reloader keeps the probe context alive for the groups it starts, and
 	// the state reaches it through the API. Both are wired before the API

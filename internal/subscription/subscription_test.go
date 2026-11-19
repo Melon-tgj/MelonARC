@@ -503,3 +503,274 @@ func TestImportWithoutAnyUsableLinkOnFirstImportFails(t *testing.T) {
 		t.Fatalf("proxies = %d, want none", len(cfg.Proxies))
 	}
 }
+
+// ------------------------------------------------------- the retained detail
+
+// skippedBody is a provider's list with bad entries followed by one good node:
+// twelve positions are rejected, the thirteenth is imported. The two kinds of
+// rejection alternate so a page can be checked position by position.
+func skippedBody() string {
+	var lines []string
+	for i := 0; i < 6; i++ {
+		lines = append(lines, badStaticLink, unsupportedLink)
+	}
+	lines = append(lines, testLink)
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// serveBody starts a provider that answers with body until the test changes it.
+func serveBody(t *testing.T, body *string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(*body))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestSkippedDetailIsCompleteAndReadsInPages is the endpoint's contract: the
+// detail is the whole list of the last refresh, not the first eight lines the
+// log carried, and a page is a window of it that reports the total separately.
+func TestSkippedDetailIsCompleteAndReadsInPages(t *testing.T) {
+	body := skippedBody()
+	server := serveBody(t, &body)
+	mgr := New(Options{})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	const total = 12
+	first, ok := mgr.Skipped("airport", 0, 5)
+	if !ok {
+		t.Fatal("the manager does not know the subscription it just imported")
+	}
+	if !first.Refreshed || first.FetchedAt.IsZero() {
+		t.Fatalf("page = %+v, want a completed refresh", first)
+	}
+	if first.Total != total || first.Offset != 0 || first.Limit != 5 || len(first.Items) != 5 {
+		t.Fatalf("first page = total %d, offset %d, limit %d, %d items",
+			first.Total, first.Offset, first.Limit, len(first.Items))
+	}
+	if first.Items[0].Item != 1 || !strings.Contains(first.Items[0].Reason, "unsupported cipher") {
+		t.Errorf("first entry = %+v, want item 1 with the cipher reason", first.Items[0])
+	}
+	if first.Items[1].Item != 2 || !strings.Contains(first.Items[1].Reason, "unsupported link type") {
+		t.Errorf("second entry = %+v, want item 2 with the link-type reason", first.Items[1])
+	}
+
+	// The middle page crosses no boundary of its own: it is offset 5, five
+	// items, and the positions keep being the body's, not the page's.
+	second, _ := mgr.Skipped("airport", 5, 5)
+	if second.Total != total || second.Offset != 5 || len(second.Items) != 5 {
+		t.Fatalf("second page = %+v", second)
+	}
+	if second.Items[0].Item != 6 || second.Items[4].Item != 10 {
+		t.Errorf("second page covers items %d..%d, want 6..10", second.Items[0].Item, second.Items[4].Item)
+	}
+
+	// The last page is short, and says so by returning fewer items than the
+	// page size it was asked for.
+	last, _ := mgr.Skipped("airport", 10, 5)
+	if last.Total != total || len(last.Items) != 2 || last.Items[1].Item != 12 {
+		t.Fatalf("last page = %+v, want items 11 and 12", last)
+	}
+
+	// Past the end is an empty window, not a failure: the total still tells a
+	// client that it walked off the list rather than that the list is empty.
+	past, _ := mgr.Skipped("airport", 50, 5)
+	if past.Total != total || past.Offset != 50 || len(past.Items) != 0 {
+		t.Fatalf("past-the-end page = %+v", past)
+	}
+	if past.Items == nil {
+		t.Error("an empty page carries an empty list, not a nil one")
+	}
+}
+
+// TestSkippedDetailUsesADefaultPageAndCapsALargeOne pins the two page sizes a
+// caller does not control: no limit means the default page, and a limit past
+// the cap is clamped rather than turned into the whole list.
+func TestSkippedDetailUsesADefaultPageAndCapsALargeOne(t *testing.T) {
+	body := skippedBody()
+	server := serveBody(t, &body)
+	mgr := New(Options{})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	if page, _ := mgr.Skipped("airport", 0, 0); page.Limit != DefaultSkippedPage || len(page.Items) != 12 {
+		t.Fatalf("no limit gave limit %d and %d items", page.Limit, len(page.Items))
+	}
+	if page, _ := mgr.Skipped("airport", 0, 10_000); page.Limit != MaxSkippedPage {
+		t.Fatalf("a huge limit gave limit %d, want the cap %d", page.Limit, MaxSkippedPage)
+	}
+	if page, _ := mgr.Skipped("airport", -3, 5); page.Offset != 0 || len(page.Items) != 5 {
+		t.Fatalf("a negative offset gave %+v", page)
+	}
+}
+
+// TestClampSkippedPageIsTheOneWindowRule pins the exported clamp, because the
+// daemon layer applies it to the empty page it serves for a subscription the
+// manager has not seen: both answers have to name the same window.
+func TestClampSkippedPageIsTheOneWindowRule(t *testing.T) {
+	cases := []struct{ offset, limit, wantOffset, wantLimit int }{
+		{0, 0, 0, DefaultSkippedPage},
+		{0, -1, 0, DefaultSkippedPage},
+		{-7, 25, 0, 25},
+		{0, 10_000, 0, MaxSkippedPage},
+		{0, MaxSkippedPage, 0, MaxSkippedPage},
+		{40, 500, 40, 500},
+	}
+	for _, c := range cases {
+		offset, limit := ClampSkippedPage(c.offset, c.limit)
+		if offset != c.wantOffset || limit != c.wantLimit {
+			t.Fatalf("ClampSkippedPage(%d, %d) = (%d, %d), want (%d, %d)",
+				c.offset, c.limit, offset, limit, c.wantOffset, c.wantLimit)
+		}
+	}
+}
+
+// TestSkippedDetailIsReplacedByTheNextCompletedRefresh is the retention rule in
+// the success direction: the detail always describes the body in force, so a
+// fixed list stops looking broken and a partly broken one starts.
+func TestSkippedDetailIsReplacedByTheNextCompletedRefresh(t *testing.T) {
+	body := skippedBody()
+	server := serveBody(t, &body)
+	now := time.Unix(1700000000, 0)
+	mgr := New(Options{Now: func() time.Time { return now }})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	firstFetched := mgr.Snapshot()[0].FetchedAt
+
+	body = testLink + "\n" + testLink + "\n"
+	now = now.Add(7 * time.Hour)
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	page, _ := mgr.Skipped("airport", 0, 10)
+	if page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("a clean body left %d entries behind: %+v", page.Total, page.Items)
+	}
+	if !page.FetchedAt.After(firstFetched) {
+		t.Errorf("detail still claims to be from %s, the first refresh", page.FetchedAt)
+	}
+
+	body = unsupportedLink + "\n" + testLink + "\n"
+	now = now.Add(7 * time.Hour)
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("third import: %v", err)
+	}
+	page, _ = mgr.Skipped("airport", 0, 10)
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Item != 1 {
+		t.Fatalf("the third body's one bad entry is not the detail: %+v", page)
+	}
+}
+
+// TestSkippedDetailIsKeptWhenARefreshFails is the other half of the rule: a
+// refresh that failed kept the nodes, so it keeps the detail that describes
+// them, and it does not claim to have refreshed anything.
+func TestSkippedDetailIsKeptWhenARefreshFails(t *testing.T) {
+	body := skippedBody()
+	server := serveBody(t, &body)
+	now := time.Unix(1700000000, 0)
+	mgr := New(Options{Now: func() time.Time { return now }})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+	before, _ := mgr.Skipped("airport", 0, 50)
+
+	body = allBadBody()
+	now = now.Add(7 * time.Hour)
+	cfg := testConfig(t, server.URL)
+	if err := mgr.Import(context.Background(), cfg); err != nil {
+		t.Fatalf("an all-invalid refresh keeps the previous nodes: %v", err)
+	}
+	after, ok := mgr.Skipped("airport", 0, 50)
+	if !ok {
+		t.Fatal("the subscription disappeared after a failed refresh")
+	}
+	if after.Total != before.Total || len(after.Items) != len(before.Items) {
+		t.Fatalf("the failed body replaced the detail: %d entries, want %d", after.Total, before.Total)
+	}
+	if !after.FetchedAt.Equal(before.FetchedAt) {
+		t.Errorf("detail moved to %s, want it to stay at %s", after.FetchedAt, before.FetchedAt)
+	}
+	for i, item := range after.Items {
+		if item != before.Items[i] {
+			t.Fatalf("entry %d changed to %+v, want %+v", i, item, before.Items[i])
+		}
+	}
+	if status := mgr.Snapshot()[0]; status.Attempts != 1 || status.Error == "" {
+		t.Fatalf("status = %+v, want the failed attempt recorded next to the kept detail", status)
+	}
+}
+
+// TestSkippedDetailOutlivesTheLogCap separates the two bounds: the log stops at
+// eight lines and counts the rest, while the detail keeps every entry so the
+// endpoint can page through them.
+func TestSkippedDetailOutlivesTheLogCap(t *testing.T) {
+	body := skippedBody()
+	server := serveBody(t, &body)
+	var logs bytes.Buffer
+	mgr := New(Options{Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	if got := strings.Count(logs.String(), "subscription entry skipped"); got != maxReportedSkips {
+		t.Errorf("%d per-entry lines, want the log bound of %d:\n%s", got, maxReportedSkips, logs.String())
+	}
+	if !strings.Contains(logs.String(), "count=4") {
+		t.Errorf("the log does not count the entries it did not name:\n%s", logs.String())
+	}
+	page, _ := mgr.Skipped("airport", 0, 50)
+	if page.Total != 12 {
+		t.Fatalf("detail holds %d entries, want all 12", page.Total)
+	}
+	if len(mgr.Snapshot()[0].Skipped) != 12 {
+		t.Fatalf("status carries %d entries, want all 12", len(mgr.Snapshot()[0].Skipped))
+	}
+}
+
+// TestSkippedDetailOfAnUnknownName keeps "no such subscription" apart from
+// "nothing was skipped", which is what lets the API answer 404 rather than an
+// empty page.
+func TestSkippedDetailOfAnUnknownName(t *testing.T) {
+	body := skippedBody()
+	server := serveBody(t, &body)
+	mgr := New(Options{})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if page, ok := mgr.Skipped("typo", 0, 10); ok {
+		t.Fatalf("an unknown name answered a page: %+v", page)
+	}
+	if _, ok := mgr.Status("typo"); ok {
+		t.Fatal("an unknown name answered a status")
+	}
+	if _, ok := mgr.Status("airport"); !ok {
+		t.Fatal("a known name answered no status")
+	}
+}
+
+// TestSkippedDetailBeforeAnyRefreshCompleted covers the state a subscription is
+// in when its very first fetch failed: it is known, it has no detail, and it
+// says so instead of pretending the last refresh skipped nothing.
+func TestSkippedDetailBeforeAnyRefreshCompleted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	mgr := New(Options{})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err == nil {
+		t.Fatal("a first fetch that failed was reported as an import")
+	}
+	page, ok := mgr.Skipped("airport", 0, 10)
+	if !ok {
+		t.Fatal("the manager forgot a subscription it just failed to fetch")
+	}
+	if page.Refreshed || !page.FetchedAt.IsZero() || page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("page = %+v, want an explicit never-refreshed answer", page)
+	}
+}

@@ -109,6 +109,9 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 		startedAt: time.Now(),
 		baseline:  &baseline,
 		history:   history,
+		// The API serves the subscription state from the same manager the
+		// reloader fetches through, exactly as main wires it.
+		subs: subs,
 	}
 	level := new(slog.LevelVar)
 	level.Set(logLevel("error"))

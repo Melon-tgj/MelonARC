@@ -212,6 +212,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/inbound", s.only(http.MethodGet, s.handleInbound))
 	mux.HandleFunc("/v1/failures", s.only(http.MethodGet, s.handleFailures))
 	mux.HandleFunc("/v1/dns", s.only(http.MethodGet, s.handleDNS))
+	// Subscriptions are read-only here: the daemon owns the refresh schedule,
+	// and the endpoints report what it kept rather than triggering a fetch. The
+	// summary stays a summary; the skip detail is a page of its own.
+	mux.HandleFunc("/v1/subscriptions", s.only(http.MethodGet, s.handleSubscriptions))
+	mux.HandleFunc("/v1/subscriptions/{name}/skipped", s.only(http.MethodGet, s.handleSubscriptionSkipped))
 	mux.HandleFunc("/v1/audit", s.only(http.MethodGet, s.handleAudit))
 	// The history endpoints read what the observation layer kept. They are
 	// read-only like the ones above: a record is written by the daemon as it
@@ -372,6 +377,13 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 
 // parseLimit reads the optional limit parameter.
 func parseLimit(raw string) (int, error) {
+	return parseLimitWithin(raw, maxRulePage)
+}
+
+// parseLimitWithin reads the optional limit parameter against an endpoint's own
+// maximum, so a request that asks for more than an endpoint can serve is refused
+// with the number it would have been shortened to instead of being cut silently.
+func parseLimitWithin(raw string, max int) (int, error) {
 	if raw == "" {
 		return 0, nil
 	}
@@ -379,8 +391,8 @@ func parseLimit(raw string) (int, error) {
 	if err != nil || n < 0 {
 		return 0, fmt.Errorf("limit %q is not a non-negative number", raw)
 	}
-	if n > maxRulePage {
-		return 0, fmt.Errorf("limit %d is above the maximum of %d", n, maxRulePage)
+	if n > max {
+		return 0, fmt.Errorf("limit %d is above the maximum of %d", n, max)
 	}
 	return n, nil
 }

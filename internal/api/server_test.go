@@ -31,12 +31,24 @@ type fakeProvider struct {
 	connections   ConnectionListView
 	events        EventListView
 	traffic       TrafficListView
+	subscriptions SubscriptionListView
+	skipped       SkippedListView
+	skippedErr    error
 	lastLimit     int
 	lastReq       ExplainRequest
 	lastFailLimit int
 	lastSelect    [2]string
 	lastHistory   historyQuery
+	lastSkipped   skippedQuery
 	reloadCalls   int
+}
+
+// skippedQuery records the page a test asked for, so the transport tests can
+// check that the path segment and the two parameters arrived as parsed.
+type skippedQuery struct {
+	name   string
+	offset int
+	limit  int
 }
 
 // historyQuery records what the fake was asked for, so the transport tests can
@@ -84,6 +96,13 @@ func (f *fakeProvider) SelectPolicy(_ context.Context, group, member string) (Se
 func (f *fakeProvider) ReloadConfig(context.Context) (ReloadView, error) {
 	f.reloadCalls++
 	return f.reloadView, f.reloadErr
+}
+func (f *fakeProvider) Subscriptions(context.Context) SubscriptionListView {
+	return f.subscriptions
+}
+func (f *fakeProvider) SubscriptionSkipped(_ context.Context, name string, offset, limit int) (SkippedListView, error) {
+	f.lastSkipped = skippedQuery{name: name, offset: offset, limit: limit}
+	return f.skipped, f.skippedErr
 }
 
 func newTestServer(t *testing.T, p Provider) *Server {

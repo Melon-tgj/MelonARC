@@ -1,0 +1,576 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1A0000000000000000000201 /* MelonARCApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000101 /* MelonARCApp.swift */; };
+		1A0000000000000000000202 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000102 /* AppDelegate.swift */; };
+		1A0000000000000000000203 /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000103 /* AppEnvironment.swift */; };
+		1A0000000000000000000204 /* ShellPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000104 /* ShellPaths.swift */; };
+		1A0000000000000000000205 /* APIAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000105 /* APIAddress.swift */; };
+		1A0000000000000000000206 /* ShellSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000106 /* ShellSettings.swift */; };
+		1A0000000000000000000207 /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000107 /* APIModels.swift */; };
+		1A0000000000000000000208 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000108 /* APIClient.swift */; };
+		1A0000000000000000000209 /* CoreSupervisor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000109 /* CoreSupervisor.swift */; };
+		1A000000000000000000020A /* FirstRunConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000010A /* FirstRunConfig.swift */; };
+		1A000000000000000000020B /* SingleInstanceLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000010B /* SingleInstanceLock.swift */; };
+		1A000000000000000000020C /* PanelRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000010C /* PanelRegistry.swift */; };
+		1A000000000000000000020D /* Localization.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000010D /* Localization.swift */; };
+		1A000000000000000000020E /* Formatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000010E /* Formatting.swift */; };
+		1A000000000000000000020F /* OverviewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000010F /* OverviewModel.swift */; };
+		1A0000000000000000000210 /* OverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000110 /* OverviewView.swift */; };
+		1A0000000000000000000211 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000111 /* RootView.swift */; };
+		1A0000000000000000000212 /* PanelPlaceholderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000112 /* PanelPlaceholderView.swift */; };
+		1A0000000000000000000213 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000113 /* SettingsView.swift */; };
+		1A0000000000000000000214 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000114 /* Assets.xcassets */; };
+		1A0000000000000000000215 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000115 /* Localizable.xcstrings */; };
+		1A0000000000000000000216 /* melonarc-core in CopyFiles */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000117 /* melonarc-core */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		1A0000000000000000000220 /* ShellPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000104 /* ShellPaths.swift */; };
+		1A0000000000000000000221 /* APIAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000105 /* APIAddress.swift */; };
+		1A0000000000000000000222 /* ShellSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000106 /* ShellSettings.swift */; };
+		1A0000000000000000000223 /* APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000107 /* APIModels.swift */; };
+		1A0000000000000000000224 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000108 /* APIClient.swift */; };
+		1A0000000000000000000225 /* CoreSupervisor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000109 /* CoreSupervisor.swift */; };
+		1A0000000000000000000226 /* FirstRunConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000010A /* FirstRunConfig.swift */; };
+		1A0000000000000000000227 /* SingleInstanceLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000010B /* SingleInstanceLock.swift */; };
+		1A0000000000000000000228 /* PanelRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000010C /* PanelRegistry.swift */; };
+		1A0000000000000000000229 /* TestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000118 /* TestSupport.swift */; };
+		1A000000000000000000022A /* APIAddressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000119 /* APIAddressTests.swift */; };
+		1A000000000000000000022B /* ShellSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000011A /* ShellSettingsTests.swift */; };
+		1A000000000000000000022C /* FirstRunConfigTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000011B /* FirstRunConfigTests.swift */; };
+		1A000000000000000000022D /* SingleInstanceLockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000011C /* SingleInstanceLockTests.swift */; };
+		1A000000000000000000022E /* CoreSupervisorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000011D /* CoreSupervisorTests.swift */; };
+		1A000000000000000000022F /* PanelRegistryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000011E /* PanelRegistryTests.swift */; };
+		1A0000000000000000000230 /* SidecarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000011F /* SidecarTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		1A0000000000000000000071 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1A0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1A0000000000000000000010;
+			remoteInfo = MelonARC;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		1A0000000000000000000053 /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (
+				1A0000000000000000000216 /* melonarc-core in CopyFiles */,
+			);
+			name = "Embed the core";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		1A0000000000000000000020 /* MelonARC.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MelonARC.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A0000000000000000000021 /* MelonARCTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MelonARCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A0000000000000000000101 /* MelonARCApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MelonARCApp.swift; sourceTree = "<group>"; };
+		1A0000000000000000000102 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		1A0000000000000000000103 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
+		1A0000000000000000000104 /* ShellPaths.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellPaths.swift; sourceTree = "<group>"; };
+		1A0000000000000000000105 /* APIAddress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIAddress.swift; sourceTree = "<group>"; };
+		1A0000000000000000000106 /* ShellSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellSettings.swift; sourceTree = "<group>"; };
+		1A0000000000000000000107 /* APIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIModels.swift; sourceTree = "<group>"; };
+		1A0000000000000000000108 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		1A0000000000000000000109 /* CoreSupervisor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreSupervisor.swift; sourceTree = "<group>"; };
+		1A000000000000000000010A /* FirstRunConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstRunConfig.swift; sourceTree = "<group>"; };
+		1A000000000000000000010B /* SingleInstanceLock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingleInstanceLock.swift; sourceTree = "<group>"; };
+		1A000000000000000000010C /* PanelRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelRegistry.swift; sourceTree = "<group>"; };
+		1A000000000000000000010D /* Localization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Localization.swift; sourceTree = "<group>"; };
+		1A000000000000000000010E /* Formatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Formatting.swift; sourceTree = "<group>"; };
+		1A000000000000000000010F /* OverviewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewModel.swift; sourceTree = "<group>"; };
+		1A0000000000000000000110 /* OverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000111 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000112 /* PanelPlaceholderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelPlaceholderView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000113 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000114 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		1A0000000000000000000115 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		1A0000000000000000000116 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1A0000000000000000000117 /* melonarc-core */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; path = melonarc-core; sourceTree = "<group>"; };
+		1A0000000000000000000118 /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
+		1A0000000000000000000119 /* APIAddressTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIAddressTests.swift; sourceTree = "<group>"; };
+		1A000000000000000000011A /* ShellSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellSettingsTests.swift; sourceTree = "<group>"; };
+		1A000000000000000000011B /* FirstRunConfigTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstRunConfigTests.swift; sourceTree = "<group>"; };
+		1A000000000000000000011C /* SingleInstanceLockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingleInstanceLockTests.swift; sourceTree = "<group>"; };
+		1A000000000000000000011D /* CoreSupervisorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreSupervisorTests.swift; sourceTree = "<group>"; };
+		1A000000000000000000011E /* PanelRegistryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelRegistryTests.swift; sourceTree = "<group>"; };
+		1A000000000000000000011F /* SidecarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidecarTests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		1A0000000000000000000051 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A0000000000000000000055 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		1A0000000000000000000002 = {
+			isa = PBXGroup;
+			children = (
+				1A0000000000000000000004 /* MelonARC */,
+				1A000000000000000000000A /* MelonARCTests */,
+				1A0000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		1A0000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000000000000000000020 /* MelonARC.app */,
+				1A0000000000000000000021 /* MelonARCTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		1A0000000000000000000004 /* MelonARC */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000000000000000000005 /* App */,
+				1A0000000000000000000006 /* Services */,
+				1A0000000000000000000007 /* UI */,
+				1A0000000000000000000008 /* Resources */,
+				1A0000000000000000000009 /* Core */,
+				1A0000000000000000000116 /* Info.plist */,
+			);
+			path = MelonARC;
+			sourceTree = "<group>";
+		};
+		1A0000000000000000000005 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000000000000000000101 /* MelonARCApp.swift */,
+				1A0000000000000000000102 /* AppDelegate.swift */,
+				1A0000000000000000000103 /* AppEnvironment.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		1A0000000000000000000006 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000000000000000000104 /* ShellPaths.swift */,
+				1A0000000000000000000105 /* APIAddress.swift */,
+				1A0000000000000000000106 /* ShellSettings.swift */,
+				1A0000000000000000000107 /* APIModels.swift */,
+				1A0000000000000000000108 /* APIClient.swift */,
+				1A0000000000000000000109 /* CoreSupervisor.swift */,
+				1A000000000000000000010A /* FirstRunConfig.swift */,
+				1A000000000000000000010B /* SingleInstanceLock.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		1A0000000000000000000007 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				1A000000000000000000010C /* PanelRegistry.swift */,
+				1A000000000000000000010D /* Localization.swift */,
+				1A000000000000000000010E /* Formatting.swift */,
+				1A000000000000000000010F /* OverviewModel.swift */,
+				1A0000000000000000000110 /* OverviewView.swift */,
+				1A0000000000000000000111 /* RootView.swift */,
+				1A0000000000000000000112 /* PanelPlaceholderView.swift */,
+				1A0000000000000000000113 /* SettingsView.swift */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		1A0000000000000000000008 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000000000000000000114 /* Assets.xcassets */,
+				1A0000000000000000000115 /* Localizable.xcstrings */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		1A0000000000000000000009 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000000000000000000117 /* melonarc-core */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		1A000000000000000000000A /* MelonARCTests */ = {
+			isa = PBXGroup;
+			children = (
+				1A0000000000000000000118 /* TestSupport.swift */,
+				1A0000000000000000000119 /* APIAddressTests.swift */,
+				1A000000000000000000011A /* ShellSettingsTests.swift */,
+				1A000000000000000000011B /* FirstRunConfigTests.swift */,
+				1A000000000000000000011C /* SingleInstanceLockTests.swift */,
+				1A000000000000000000011D /* CoreSupervisorTests.swift */,
+				1A000000000000000000011E /* PanelRegistryTests.swift */,
+				1A000000000000000000011F /* SidecarTests.swift */,
+			);
+			path = MelonARCTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1A0000000000000000000010 /* MelonARC */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A0000000000000000000030 /* Build configuration list for PBXNativeTarget "MelonARC" */;
+			buildPhases = (
+				1A0000000000000000000050 /* Sources */,
+				1A0000000000000000000051 /* Frameworks */,
+				1A0000000000000000000052 /* Resources */,
+				1A0000000000000000000053 /* CopyFiles */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MelonARC;
+			productName = MelonARC;
+			productReference = 1A0000000000000000000020 /* MelonARC.app */;
+			productType = "com.apple.product-type.application";
+		};
+		1A0000000000000000000011 /* MelonARCTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A0000000000000000000031 /* Build configuration list for PBXNativeTarget "MelonARCTests" */;
+			buildPhases = (
+				1A0000000000000000000054 /* Sources */,
+				1A0000000000000000000055 /* Frameworks */,
+				1A0000000000000000000056 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1A0000000000000000000070 /* PBXTargetDependency */,
+			);
+			name = MelonARCTests;
+			productName = MelonARCTests;
+			productReference = 1A0000000000000000000021 /* MelonARCTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1A0000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					1A0000000000000000000010 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					1A0000000000000000000011 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = 1A0000000000000000000032 /* Build configuration list for PBXProject "MelonARC" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+			);
+			mainGroup = 1A0000000000000000000002;
+			productRefGroup = 1A0000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1A0000000000000000000010 /* MelonARC */,
+				1A0000000000000000000011 /* MelonARCTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		1A0000000000000000000052 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A0000000000000000000214 /* Assets.xcassets in Resources */,
+				1A0000000000000000000215 /* Localizable.xcstrings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A0000000000000000000056 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1A0000000000000000000050 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A0000000000000000000201 /* MelonARCApp.swift in Sources */,
+				1A0000000000000000000202 /* AppDelegate.swift in Sources */,
+				1A0000000000000000000203 /* AppEnvironment.swift in Sources */,
+				1A0000000000000000000204 /* ShellPaths.swift in Sources */,
+				1A0000000000000000000205 /* APIAddress.swift in Sources */,
+				1A0000000000000000000206 /* ShellSettings.swift in Sources */,
+				1A0000000000000000000207 /* APIModels.swift in Sources */,
+				1A0000000000000000000208 /* APIClient.swift in Sources */,
+				1A0000000000000000000209 /* CoreSupervisor.swift in Sources */,
+				1A000000000000000000020A /* FirstRunConfig.swift in Sources */,
+				1A000000000000000000020B /* SingleInstanceLock.swift in Sources */,
+				1A000000000000000000020C /* PanelRegistry.swift in Sources */,
+				1A000000000000000000020D /* Localization.swift in Sources */,
+				1A000000000000000000020E /* Formatting.swift in Sources */,
+				1A000000000000000000020F /* OverviewModel.swift in Sources */,
+				1A0000000000000000000210 /* OverviewView.swift in Sources */,
+				1A0000000000000000000211 /* RootView.swift in Sources */,
+				1A0000000000000000000212 /* PanelPlaceholderView.swift in Sources */,
+				1A0000000000000000000213 /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A0000000000000000000054 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1A0000000000000000000220 /* ShellPaths.swift in Sources */,
+				1A0000000000000000000221 /* APIAddress.swift in Sources */,
+				1A0000000000000000000222 /* ShellSettings.swift in Sources */,
+				1A0000000000000000000223 /* APIModels.swift in Sources */,
+				1A0000000000000000000224 /* APIClient.swift in Sources */,
+				1A0000000000000000000225 /* CoreSupervisor.swift in Sources */,
+				1A0000000000000000000226 /* FirstRunConfig.swift in Sources */,
+				1A0000000000000000000227 /* SingleInstanceLock.swift in Sources */,
+				1A0000000000000000000228 /* PanelRegistry.swift in Sources */,
+				1A0000000000000000000229 /* TestSupport.swift in Sources */,
+				1A000000000000000000022A /* APIAddressTests.swift in Sources */,
+				1A000000000000000000022B /* ShellSettingsTests.swift in Sources */,
+				1A000000000000000000022C /* FirstRunConfigTests.swift in Sources */,
+				1A000000000000000000022D /* SingleInstanceLockTests.swift in Sources */,
+				1A000000000000000000022E /* CoreSupervisorTests.swift in Sources */,
+				1A000000000000000000022F /* PanelRegistryTests.swift in Sources */,
+				1A0000000000000000000230 /* SidecarTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		1A0000000000000000000070 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1A0000000000000000000010 /* MelonARC */;
+			targetProxy = 1A0000000000000000000071 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1A0000000000000000000041 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		1A0000000000000000000042 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		1A0000000000000000000043 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MelonARC/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.melonarc.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		1A0000000000000000000044 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MelonARC/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.melonarc.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		1A0000000000000000000045 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PLATFORM_DIR)/Developer/Library/Frameworks",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.melonarc.app.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		1A0000000000000000000046 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PLATFORM_DIR)/Developer/Library/Frameworks",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.melonarc.app.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1A0000000000000000000030 /* Build configuration list for PBXNativeTarget "MelonARC" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A0000000000000000000043 /* Debug */,
+				1A0000000000000000000044 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A0000000000000000000031 /* Build configuration list for PBXNativeTarget "MelonARCTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A0000000000000000000045 /* Debug */,
+				1A0000000000000000000046 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1A0000000000000000000032 /* Build configuration list for PBXProject "MelonARC" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1A0000000000000000000041 /* Debug */,
+				1A0000000000000000000042 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1A0000000000000000000001 /* Project object */;
+}
