@@ -1,12 +1,15 @@
 name: CI
 
-# Three jobs, in the order the repository is built: the Go tree, the desktop
-# frontend with a real core behind it, and the interop gate that dials reference
-# implementations of each protocol.
+# Four jobs, in the order the repository is built: the Go tree, the desktop
+# frontend with a real core behind it, the interop gate that dials reference
+# implementations of each protocol, and the native macOS application built
+# with Apple's own toolchain.
 #
 # Nothing here downloads into the repository, and nothing here needs a secret:
 # the reference implementations are fetched into a directory outside the tree and
-# checked against the hashes their releases publish.
+# checked against the hashes their releases publish. The macOS job is ad-hoc
+# signed and produces a candidate DMG; Gatekeeper's first-open flow belongs to
+# a clean VM, not to CI.
 
 on:
   push:
@@ -257,3 +260,137 @@ jobs:
       # reason for one, and "skipped" must never read as "verified".
       - name: Gate
         run: bash scripts/check-interop.sh
+
+  # The fourth job builds the native macOS application. This is the only job
+  # that needs a Mac: Xcode compiles and tests the Swift sources, codesign and
+  # hdiutil do the signing and packaging. The cross-platform Tauri shell stays
+  # for Windows and Linux and is not built here (D10, D11).
+  #
+  # No secret, certificate or notarisation account is needed: the preview is
+  # ad-hoc signed, and the first-open flow is a M5 VM check, not a CI step.
+  macos:
+    name: macOS
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      # One pin, recorded verbatim in toolchain.txt. If the runner image moves
+      # to another Xcode, update this single line rather than letting the build
+      # silently pick a different compiler.
+      XCODE_APP: /Applications/Xcode_16.4.app
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Select Xcode and record the toolchain
+        run: |
+          set -eu
+          if [ ! -d "$XCODE_APP" ]; then
+            echo "::error::pinned Xcode $XCODE_APP is not installed on this runner"
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_APP"
+          mkdir -p "$RUNNER_TEMP/macos"
+          {
+            printf 'xcode-select: '; xcode-select -p
+            xcodebuild -version
+            swift --version
+            go version
+            sw_vers
+            printf 'uname -m: '; uname -m
+          } | tee "$RUNNER_TEMP/macos/toolchain.txt"
+
+      # These are the checks that can also run on Linux. They are repeated here
+      # so a project-file or catalog mistake fails before a nine-minute Xcode
+      # build rather than halfway through it.
+      - name: Check the project and string catalog
+        run: |
+          set -eu
+          python3 apps/macos/scripts/check-project.py
+          python3 apps/macos/scripts/check-strings.py
+
+      # The core is a build input of the Xcode target, which copies it into
+      # Contents/MacOS. go.mod selects the compiler; CGO is off so no SDK is
+      # needed for this step.
+      - name: Build the darwin/arm64 core
+        run: bash apps/macos/scripts/build-core.sh
+
+      - name: Test the app and the real sidecar
+        env:
+          MELONARC_TEST_CORE: ${{ github.workspace }}/apps/macos/MelonARC/Core/melonarc-core
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/macos/xcodebuild-test.log"
+          xcodebuild test \
+            -project apps/macos/MelonARC.xcodeproj \
+            -scheme MelonARC \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/macos/DerivedData" \
+            2>&1 | tee "$log"
+          # A skipped real-core test would make this job green for no reason.
+          if grep -q 'MELONARC_TEST_CORE is not set' "$log"; then
+            echo "::error::the real-core tests were skipped, so the sidecar is not verified"
+            exit 1
+          fi
+
+      - name: Build the Release app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -configuration Release \
+            -project apps/macos/MelonARC.xcodeproj \
+            -scheme MelonARC \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/macos/DerivedData" \
+            MACOSX_DEPLOYMENT_TARGET=13.0 \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            CODE_SIGN_IDENTITY=- \
+            2>&1 | tee "$RUNNER_TEMP/macos/xcodebuild-release.log"
+
+      - name: Check both executables
+        run: |
+          app="$RUNNER_TEMP/macos/DerivedData/Build/Products/Release/MelonARC.app"
+          bash apps/macos/scripts/verify-binaries.sh \
+            "$app/Contents/MacOS/MelonARC" \
+            "$app/Contents/MacOS/melonarc-core"
+
+      # Inside-out signing, recursive verification, a read-only compressed DMG,
+      # an attachment re-check and the hash of the .dmg file itself.
+      - name: Sign and package
+        env:
+          CANDIDATE_VERSION: 0.1.0-preview-candidate
+        run: |
+          app="$RUNNER_TEMP/macos/DerivedData/Build/Products/Release/MelonARC.app"
+          version="${CANDIDATE_VERSION}.${GITHUB_RUN_NUMBER}"
+          echo "CANDIDATE_DMG=melonarc-${version}-macos-arm64.dmg" >> "$GITHUB_ENV"
+          bash apps/macos/scripts/package-dmg.sh \
+            "$app" "$RUNNER_TEMP/macos/${CANDIDATE_DMG}"
+
+      - name: Check and freeze the candidate manifest
+        env:
+          CANDIDATE_VERSION: 0.1.0-preview-candidate
+        run: |
+          app="$RUNNER_TEMP/macos/DerivedData/Build/Products/Release/MelonARC.app"
+          version="${CANDIDATE_VERSION}.${GITHUB_RUN_NUMBER}"
+          bash apps/macos/scripts/check-candidate.sh \
+            "$app" "$RUNNER_TEMP/macos/${CANDIDATE_DMG}" \
+            "$GITHUB_SHA" "$GITHUB_RUN_NUMBER" "$version" \
+            "$RUNNER_TEMP/macos/candidate.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: melonarc-macos-arm64
+          path: |
+            ${{ runner.temp }}/macos/melonarc-*.dmg
+            ${{ runner.temp }}/macos/melonarc-*.dmg.sha256
+            ${{ runner.temp }}/macos/candidate.json
+            ${{ runner.temp }}/macos/toolchain.txt
+            ${{ runner.temp }}/macos/xcodebuild-test.log
+            ${{ runner.temp }}/macos/xcodebuild-release.log
+          if-no-files-found: error
+          retention-days: 14
