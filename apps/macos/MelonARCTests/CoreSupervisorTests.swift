@@ -122,7 +122,7 @@ final class CoreSupervisorTests: XCTestCase {
         supervisor.start()
 
         XCTAssertTrue(
-            recorder.wait(until: { snapshots in snapshots.containsFailure(.startupBudget) }, timeout: 15),
+            recorder.wait(until: { _ in recorder.containsFailure(.startupBudget) }, timeout: 15),
             "the budget never expired: \(recorder.all)"
         )
         supervisor.shutdown {}
@@ -177,7 +177,7 @@ final class CoreSupervisorTests: XCTestCase {
         supervisor.start()
 
         XCTAssertTrue(
-            recorder.wait(until: { snapshots in snapshots.containsFailure(.coreMissing) }, timeout: 5),
+            recorder.wait(until: { _ in recorder.containsFailure(.coreMissing) }, timeout: 5),
             "a missing core was not reported: \(recorder.all)"
         )
         XCTAssertEqual(supervisor.snapshot.state, .stopped)
@@ -203,7 +203,7 @@ final class CoreSupervisorTests: XCTestCase {
         supervisor.start()
 
         XCTAssertTrue(
-            recorder.wait(until: { snapshots in snapshots.containsFailure(.configurationMissing) }, timeout: 5),
+            recorder.wait(until: { _ in recorder.containsFailure(.configurationMissing) }, timeout: 5),
             "a missing configuration was not reported: \(recorder.all)"
         )
         XCTAssertNil(supervisor.snapshot.pid)

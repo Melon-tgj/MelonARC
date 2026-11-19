@@ -6430,3 +6430,86 @@ PanelViews.swift:88:25: error: initializer 'init(_:)' requires that 'Binding<Sub
 1. 走快照流程推送，重跑 macOS CI，确认 `Test the app and the real sidecar` 转绿且真核心用例未跳过。
 2. 转绿后再按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 虚拟机验收。
 3. 任何新失败按新日志定位；本机只做静态核对，不做盲改。
+
+## 阶段 M4.2 — CI #20 测试文件 Swift 编译错误修复（2026-11-19）
+
+开工基线：`HEAD = a2dfbe6`（M4.1），Go **1376 / 1355 / 21 / 0**，前端离线
+**82 / 80 / 2 / 0**，前端实时 **82 / 82 / 0 / 0**。CI 运行 #20（提交 `a9382a39`）里
+M4.1 的 `PanelViews.swift` 三条错误已不再出现，Go / 前端 / 互通三 job 全绿；macOS job
+仍在 `Test the app and the real sidecar`（`xcodebuild test`，exit 65）失败，候选
+DMG 未产出。本机仍是 Linux 虚拟机：没有 Swift 编译器、SwiftUI 与 Xcode，不能本地编译验证；
+修复只做静态核对，结论待推送后的 CI 重跑确认。开工前重读了 M4 与 M4.1 两节、
+`docs/development-doc-v1.md` 与四个改动点的上下文。
+
+### 完成了什么
+
+**一、CI 报错原文（八条，全部落在测试文件）**
+
+```
+CoreSupervisorTests.swift:125:59: error: value of type '[CoreSnapshot]' has no member 'containsFailure'
+CoreSupervisorTests.swift:125:76: error: cannot infer contextual base in reference to member 'startupBudget'
+CoreSupervisorTests.swift:180:59: error: value of type '[CoreSnapshot]' has no member 'containsFailure'
+CoreSupervisorTests.swift:180:76: error: cannot infer contextual base in reference to member 'coreMissing'
+CoreSupervisorTests.swift:206:59: error: value of type '[CoreSnapshot]' has no member 'containsFailure'
+CoreSupervisorTests.swift:206:76: error: cannot infer contextual base in reference to member 'configurationMissing'
+SidecarTests.swift:201:48: error: value of type '[CoreSnapshot]' has no member 'containsFailure'
+SidecarTests.swift:201:65: error: cannot infer contextual base in reference to member 'portInUse'
+```
+
+**二、根因（静态核对结论）**
+
+`containsFailure(_:)` 只定义在 `SnapshotRecorder`（`TestSupport.swift:44`，内部读 `all`
+后按 `failure?.reason` 判断），不是 `[CoreSnapshot]` 的成员。四处调用点把 `wait(until:)`
+的闭包参数 `snapshots` / `$0`（类型 `[CoreSnapshot]`）当成了接收者；偶数的四条
+`cannot infer contextual base` 是同一错误的下游连锁——接收者类型未知，`CoreFailure.Reason`
+的静态成员无法定型。同文件其余 `wait(until:)` 用的是数组自有的 `.contains` / `.last`，
+不受影响。
+
+**三、修复内容**
+
+只改四处调用点的接收者，闭包参数改 `_`（其快照已由 `wait(until:)` 内部的 `all` 提供）：
+
+- `CoreSupervisorTests.swift:125` → `recorder.wait(until: { _ in recorder.containsFailure(.startupBudget) }, timeout: 15)`
+- `CoreSupervisorTests.swift:180` → `recorder.wait(until: { _ in recorder.containsFailure(.coreMissing) }, timeout: 5)`
+- `CoreSupervisorTests.swift:206` → `recorder.wait(until: { _ in recorder.containsFailure(.configurationMissing) }, timeout: 5)`
+- `SidecarTests.swift:201` → `contenderRecorder.wait(until: { _ in contenderRecorder.containsFailure(.portInUse) }, timeout: 30)`
+
+`recorder` 的方法内部重新加锁读 `all`，语义与原意图一致。没有给 `[CoreSnapshot]` 加扩展
+（会与 recorder 的方法重复），没有动其他测试、产品代码、扩展接口或 `docs/` 下的开发文档，无新依赖。
+
+### 关键决策及理由
+
+- 只把接收者改回持有锁的 `SnapshotRecorder`，不重写为 `snapshots.contains { ... }`：
+  后者虽然也合法，但会绕开 recorder 的统一判断入口，改动更大且与任务书指定的修复不一致。
+- 不动 `wait(until:)` 的签名与轮询逻辑：它仍用 `all` 喂条件；忽略闭包参数是显式表达
+  「判断只看带锁的 recorder 快照」，不引入未使用变量告警。
+- 不据报错顺手改其他测试或 `TestSupport.swift`：八条错误同源，改完四个接收者即可消解。
+
+### 构建与测试结果
+
+- `go test -v ./...`：**1376 条目 / 1355 通过 / 21 跳过 / 0 失败**，与 M4 基线逐项一致；
+  21 条跳过仍是固定名单，没有新增跳过（第一次统计只计了顶层用例 699 条，改为含缩进
+  子用例的计数后得到上述结果）。
+- 静态检查：`check-project.py`（134 objects / 21 app sources / 20 test sources /
+  1 UI test source）、`check-strings.py`（109 keys / 2 languages，三条既有 note 与本次无关）、
+  `bash -n apps/macos/scripts/*.sh`、`git diff --check` 全部无错误；`git status` 确认
+  `__pycache__/` 未出现在未跟踪列表。
+- 通读四个改动处及其上下文（125 / 180 / 206 / 201 行）与全仓 `containsFailure` 用法：
+  仅 `TestSupport.swift` 保留方法定义，四处调用点接收者均为对应 recorder，无新增调用。
+- **未验证项**：Swift 编译、`xcodebuild test`、XCTest / XCUITest 与真 sidecar 用例、Release
+  构建、ad-hoc 签名、DMG 与候选包校验，全部仍待推送后的 CI 重跑确认；本机 Linux 无 Swift /
+  Xcode，不声称已编译通过，也不声称候选包已生成。
+
+### 遗留问题
+
+- M4 / M4.1 原有挂账不变：CI 工具链/产品路径校准、XCUITest 无障碍标识真机行为、系统代理
+  真实接管与恢复、强退恢复、M5 干净 arm64 VM 验收，以及 Windows/Linux 主线的
+  A2/B4/C1/C2/C3。
+- 若 CI 重跑给出新的 Swift 诊断，按新日志重新定位，不继续猜改。
+
+### 下一步计划
+
+1. 走快照流程推送，重跑 macOS CI，确认 `Test the app and the real sidecar` 转绿且真核心用例
+   未跳过。
+2. 转绿后再按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 虚拟机验收。
+3. 任何新失败按新日志定位；本机只做静态核对，不做盲改。

@@ -198,7 +198,7 @@ final class SidecarTests: XCTestCase {
         contender.start()
 
         XCTAssertTrue(
-            contenderRecorder.wait(until: { $0.containsFailure(.portInUse) }, timeout: 30),
+            contenderRecorder.wait(until: { _ in contenderRecorder.containsFailure(.portInUse) }, timeout: 30),
             "the conflict was not recognised: \(contenderRecorder.all)"
         )
         contender.shutdown {}
