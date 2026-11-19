@@ -30,6 +30,7 @@ Thumbs.db
 
 # Local tooling workspace
 .workbuddy/
+__pycache__/
 
 # Local runtime artifacts
 *.log

@@ -115,7 +115,7 @@ struct SubscriptionsView: View {
                             result.error ?? String(result.nodes)
                         ))
                         .font(.caption)
-                        .foregroundStyle(result.error == nil ? .secondary : .orange)
+                        .foregroundStyle(result.error == nil ? Color.secondary : Color.orange)
                     }
                 }
                 .padding(.vertical, 4)

@@ -6337,3 +6337,96 @@ Swift 编译器、codesign、hdiutil 或 macOS 桌面；Swift 只做工程/文�
 - `SystemProxyState` 与 `error.*` 键值化；新增状态或错误码只改枚举/常量、目录和运行时家族清单。
 - 出站协议注册表、规则类型与策略组扩展点未改动；`config.GeneralPatch` 用指针区分“未设置”与显式值，
   后续新增设置项不改传输形状。
+
+## 阶段 M4.1 — CI 首跑 Swift 编译失败修复（2026-11-19）
+
+开工基线：`HEAD = 02f2250`（M4）。上传后 CI 首次运行（macos-15、Xcode 16.4）：Go、前端、互通
+三 job 全绿，macOS job 在 `Test the app and the real sidecar`（`xcodebuild test`，exit 65）失败。
+本机仍是 Linux 虚拟机：没有 Swift 编译器、SwiftUI 与 Xcode，不能本地编译验证；修复只做静态核对，
+结论待推送后的 CI 重跑确认。开工前重读 M4 一节、开发文档与 `PanelViews.swift` 全文。
+
+### 完成了什么
+
+**一、CI 报错原文（三条，全部落在 `SubscriptionsView`）**
+
+```
+PanelViews.swift:85:24: error: cannot convert value of type '[SubscriptionView]' to expected argument type 'Binding<Data>'
+PanelViews.swift:85:13: error: generic parameter 'Data' could not be inferred
+PanelViews.swift:88:25: error: initializer 'init(_:)' requires that 'Binding<Subject>' conform to 'StringProtocol'
+```
+
+编译器附带的 note：`List` 选中了 `init<Data, RowContent>(_ data: Binding<Data>, ...)` 重载，
+而非普通集合重载。对应源码是 85 行 `List(model.subscriptions) { subscription in` 与
+88 行 `Text(subscription.name)`。
+
+**二、根因（静态核对结论）**
+
+不是 `List` 也不是模型层：`SubscriptionView` 已 `Identifiable`（`id = name`），
+`SubscriptionsModel.subscriptions: [SubscriptionView]`、`refreshing: Set<String>`、
+`lastResult: SubscriptionRefreshView?`、`APIClient.refreshSubscription(_:)` 全部对得上；
+同文件 PoliciesView / RulesView / ConnectionsView / LogsView 的 `List` 写法 CI 已编过。
+逐表达式核对闭包后，唯一不能定型的是 118 行：
+
+```swift
+.foregroundStyle(result.error == nil ? .secondary : .orange)
+```
+
+苹果官方文档：`foregroundStyle<S>(_ style: S) -> some View where S : ShapeStyle`，要求三元两支
+合成同一个 `ShapeStyle` 具体类型。`.secondary` 在 `ShapeStyle` 语境下首选层级样式
+`HierarchicalShapeStyle.secondary`（文档明确它是层级前景样式，会修饰当前前景样式），而 `.orange`
+只能是 `Color.orange`，两支合不到一个 `S`。同文件 67 行 `.red : .secondary` 能编过，是因为首支
+`.red` 先把 `S` 定为 `Color`，`.secondary` 随之解析成 `Color.secondary`（苹果文档确有
+`static let secondary: Color`）；LogsView 的 `.green : .orange` 同理，两支都是 `Color`。
+闭包类型检查失败 → `@ViewBuilder` 把普通集合重载排除 → 编译器退到 `Binding<Data>` 重载，
+`subscription` 被当作 `Binding<Data.Element>`，`subscription.name` 变成 `Binding<Subject>`，
+于是 85 / 88 行连锁报出上面三条错；真正出错的表达式在 118 行。
+本机无 Swift 工具链，无法用编译器直接证实这一推断，故按「静态类型核对 + 官方文档 + 同文件
+已编过的对照写法」定位，不据此扩大改动。
+
+**三、修复内容**
+
+只改 `apps/macos/MelonARC/UI/PanelViews.swift:118` 一行，给三元两支写明具体类型：
+
+```swift
+.foregroundStyle(result.error == nil ? Color.secondary : Color.orange)
+```
+
+`Color` 由文件首行 `import SwiftUI` 提供且符合 `ShapeStyle`，三元不再依赖静态成员推断，闭包即可
+正常定型，普通 `List` 集合重载自然被选中。`List` 写法、闭包其余表达式、布局、刷新行为、其他面板、
+扩展接口一律不动，无新依赖。父级 `VStack` 没有外层 `foregroundStyle`，层级 `.secondary` 与语义
+`Color.secondary` 在此等效，与同文件已编过的 `.red : .secondary` 口径一致。另在根
+`.gitignore` 增加一条 `__pycache__/`，避免本地脚本缓存被带入提交。
+
+### 关键决策及理由
+
+- 按官方文档把三元两支锚定到同一个 `ShapeStyle` 具体类型，不动 `List`、不改四个已编过的面板：
+  这是能让闭包定型的最小改动，其余都是无关重构。
+- 不用 `AnyShapeStyle` 类型擦除：虽也合法，但会把 `.secondary` 保留成层级样式并多两层包装，
+  比直接写明 `Color` 改动大；也不用条件 modifier 拆分视图，避免改变视图身份。
+- 不据猜测同时改 `Task { try? await ... }` 或 `if let result = ...`：前者与 PoliciesView:53
+  同形且已编过，后者 `String == String` 无类型问题。
+
+### 构建与测试结果
+
+- 静态核对通过：`check-project.py`（134 objects / 21 app sources / 20 test sources / 1 UI test source）、
+  `check-strings.py`（109 keys / 2 languages）、`git diff --check` 无输出；`git check-ignore` 确认
+  `__pycache__/` 命中。改后通读 80–130 行，除该行外无差异。
+- Go 与前端套件未重跑：本阶段只改一个 Swift 源文件、DEVLOG 与 `.gitignore`，未触碰 Go / JS，
+  基线仍按 M4 记录（Go 1376 / 1355 / 21 / 0，前端离线 82 / 80 / 2 / 0、实时 82 / 82 / 0 / 0）。
+- **未验证项**：Swift 编译、`xcodebuild test`、XCTest / XCUITest 与真 sidecar 用例、Release 构建、
+  ad-hoc 签名、DMG 与候选包校验，全部仍待推送后的 CI 重跑确认；本机 Linux 无 Swift / Xcode，
+  不声称已编译通过，也不声称候选包已生成。
+
+### 遗留问题
+
+- M4 原有挂账不变：CI 工具链/产品路径校准、XCUITest 无障碍标识真机行为、系统代理真实接管与恢复、
+  强退恢复、M5 干净 arm64 VM 验收，以及 Windows/Linux 主线的 A2/B4/C1/C2/C3。
+- 根因是静态推断结论；若 CI 重跑仍报同一处或给出新诊断，须按新日志重新定位，不继续猜改 Swift。
+- `check-strings.py` 的三条既有 note（`common.on`、`subscriptions.result`、
+  `subscriptions.result_failed` 由运行时拼键）与本次改动无关。
+
+### 下一步计划
+
+1. 走快照流程推送，重跑 macOS CI，确认 `Test the app and the real sidecar` 转绿且真核心用例未跳过。
+2. 转绿后再按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 虚拟机验收。
+3. 任何新失败按新日志定位；本机只做静态核对，不做盲改。
