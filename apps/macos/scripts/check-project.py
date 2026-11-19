@@ -29,7 +29,7 @@ PROJECT = ROOT / "MelonARC.xcodeproj" / "project.pbxproj"
 SCHEME = ROOT / "MelonARC.xcodeproj" / "xcshareddata" / "xcschemes" / "MelonARC.xcscheme"
 
 IDENTIFIER = re.compile(r"^[0-9A-F]{24}$")
-PRODUCTS = {"MelonARC.app", "MelonARCTests.xctest"}
+PRODUCTS = {"MelonARC.app", "MelonARCTests.xctest", "MelonARCUITests.xctest"}
 
 
 class ParseError(Exception):
@@ -227,6 +227,7 @@ def main() -> int:
     # 3. The Swift sources are compiled by the targets they belong to.
     app_sources = source_files(objects, "1A0000000000000000000050")
     test_sources = source_files(objects, "1A0000000000000000000054")
+    ui_test_sources = source_files(objects, "1A0000000000000000000057")
     expected_app = {
         path.name
         for directory in ("App", "Services", "UI")
@@ -253,9 +254,25 @@ def main() -> int:
         if name not in test_sources:
             failures.append(f"{name} is a shared source but the test target does not compile it")
 
+    expected_ui_tests = {path.name for path in (ROOT / "MelonARCUITests").glob("*.swift")}
+    missing_ui_tests = expected_ui_tests - ui_test_sources
+    for name in sorted(missing_ui_tests):
+        failures.append(f"{name} is not compiled by the UI test target")
+    unexpected_ui_tests = ui_test_sources - expected_ui_tests
+    for name in sorted(unexpected_ui_tests):
+        failures.append(f"{name} is compiled by the UI test target but is not a UI test")
+
     # 4. Resources and the embedded core are in the phases that need them.
     resources = phase_file_names(objects, "1A0000000000000000000052")
-    for name in ("Assets.xcassets", "Localizable.xcstrings"):
+    for name in (
+        "Assets.xcassets",
+        "Localizable.xcstrings",
+        "LICENSE",
+        "THIRD-PARTY-NOTICES.md",
+        "SECURITY.md",
+        "README.md",
+        "PRIVACY.md",
+    ):
         if name not in resources:
             failures.append(f"{name} is not copied by the app's resources phase")
     copied = phase_file_names(objects, "1A0000000000000000000053")
@@ -284,7 +301,10 @@ def main() -> int:
         print(f"FAIL: {failure}")
     if failures:
         return 1
-    print(f"ok: project has {len(objects)} objects, {len(app_sources)} app sources, {len(test_sources)} test sources")
+    print(
+        f"ok: project has {len(objects)} objects, {len(app_sources)} app sources, "
+        f"{len(test_sources)} test sources, {len(ui_test_sources)} UI test sources"
+    )
     return 0
 
 
@@ -327,7 +347,7 @@ def phase_file_names(objects: dict, phase_id: str) -> set[str]:
             continue
         reference = objects.get(entry.get("fileRef"))
         if isinstance(reference, dict) and isinstance(reference.get("path"), str):
-            names.add(reference["path"])
+            names.add(Path(reference["path"]).name)
     return names
 
 

@@ -27,6 +27,8 @@ type fakeProvider struct {
 	selectErr     error
 	reloadView    ReloadView
 	reloadErr     error
+	updateView    ConfigUpdateView
+	updateErr     error
 	history       HistoryView
 	connections   ConnectionListView
 	events        EventListView
@@ -34,12 +36,15 @@ type fakeProvider struct {
 	subscriptions SubscriptionListView
 	skipped       SkippedListView
 	skippedErr    error
+	refresh       SubscriptionRefreshView
+	refreshErr    error
 	lastLimit     int
 	lastReq       ExplainRequest
 	lastFailLimit int
 	lastSelect    [2]string
 	lastHistory   historyQuery
 	lastSkipped   skippedQuery
+	lastUpdate    ConfigUpdateRequest
 	reloadCalls   int
 }
 
@@ -97,12 +102,22 @@ func (f *fakeProvider) ReloadConfig(context.Context) (ReloadView, error) {
 	f.reloadCalls++
 	return f.reloadView, f.reloadErr
 }
+func (f *fakeProvider) UpdateConfig(_ context.Context, req ConfigUpdateRequest) (ConfigUpdateView, error) {
+	f.lastUpdate = req
+	return f.updateView, f.updateErr
+}
 func (f *fakeProvider) Subscriptions(context.Context) SubscriptionListView {
 	return f.subscriptions
 }
 func (f *fakeProvider) SubscriptionSkipped(_ context.Context, name string, offset, limit int) (SkippedListView, error) {
 	f.lastSkipped = skippedQuery{name: name, offset: offset, limit: limit}
 	return f.skipped, f.skippedErr
+}
+func (f *fakeProvider) RefreshSubscription(_ context.Context, name string) (SubscriptionRefreshView, error) {
+	f.lastSkipped = skippedQuery{name: name}
+	view := f.refresh
+	view.Subscription = name
+	return view, f.refreshErr
 }
 
 func newTestServer(t *testing.T, p Provider) *Server {

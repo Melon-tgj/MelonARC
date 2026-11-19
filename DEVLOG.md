@@ -6223,3 +6223,117 @@ Go 条目比 M2 基线 +7，全部来自 `cmd/melonarc-core/supervise_test.go`�
    强杀后的代理恢复、最低版本兼容性。
 4. Windows/Linux 主线另排：决定跨平台 Tauri 壳的 `Cargo.lock` 与 A2/B4 收尾方式，不把 macOS
    的 xcodebuild 结果套到那一边。
+
+## 阶段 M4 — 原生 macOS 壳功能齐全并冻结候选包（2026-11-18）
+
+开工基线：`HEAD = ed9bedd`（M3），Go **1345 / 1324 / 21 / 0**，前端离线
+**82 / 80 / 2 / 0**，前端实时 **82 / 82 / 0 / 0**。本机仍是 Linux 虚拟机：没有 Xcode、
+Swift 编译器、codesign、hdiutil 或 macOS 桌面；Swift 只做工程/文案静态核对，原生编译、
+签名、DMG 与 XCUITest 的实际运行留 CI 首跑。开工前重读了 M3 末尾、计划 M4 节与 D3–D11；
+重复 import 已逐文件复查，未发现重复项。
+
+### 完成了什么
+
+**一、Go 侧补齐壳需要的能力（D9：缺失能力补在 Go）**
+
+- `internal/api/views.go` 给 `ConfigView` 增加稳定的 `system_proxy_state`：单一 `state` 字符串
+  外带 `configured`、`pending_restart`、`applied`、`recovery_failed` 与 `detail` 事实位。
+  `internal/sysproxy/status.go` 暴露控制器真实状态，并在部分回滚失败、快照恢复失败时记住原因；
+  `cmd/melonarc-core/state.go` 固定优先级：恢复失败 > 待重启 > 已接管 > 已配置 > 关闭。
+  旧核心缺少该字段时 Swift 解码为 `off`，不会崩溃。
+- 新增 `POST /v1/subscriptions/{name}/refresh`：`internal/subscription.RefreshNow` 是强制刷新原语；
+  未知名字回 `404 unknown_subscription`；抓取失败但保留旧节点回 200 并在视图里带 `error`；
+  节点变化走既有受控 reload。刷新写入审计与历史记录。
+- 新增 `POST /v1/config/update` 与 `internal/config.UpdateGeneralFile`，用于设置的受控写入。
+  更新只改 `[General]` 的 `log_level` / `system_proxy`，保留注释和其余行，写前后都做校验并原子替换；
+  写操作进审计。`system-proxy` 改变后由壳调用既有 `POST /v1/config/reload`，并按 `pending_restart`
+  决定是否重启核心，符合 D6 的“保存 → 受控重启 → 按实际结果更新”。
+- 新增 Go 用例覆盖四态优先级、旧视图兼容、sysproxy 运行时状态、订阅强制刷新/未知名/保留失败、
+  配置编辑/原子写入/非法值拒绝、写端点鉴权与方法约束。
+
+**二、Swift 侧接通六面板、设置与系统代理状态**
+
+- `APIClient` 增加统一 POST 传输、错误码映射、路径段转义，以及规则、订阅、刷新、连接、日志、
+  策略选择、配置写入/重载方法；新端点仍是“一处枚举/构造器 + 一处方法”的扩展点。
+- `APIModels` 解码四态代理视图、写端点视图、订阅、连接、日志和选择结果；未知状态保留为
+  `unknown`，不误报成 `off`。
+- `Services/PanelModels.swift` 为策略、订阅、规则、连接、日志提供有界模型：每页最多 200 条、
+  整页替换、离页停表；`RootView` 按当前选择只启动一个页面模型，关窗全部停止。
+- 六个业务面板全部有真实视图，设置窗可写系统代理开关；概览与设置都显示四态及恢复详情。
+  TUN 在概览和设置里都明示「尚未实现」（英文 `Not implemented`），与 D1 预览口径一致。
+- `data-dir` 决策：拒绝变更而非迁移。首次解析后把生效目录记在 `shell.json` 旁的 `data-dir` 标记中；
+  后续若解析到不同目录则拒绝启动并说明原因。理由：令牌、配置、历史库、订阅缓存与系统代理快照
+  同属一个目录，部分迁移会造出“像全新安装但旧接管记录无人恢复”的分裂状态；本阶段不做用户级迁移。
+  界面不提供 `data_dir` 编辑，设置页说明这一固定策略。
+
+**三、双语、测试与工程**
+
+- `Localizable.xcstrings` 扩到 109 个键；运行状态、系统代理五态、写端点错误码与壳错误码都进目录，
+  中文对应「尚未实现」「待重启生效」「本次已接管」「快照恢复失败」等。`check-strings.py` 的运行时
+  家族清单同步扩展，占位符奇偶校验仍通过。
+- 新增 `APIModelsTests`、`LocalizationTests`；`PanelRegistryTests` 改为要求七项注册全部可用；
+  `ShellSettingsTests` 覆盖数据目录固定策略；新增 `MelonARCUITests` target 与
+  `PanelNavigationUITests`，用无障碍标识遍历六个侧栏页面（本机未实际运行）。
+- `project.pbxproj` / 共享 scheme 增加新 Swift 源、测试 target、UI 测试 target 与随包声明资源；
+  `check-project.py` 增补 UI 测试 target 与资源清单检查。
+
+**四、CI 候选包、元数据与隐私声明**
+
+- 根目录新增双语 `PRIVACY.md`，说明不上传分析/遥测/崩溃数据、订阅与代理流量由用户配置决定、
+  本地数据清单、系统代理快照与恢复、删除数据方式。它随 `.app` 一起打包。
+- 新增 `apps/macos/scripts/check-candidate.sh`：校验候选 DMG 名
+  `melonarc-<version>-macos-arm64.dmg`、bundle 名、GPL-3.0-only 文案、`LICENSE`、
+  `THIRD-PARTY-NOTICES.md`、`SECURITY.md`、`README.md`、`PRIVACY.md` 随包、双语隐私声明、
+  `.sha256` 与 `.dmg` 文件本身一致，并生成 `candidate.json`（commit、build number、version、
+  license、declarations、sha256）。
+- CI macOS job 把 `CURRENT_PROJECT_VERSION` 设为 `GITHUB_RUN_NUMBER`，产出带版本号的候选 DMG，
+  冻结 manifest，并把 DMG、校验文件、manifest、工具链与构建日志一并上传。
+
+### 关键决策及理由
+
+- 四态优先级放在 Go 核心：Swift 不读配置/文件系统，也不重算 sysproxy 事实；与 D6 的归属一致。
+- 配置写入放在 Go API 而非 Swift 直接改 INI：保留配置解析/校验的唯一来源，避免壳与核心各写一份。
+- `data-dir` 选择拒绝变更：以可恢复性优先，不做半迁移；后续若要做迁移需另立阶段并附旧快照处理。
+- 日志/连接页采用“固定上限 + 整页替换 + 离窗停表”，不追加、不在隐藏窗口后台轮询，满足 D9 的有界要求。
+- 候选发布件以提交 + 构建编号 + DMG 本身 SHA-256 三元组标识；名字与随包声明由脚本阻塞式检查，
+  不让缺声明的 DMG 进入候选集。
+
+### 构建与测试结果
+
+- Go 全量：`go test -v ./...` **1376 条目 / 1355 通过 / 21 跳过 / 0 失败**；21 条跳过仍是固定名单，
+  没有新增跳过。相对 M3 增加的 31 条均来自本阶段新增用例，无回退。
+- 前端离线：**82 / 80 / 2 / 0**；前端实时：**82 / 82 / 0 / 0**，均与 M3 基线逐项一致。
+- Go 验收：`go build ./...`、`go vet ./...`、`gofmt -l .` 无输出、
+  `GOOS=windows go build ./cmd/... ./internal/...` 通过。
+- 静态检查：`check-project.py`（134 objects / 21 app sources / 20 test sources / 1 UI test source）、
+  `check-strings.py`（109 keys / 2 languages）、`bash -n`、`git diff --check`、CI YAML 离线解析均通过。
+- 未验：Swift 编译、xcodebuild、codesign/hdiutil、DMG 挂载复验、XCUITest 实际运行、macOS 13/Apple
+  Silicon 真机与 Gatekeeper；这些只能由 CI 首跑和 M5 虚拟机确认。候选 DMG 与 manifest 是 CI 产物，
+  本机没有生成也不声称已生成。
+
+### 遗留问题
+
+- CI 首跑仍要按日志校准 Xcode 锁版、scheme/产品路径，并确认 XCUITest 与真 sidecar 用例没有跳过。
+- 系统代理的真实接管/恢复、预置代理与绕过列表行为、强退恢复仍只在 Go 单测与脚本层覆盖，M5 才验真机。
+- `data-dir` 变更目前是硬失败；未来若提供迁移，需要同时设计旧快照恢复、历史库与订阅缓存迁移。
+- XCUITest 依赖无障碍标识；真机上的窗口/侧栏行为未验。
+- 其余既有挂账照旧：Windows 实机 C1、性能实测 C2、端到端安装 C3、Tauri 壳的 A2/B4、真 TUN
+  枯竭计数非零态、`core.log` 无轮转、用户态 TCP 的 IPv6/乱序/窗口缩放等。
+
+### 下一步计划
+
+1. 上传后跑 macOS CI 首跑：确认工具链、XCTest/XCUITest 和真核心用例，取回候选 DMG、`.sha256`
+   与 `candidate.json`；第一跑之前不声称原生构建或候选包已验证。
+2. M5：先验 SHA-256，再在 arm64 虚拟机完成安装、系统代理四态与异常恢复、强退恢复、Gatekeeper
+   首开、最低版本兼容性验收。
+3. 发布：M5 通过后把同一候选文件提为发布资产；任何修复都生成新候选包与新验收记录。
+
+### 本阶段留出的扩展点
+
+- `PanelRegistry` 仍是侧栏唯一来源，新增面板只需注册项与视图；`startPanel` 的分支只描述行为。
+- `APIEndpoint` / `APIClient` 分层保留，新增端点只加路径构造器与方法；`Provider` 的写方法沿用同一
+  鉴权、审计与错误形状。
+- `BoundedPanelModel` 统一有界替换与离窗停表；新高频页面继承即可，不必重写定时逻辑。
+- `SystemProxyState` 与 `error.*` 键值化；新增状态或错误码只改枚举/常量、目录和运行时家族清单。
+- 出站协议注册表、规则类型与策略组扩展点未改动；`config.GeneralPatch` 用指针区分“未设置”与显式值，
+  后续新增设置项不改传输形状。

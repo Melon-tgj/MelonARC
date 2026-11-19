@@ -146,6 +146,33 @@ final class ShellSettingsTests: XCTestCase {
         XCTAssertEqual(settings.settingsPath.path, directory.file("shell.json").path)
     }
 
+    func testTheFirstDataDirectoryIsRecordedAndTheSameOneIsAccepted() throws {
+        let directory = try TemporaryDirectory("data-dir-marker")
+        let first = try ShellSettings.load(environment: [:], executable: nil, directory: directory.url)
+        try first.confirmDataDirectory()
+
+        let again = try ShellSettings.load(environment: [:], executable: nil, directory: directory.url)
+        XCTAssertNoThrow(try again.confirmDataDirectory())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.file("data-dir").path))
+    }
+
+    func testChangingTheRecordedDataDirectoryIsRefused() throws {
+        let directory = try TemporaryDirectory("data-dir-marker")
+        let moved = try TemporaryDirectory("data-dir-moved")
+        try Data(#"{"data_dir":"\#(directory.url.path)"}"#.utf8).write(to: directory.file("shell.json"))
+        let first = try ShellSettings.load(environment: [:], executable: nil, directory: directory.url)
+        try first.confirmDataDirectory()
+
+        try Data(#"{"data_dir":"\#(moved.url.path)"}"#.utf8).write(to: directory.file("shell.json"))
+        let second = try ShellSettings.load(environment: [:], executable: nil, directory: directory.url)
+        XCTAssertThrowsError(try second.confirmDataDirectory()) { error in
+            guard let shellError = error as? ShellError else {
+                return XCTFail("unexpected error: \(error)")
+            }
+            XCTAssertEqual(shellError.code, "data_directory_changed")
+        }
+    }
+
     func testAnAddressThatIsNotLoopbackStopsTheShell() throws {
         let directory = try TemporaryDirectory("resolve")
         let file = directory.file("shell.json")

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/melon-tgj/melonarc/internal/rules"
 	"github.com/melon-tgj/melonarc/internal/store"
 	"github.com/melon-tgj/melonarc/internal/subscription"
+	"github.com/melon-tgj/melonarc/internal/sysproxy"
 )
 
 // defaultRulePage is the number of rules returned when the client does not ask
@@ -91,6 +93,18 @@ type daemonState struct {
 	// without one answers the reload endpoint with a clear refusal instead of
 	// panicking.
 	reload func(context.Context) (api.ReloadView, error)
+
+	// proxyStatus is the desktop proxy controller the startup path used. The
+	// API reads it so the four-state report describes what this process really
+	// did, rather than what the configuration file says it should have done.
+	// Nil is valid and reports nothing applied, nothing failed.
+	proxyStatus systemProxyStatus
+}
+
+// systemProxyStatus is the slice of the controller the API needs. It is a
+// separate interface so a test can supply a fixed answer without a desktop.
+type systemProxyStatus interface {
+	Status() sysproxy.Status
 }
 
 // stateSnapshot is the part of the state a reload replaces.
@@ -213,6 +227,7 @@ func (s *daemonState) Config(context.Context) api.ConfigView {
 		view.TUNMTU = cfg.General.TUN.MTU
 		view.TUNRoutes = append([]string(nil), cfg.General.TUN.Routes...)
 	}
+	view.SystemProxyState = s.systemProxyStateView(cfg.General.SystemProxy, view.PendingRestart)
 	for _, p := range cfg.Proxies {
 		view.Proxies = append(view.Proxies, api.ProxyView{
 			Name: p.Name, Type: p.Type, Server: p.Server, Port: p.Port,
@@ -229,6 +244,36 @@ func (s *daemonState) Config(context.Context) api.ConfigView {
 	}
 	for _, rs := range cfg.RuleSets {
 		view.RuleSets = append(view.RuleSets, api.RuleSetView{Name: rs.Name, Path: rs.Path})
+	}
+	return view
+}
+
+// systemProxyStateView collapses the configuration and the runtime takeover
+// facts into the single state a client draws, while carrying the raw facts
+// beside it. Precedence is deliberate: a retained, unrecoverable takeover is
+// the one state the user must not miss, then a setting that needs a restart,
+// then a takeover this process actually made, then the configured value.
+func (s *daemonState) systemProxyStateView(configured bool, pending []string) api.SystemProxyView {
+	view := api.SystemProxyView{
+		Configured:     configured,
+		PendingRestart: slices.Contains(pending, "system-proxy"),
+		State:          api.SystemProxyOff,
+	}
+	if s.proxyStatus != nil {
+		status := s.proxyStatus.Status()
+		view.Applied = status.Applied
+		view.RecoveryFailed = status.RecoveryFailed
+		view.Detail = status.Detail
+	}
+	switch {
+	case view.RecoveryFailed:
+		view.State = api.SystemProxyRecoveryFailed
+	case view.PendingRestart:
+		view.State = api.SystemProxyPendingRestart
+	case view.Applied:
+		view.State = api.SystemProxyApplied
+	case configured:
+		view.State = api.SystemProxyConfigured
 	}
 	return view
 }
@@ -332,6 +377,44 @@ func (s *daemonState) ReloadConfig(ctx context.Context) (api.ReloadView, error) 
 			"this daemon was started without a reloader, so the configuration can only be changed by restarting it")
 	}
 	return s.reload(ctx)
+}
+
+// UpdateConfig writes the settings the native shell owns. The file write and
+// the reload commit share commitMu so a policy pin cannot be written into a
+// configuration that is being replaced at the same instant. The caller reloads
+// separately and then reads the resulting state; this method only reports what
+// it wrote and which changes a restart will need.
+func (s *daemonState) UpdateConfig(_ context.Context, req api.ConfigUpdateRequest) (api.ConfigUpdateView, error) {
+	snap := s.snapshot()
+	if snap.cfg == nil || snap.cfg.Path == "" {
+		return api.ConfigUpdateView{}, api.Conflict("config_not_file_backed",
+			"this daemon was started without a configuration file, so settings cannot be saved")
+	}
+	patch := config.GeneralPatch{LogLevel: req.LogLevel, SystemProxy: req.SystemProxy}
+	s.commitMu.Lock()
+	err := config.UpdateGeneralFile(snap.cfg.Path, patch)
+	s.commitMu.Unlock()
+	if err != nil {
+		return api.ConfigUpdateView{}, api.Unprocessable("config_not_written", err.Error())
+	}
+	view := api.ConfigUpdateView{
+		Path:            snap.cfg.Path,
+		RestartRequired: []string{},
+	}
+	if req.LogLevel != nil {
+		view.LogLevel = strings.ToLower(strings.TrimSpace(*req.LogLevel))
+	} else {
+		view.LogLevel = snap.cfg.General.LogLevel
+	}
+	if req.SystemProxy != nil {
+		view.SystemProxy = *req.SystemProxy
+		if view.SystemProxy != snap.cfg.General.SystemProxy {
+			view.RestartRequired = append(view.RestartRequired, "system-proxy")
+		}
+	} else {
+		view.SystemProxy = snap.cfg.General.SystemProxy
+	}
+	return view, nil
 }
 
 // Inbound implements api.Provider.
@@ -593,6 +676,58 @@ func (s *daemonState) SubscriptionSkipped(_ context.Context, name string, offset
 	for _, skip := range page.Items {
 		view.Skipped = append(view.Skipped, api.SkippedEntryView{Item: skip.Item, Reason: skip.Reason})
 	}
+	return view, nil
+}
+
+// RefreshSubscription implements api.Provider: it forces one declared
+// subscription to fetch now and, when its nodes changed, rebuilds the routing
+// artefacts through the same reload path a scheduled update uses.
+//
+// A name the configuration does not declare is a NotFound before the network is
+// touched. A failed fetch is not a request error: the previous nodes were kept
+// and the reason is carried in the view, exactly as a scheduled refresh reports
+// it. The history records the attempt whether or not it changed the nodes.
+func (s *daemonState) RefreshSubscription(ctx context.Context, name string) (api.SubscriptionRefreshView, error) {
+	name = strings.TrimSpace(name)
+	if !declaresSubscription(s.snapshot().cfg, name) {
+		return api.SubscriptionRefreshView{}, api.NotFound("unknown_subscription",
+			fmt.Sprintf("no subscription is named %q", name))
+	}
+	view := api.SubscriptionRefreshView{Subscription: name}
+	if s.subs == nil {
+		return view, nil
+	}
+
+	status, changed, err := s.subs.RefreshNow(ctx, name)
+	view.Nodes = status.Nodes
+	view.Skipped = len(status.Skipped)
+	view.FetchedAt = formatOptionalTime(status.FetchedAt)
+	view.Attempts = status.Attempts
+	view.Error = status.Error
+	if errors.Is(err, subscription.ErrUnknownSubscription) {
+		// Declared in the file but not imported yet (a reload that declared it
+		// kept the previous configuration). Same answer as the skipped page:
+		// known to the configuration, nothing completed yet.
+		return view, nil
+	}
+	// A failed fetch that fell back to a cached body returns a nil error from
+	// the manager but still carries the reason in Status.Error. Both signals
+	// have to be clean before the attempt counts as refreshed.
+	view.Refreshed = err == nil && status.Error == ""
+
+	// A node list that changed has to reach the dialers and groups. The reload
+	// re-imports every subscription, but one just refreshed is not due again,
+	// so it reuses the result we already installed instead of fetching twice.
+	recordErr := err
+	if changed && err == nil {
+		if _, reloadErr := s.reload(ctx); reloadErr != nil {
+			recordErr = reloadErr
+			view.Error = reloadErr.Error()
+		} else {
+			view.Reloaded = true
+		}
+	}
+	s.recordRefresh(subscriptionNodes(s.subs), recordErr)
 	return view, nil
 }
 

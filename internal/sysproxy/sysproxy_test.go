@@ -844,3 +844,56 @@ func findWrite(calls []string, value string) string {
 	}
 	return ""
 }
+
+// TestStatusReportsTheRuntimeFacts checks the outlet the API reads. A fresh
+// controller reports nothing; a takeover that succeeded reports Applied; one
+// whose rollback failed reports both Applied and RecoveryFailed with a reason,
+// because part of what it wrote is still in force.
+func TestStatusReportsTheRuntimeFacts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SnapshotFile)
+	backend := &stubBackend{}
+	c := WithBackend(backend, nil, path)
+
+	fresh := c.Status()
+	if fresh.Applied || fresh.RecoveryFailed || fresh.Detail != "" {
+		t.Fatalf("a fresh controller reported %+v", fresh)
+	}
+
+	if err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890"}); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	applied := c.Status()
+	if !applied.Applied || applied.RecoveryFailed {
+		t.Fatalf("an applied takeover reported %+v", applied)
+	}
+
+	// A second controller over a backend whose restore refuses reports the
+	// recovery failure. A record has to be on disk for Recover to attempt a
+	// restore at all; the failing backend is a wrapper over the stub.
+	failPath := filepath.Join(t.TempDir(), SnapshotFile)
+	if err := saveSnapshot(failPath, Snapshot{
+		Backend: "stub", Fields: []Field{{Key: "proxy", Written: "on"}},
+	}); err != nil {
+		t.Fatalf("saveSnapshot: %v", err)
+	}
+	failing := &failRestoreBackend{stubBackend: &stubBackend{}}
+	failingCtrl := WithBackend(failing, nil, failPath)
+	if err := failingCtrl.Recover(context.Background()); err == nil {
+		t.Fatal("Recover succeeded although the backend could not restore")
+	}
+	failed := failingCtrl.Status()
+	if !failed.RecoveryFailed || failed.Detail == "" {
+		t.Fatalf("a failed recovery reported %+v", failed)
+	}
+	if failed.Applied {
+		t.Error("a controller that never took over must not report Applied")
+	}
+}
+
+// failRestoreBackend is a stub whose Restore always fails, for the recovery
+// status test.
+type failRestoreBackend struct{ *stubBackend }
+
+func (f *failRestoreBackend) Restore(context.Context, Snapshot) (RestoreResult, error) {
+	return RestoreResult{}, errors.New("the system tool stopped answering")
+}

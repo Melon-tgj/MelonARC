@@ -18,6 +18,22 @@ enum Formatting {
         return String(format: "%ds", remainder)
     }
 
+    /// A byte count for a connection row: exact below a kilobyte, then three
+    /// significant digits with a binary unit. The panel shows totals, not a
+    /// rate, so one formatter serves both directions.
+    static func bytes(_ value: Int64) -> String {
+        guard value >= 0 else { return "—" }
+        if value < 1_024 { return "\(value) B" }
+        let units = ["KiB", "MiB", "GiB", "TiB"]
+        var amount = Double(value) / 1_024
+        var unit = 0
+        while amount >= 1_024 && unit + 1 < units.count {
+            amount /= 1_024
+            unit += 1
+        }
+        return String(format: amount < 10 ? "%.1f %@" : "%.0f %@", amount, units[unit])
+    }
+
     /// A path shortened for a table cell, keeping the last components.
     static func path(_ value: String?) -> String {
         guard let value, !value.isEmpty else { return "—" }

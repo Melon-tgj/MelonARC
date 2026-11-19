@@ -319,6 +319,43 @@ func (m *Manager) Snapshot() []Status {
 	return out
 }
 
+// ErrUnknownSubscription reports a name this manager has never imported. It is
+// distinct from a failed fetch of a known subscription: the latter keeps its
+// previous nodes and comes back with a Status describing the failure, while an
+// unknown name has no state to describe at all.
+var ErrUnknownSubscription = errors.New("unknown subscription")
+
+// RefreshNow forces one subscription to fetch at once, ignoring its schedule.
+//
+// It is the operation behind the local API's manual refresh endpoint. The
+// second result reports whether the node list changed, which is what tells the
+// caller it has to rebuild the routing artefacts against the new nodes. The
+// status returned is the one a subsequent Status(name) would report, so the
+// caller can describe the outcome without a second lookup.
+//
+// A refresh that fails keeps the previous nodes, exactly like a scheduled one:
+// the error is reported in Status.Error and returned here only when there was
+// no usable body at all. This is why a caller must read the status even when
+// the error is nil — a failure that fell back to the cache is still a failure
+// the user should see.
+func (m *Manager) RefreshNow(ctx context.Context, name string) (Status, bool, error) {
+	m.mu.Lock()
+	st := m.state[name]
+	if st == nil {
+		m.mu.Unlock()
+		return Status{}, false, ErrUnknownSubscription
+	}
+	sub := st.entry
+	m.mu.Unlock()
+
+	_, changed, err := m.refresh(ctx, sub)
+	status, known := m.Status(name)
+	if !known {
+		return Status{Name: name}, changed, err
+	}
+	return status, changed, err
+}
+
 // Status reports one subscription's state. The second result is false when this
 // manager has never heard of the name: a subscription the configuration no
 // longer declares, or one that was never imported.

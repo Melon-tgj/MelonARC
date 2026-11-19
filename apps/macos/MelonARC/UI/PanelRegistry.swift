@@ -40,7 +40,7 @@ enum PanelRegistry {
         titleKey: "panel.policies.title",
         symbol: "arrow.triangle.branch",
         order: 20,
-        availability: .pendingMilestone
+        availability: .ready
     )
 
     static let subscriptions = PanelDescriptor(
@@ -48,7 +48,7 @@ enum PanelRegistry {
         titleKey: "panel.subscriptions.title",
         symbol: "arrow.triangle.2.circlepath",
         order: 30,
-        availability: .pendingMilestone
+        availability: .ready
     )
 
     static let connections = PanelDescriptor(
@@ -56,7 +56,7 @@ enum PanelRegistry {
         titleKey: "panel.connections.title",
         symbol: "network",
         order: 40,
-        availability: .pendingMilestone
+        availability: .ready
     )
 
     static let rules = PanelDescriptor(
@@ -64,7 +64,7 @@ enum PanelRegistry {
         titleKey: "panel.rules.title",
         symbol: "list.bullet",
         order: 50,
-        availability: .pendingMilestone
+        availability: .ready
     )
 
     static let logs = PanelDescriptor(
@@ -72,7 +72,7 @@ enum PanelRegistry {
         titleKey: "panel.logs.title",
         symbol: "text.alignleft",
         order: 60,
-        availability: .pendingMilestone
+        availability: .ready
     )
 
     /// Settings is a scene of its own — the app menu's "Settings…" and ⌘, open it —
@@ -83,7 +83,7 @@ enum PanelRegistry {
         titleKey: "panel.settings.title",
         symbol: "gearshape",
         order: 70,
-        availability: .pendingMilestone
+        availability: .ready
     )
 
     static let all: [PanelDescriptor] = [

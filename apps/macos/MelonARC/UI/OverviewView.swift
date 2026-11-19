@@ -99,10 +99,18 @@ struct OverviewView: View {
     private var systemProxyGroup: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 7) {
+                InfoRow(titleKey: "overview.field.system_proxy_state", value: proxyStateText)
                 InfoRow(titleKey: "overview.field.system_proxy",
                         value: booleanText(model.configuration?.systemProxy))
                 InfoRow(titleKey: "overview.field.pending_restart", value: pendingRestartText)
+                if let detail = model.configuration?.systemProxyState.detail, !detail.isEmpty {
+                    Text(Localization.format("overview.recovery_detail", detail))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
                 InfoRow(titleKey: "overview.field.inbound", value: inboundText)
+                InfoRow(titleKey: "overview.field.tun", value: Localization.text("common.not_implemented"))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 2)
@@ -189,6 +197,13 @@ struct OverviewView: View {
     private func booleanText(_ value: Bool?) -> String {
         guard let value else { return "—" }
         return Localization.text(value ? "common.on" : "common.off")
+    }
+
+    private var proxyStateText: String {
+        guard let state = model.configuration?.systemProxyState else {
+            return Localization.text(SystemProxyState.off.localizationKey)
+        }
+        return Localization.text(state.state.localizationKey)
     }
 
     private var pendingRestartText: String {

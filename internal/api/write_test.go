@@ -25,7 +25,7 @@ func post(t *testing.T, s *Server, target, token, body string) *httptest.Respons
 // authentication as the read ones: a local process without the token must not be
 // able to change what the daemon routes.
 func TestWriteEndpointsRequireTheToken(t *testing.T) {
-	for _, target := range []string{"/v1/policies/select", "/v1/config/reload"} {
+	for _, target := range []string{"/v1/policies/select", "/v1/config/reload", "/v1/config/update", "/v1/subscriptions/airport/refresh"} {
 		t.Run(target, func(t *testing.T) {
 			p := &fakeProvider{}
 			s := newTestServer(t, p)
@@ -45,7 +45,7 @@ func TestWriteEndpointsRequireTheToken(t *testing.T) {
 
 func TestWriteEndpointsRejectOtherMethods(t *testing.T) {
 	s := newTestServer(t, &fakeProvider{})
-	for _, target := range []string{"/v1/policies/select", "/v1/config/reload"} {
+	for _, target := range []string{"/v1/policies/select", "/v1/config/reload", "/v1/config/update", "/v1/subscriptions/airport/refresh"} {
 		rec := request(t, s, http.MethodGet, target, "test-token")
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("GET %s = %d, want 405", target, rec.Code)

@@ -17,6 +17,10 @@ import Foundation
 enum ShellPaths {
     static let directoryName = "melonarc"
     static let settingsFileName = "shell.json"
+    /// The first resolved data directory is recorded here. The files that live
+    /// in a data directory cannot be moved safely without migrating all of
+    /// them, so a later change is refused instead of silently starting empty.
+    static let dataDirectoryMarkerFileName = "data-dir"
     static let tokenFileName = "api-token"
     static let configurationFileName = "melonarc.conf"
     static let logFileName = "core.log"
@@ -57,6 +61,7 @@ enum ShellError: Error, Equatable, LocalizedError {
     case noConfigurationDirectory
     case invalidAddress(String)
     case unusableDataDirectory(String)
+    case dataDirectoryChanged(String, String)
 
     var errorDescription: String? {
         switch self {
@@ -66,6 +71,19 @@ enum ShellError: Error, Equatable, LocalizedError {
             return "the API address is not a loopback endpoint: \(detail)"
         case .unusableDataDirectory(let detail):
             return "the data directory is not usable: \(detail)"
+        case .dataDirectoryChanged(let recorded, let requested):
+            return "the data directory was recorded as \(recorded) but this launch asked for \(requested)"
+        }
+    }
+
+    /// The stable name the interface translates. The detail stays technical:
+    /// it is for a bug report, never a sentence shown on its own.
+    var code: String {
+        switch self {
+        case .noConfigurationDirectory: return "no_configuration_directory"
+        case .invalidAddress: return "invalid_address"
+        case .unusableDataDirectory: return "unusable_data_directory"
+        case .dataDirectoryChanged: return "data_directory_changed"
         }
     }
 }

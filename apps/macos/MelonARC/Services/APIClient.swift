@@ -3,17 +3,34 @@ import Foundation
 /// The paths this shell can call.
 ///
 /// Adding an endpoint is one case here and one method on `APIClient`; the
-/// transport, the token handling and the error mapping stay untouched. That is the
-/// extension point the next milestone builds the remaining panels on.
+/// transport, the token handling and the error mapping stay untouched. Paths
+/// that carry a name have a builder instead of a case, so the name is escaped
+/// in exactly one place. That is the extension point the remaining panels use.
 enum APIEndpoint: String, CaseIterable {
     case status = "/v1/status"
     case configuration = "/v1/config"
+    case configUpdate = "/v1/config/update"
+    case configReload = "/v1/config/reload"
     case policies = "/v1/policies"
+    case policySelect = "/v1/policies/select"
     case rules = "/v1/rules"
     case subscriptions = "/v1/subscriptions"
+    case connections = "/v1/history/connections"
+    case events = "/v1/history/events"
     case inbound = "/v1/inbound"
     case failures = "/v1/failures"
     case dns = "/v1/dns"
+
+    /// The single-segment escape used by every path with a configuration name.
+    static func escapedSegment(_ value: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
+    }
+
+    static func subscriptionRefresh(_ name: String) -> String {
+        "/v1/subscriptions/\(escapedSegment(name))/refresh"
+    }
 }
 
 /// A call that could not be completed.
@@ -29,6 +46,8 @@ enum APIError: Error, Equatable, LocalizedError {
     case unreachable(String)
     /// The core answered, but not with the expected body.
     case status(Int, String?)
+    /// The core answered with a structured error of its own.
+    case api(String, Int, String?)
     /// The body could not be decoded.
     case decoding(String)
 
@@ -38,6 +57,7 @@ enum APIError: Error, Equatable, LocalizedError {
         case .unauthorized: return "unauthorized"
         case .unreachable: return "unreachable"
         case .status: return "http_status"
+        case .api(let code, _, _): return code
         case .decoding: return "decoding"
         }
     }
@@ -53,12 +73,29 @@ enum APIError: Error, Equatable, LocalizedError {
         case .status(let code, let apiCode):
             let suffix = apiCode.map { " (\($0))" } ?? ""
             return "the core answered with HTTP \(code)\(suffix)"
+        case .api(let code, let status, let message):
+            let suffix = message.map { ": \($0)" } ?? ""
+            return "the core answered HTTP \(status) with \(code)\(suffix)"
         case .decoding(let detail):
             return "the core answered with a body this build cannot read: \(detail)"
         }
     }
 
     var errorDescription: String? { detail }
+}
+
+/// Type erasure for write bodies. It keeps one transport method for every
+/// endpoint while `JSONEncoder` still sees a concrete `Encodable`.
+private struct AnyEncodable: Encodable {
+    private let encodeValue: (Encoder) throws -> Void
+
+    init<T: Encodable>(_ value: T) {
+        encodeValue = { encoder in try value.encode(to: encoder) }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try encodeValue(encoder)
+    }
 }
 
 /// Refuses every redirect.
@@ -116,33 +153,79 @@ final class APIClient {
     // MARK: - Endpoints
 
     func status() async throws -> StatusView {
-        try await get(.status)
+        try await send(.get, APIEndpoint.status.rawValue)
     }
 
     func configuration() async throws -> ConfigurationView {
-        try await get(.configuration)
+        try await send(.get, APIEndpoint.configuration.rawValue)
     }
 
     func policies() async throws -> [PolicyView] {
         struct Envelope: Decodable { let policies: [PolicyView] }
-        let envelope: Envelope = try await get(.policies)
+        let envelope: Envelope = try await send(.get, APIEndpoint.policies.rawValue)
         return envelope.policies
+    }
+
+    func rules(limit: Int) async throws -> RulePage {
+        try await send(.get, APIEndpoint.rules.rawValue + "?limit=\(limit)")
+    }
+
+    func subscriptions() async throws -> SubscriptionListView {
+        try await send(.get, APIEndpoint.subscriptions.rawValue)
+    }
+
+    func refreshSubscription(_ name: String) async throws -> SubscriptionRefreshView {
+        try await send(.post, APIEndpoint.subscriptionRefresh(name))
+    }
+
+    func connections(limit: Int) async throws -> ConnectionListView {
+        try await send(.get, APIEndpoint.connections.rawValue + "?limit=\(limit)")
+    }
+
+    func events(limit: Int) async throws -> EventListView {
+        try await send(.get, APIEndpoint.events.rawValue + "?limit=\(limit)")
+    }
+
+    func selectPolicy(group: String, member: String) async throws -> SelectView {
+        struct Body: Encodable { let group: String; let member: String }
+        return try await send(.post, APIEndpoint.policySelect.rawValue, body: AnyEncodable(Body(group: group, member: member)))
+    }
+
+    func updateConfiguration(_ request: ConfigUpdateRequest) async throws -> ConfigUpdateView {
+        try await send(.post, APIEndpoint.configUpdate.rawValue, body: AnyEncodable(request))
+    }
+
+    func reloadConfiguration() async throws -> ReloadView {
+        try await send(.post, APIEndpoint.configReload.rawValue)
     }
 
     // MARK: - Transport
 
-    private func get<T: Decodable>(_ endpoint: APIEndpoint) async throws -> T {
+    private enum Method: String {
+        case get = "GET"
+        case post = "POST"
+    }
+
+    private func send<T: Decodable>(
+        _ method: Method,
+        _ path: String,
+        body: AnyEncodable? = nil
+    ) async throws -> T {
         let token = try readToken()
-        guard let base = address.baseURL, let url = URL(string: endpoint.rawValue, relativeTo: base)?.absoluteURL else {
+        guard let base = address.baseURL, let url = URL(string: path, relativeTo: base)?.absoluteURL else {
             throw APIError.unreachable("\(address.label) is not a usable base URL")
         }
 
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        request.httpMethod = method.rawValue
         request.timeoutInterval = timeout
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try Self.makeEncoder().encode(body)
+        }
 
         let data: Data
         let response: URLResponse
@@ -169,7 +252,10 @@ final class APIClient {
         case 401, 403:
             throw APIError.unauthorized
         default:
-            throw APIError.status(http.statusCode, Self.apiCode(in: data))
+            if let envelope = try? Self.makeDecoder().decode(APIErrorEnvelope.self, from: data) {
+                throw APIError.api(envelope.error.code, http.statusCode, envelope.error.message)
+            }
+            throw APIError.status(http.statusCode, nil)
         }
     }
 
@@ -179,8 +265,10 @@ final class APIClient {
         return decoder
     }
 
-    private static func apiCode(in data: Data) -> String? {
-        try? makeDecoder().decode(APIErrorEnvelope.self, from: data).error.code
+    private static func makeEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        return encoder
     }
 
     /// Reads `<data-dir>/api-token`.

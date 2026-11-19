@@ -19,12 +19,14 @@ struct RootView: View {
                         Image(systemName: panel.symbol)
                     }
                     .tag(panel.id)
+                    .accessibilityIdentifier("panel.\(panel.id)")
                 }
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 176, ideal: 196, max: 260)
         } detail: {
             detail
+                .accessibilityIdentifier("panel.\(selection ?? "none").root")
         }
         .onAppear {
             // Handed over so the delegate and the menu bar can reopen a window that
@@ -32,29 +34,47 @@ struct RootView: View {
             environment.attachWindowOpener { identifier in
                 openWindow(id: identifier)
             }
-            environment.overview.start()
+            environment.startPanel(selection)
+        }
+        .onChange(of: selection) { _ in
+            // The sidebar is generated from the registry. Only the selected
+            // page's timer runs, so logs and connections stop refreshing the
+            // moment the user leaves them.
+            environment.stopAllPanels()
+            environment.startPanel(selection)
         }
         .onDisappear {
-            // Leaving the window stops the two-second poll. The menu bar item and
-            // the core are unaffected.
-            environment.overview.stop()
+            // Leaving the window stops every poll. The menu bar item and the
+            // core are unaffected.
+            environment.stopAllPanels()
         }
     }
 
     @ViewBuilder
     private var detail: some View {
-        if environment.settings == nil {
+        if environment.settings == nil || environment.launchFailure != nil {
             UnavailableView(
                 titleKey: "startup.failed.title",
-                message: environment.settingsFailure ?? "",
+                message: environment.launchFailure ?? environment.settingsFailure ?? "",
                 symbol: "exclamationmark.triangle"
             )
-        } else if selection == PanelRegistry.overview.id {
-            OverviewView(model: environment.overview, environment: environment)
-        } else if let panel = PanelRegistry.panel(with: selection ?? "") {
-            PanelPlaceholderView(panel: panel)
         } else {
-            PanelPlaceholderView(panel: PanelRegistry.overview)
+            switch selection {
+            case PanelRegistry.overview.id:
+                OverviewView(model: environment.overview, environment: environment)
+            case PanelRegistry.policies.id:
+                PoliciesView(model: environment.policies)
+            case PanelRegistry.subscriptions.id:
+                SubscriptionsView(model: environment.subscriptions)
+            case PanelRegistry.rules.id:
+                RulesView(model: environment.rules)
+            case PanelRegistry.connections.id:
+                ConnectionsView(model: environment.connections)
+            case PanelRegistry.logs.id:
+                LogsView(model: environment.logs)
+            default:
+                PanelPlaceholderView(panel: PanelRegistry.overview)
+            }
         }
     }
 }

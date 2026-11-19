@@ -24,6 +24,10 @@ const (
 	ActionPolicySelect = "policy.select"
 	// ActionConfigReload re-reads the configuration file.
 	ActionConfigReload = "config.reload"
+	// ActionConfigUpdate writes local settings to the configuration file.
+	ActionConfigUpdate = "config.update"
+	// ActionSubscriptionRefresh forces one subscription to fetch now.
+	ActionSubscriptionRefresh = "subscription.refresh"
 )
 
 // The outcomes an audit entry can carry.

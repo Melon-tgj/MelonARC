@@ -30,11 +30,20 @@ final class AppEnvironment: ObservableObject {
     let apiClient: APIClient?
     let supervisor: CoreSupervisor?
     let overview: OverviewModel
+    let policies: PoliciesModel
+    let subscriptions: SubscriptionsModel
+    let rules: RulesModel
+    let connections: ConnectionsModel
+    let logs: LogsModel
 
     /// The supervisor's state, mirrored for the interface.
     @Published private(set) var snapshot = CoreSnapshot()
     /// A line about the first-run configuration, when something was said about it.
     @Published private(set) var bootstrapNotice: String?
+    /// A launch-time refusal, such as a data-directory change. The core is not
+    /// started in that case, and the window says so instead of showing stale
+    /// state from a directory this launch is not allowed to use.
+    @Published private(set) var launchFailure: String?
 
     private var heldLock: SingleInstanceLock?
     private var windowOpener: ((String) -> Void)?
@@ -57,12 +66,22 @@ final class AppEnvironment: ObservableObject {
             apiClient = nil
             supervisor = nil
             overview = OverviewModel(client: nil)
+            policies = PoliciesModel(client: nil)
+            subscriptions = SubscriptionsModel(client: nil)
+            rules = RulesModel(client: nil)
+            connections = ConnectionsModel(client: nil)
+            logs = LogsModel(client: nil)
             return
         }
 
         let client = APIClient(address: loaded.apiAddress, tokenURL: loaded.tokenPath)
         apiClient = client
         overview = OverviewModel(client: client)
+        policies = PoliciesModel(client: client)
+        subscriptions = SubscriptionsModel(client: client)
+        rules = RulesModel(client: client)
+        connections = ConnectionsModel(client: client)
+        logs = LogsModel(client: client)
         supervisor = CoreSupervisor(settings: loaded)
 
         switch SingleInstanceLock.acquire(at: loaded.lockPath) {
@@ -87,12 +106,25 @@ final class AppEnvironment: ObservableObject {
         guard let settings, let supervisor else { return }
 
         do {
+            try settings.confirmDataDirectory()
+        } catch {
+            launchFailure = error.localizedDescription
+            return
+        }
+
+        do {
             let wrote = try FirstRunConfig.ensure(at: settings.configurationPath)
             if wrote {
-                bootstrapNotice = "a first configuration was written to \(settings.configurationPath.path)"
+                bootstrapNotice = Localization.format(
+                    "startup.first_config_written",
+                    settings.configurationPath.path
+                )
             }
         } catch {
-            bootstrapNotice = "the first configuration could not be written: \(error.localizedDescription)"
+            bootstrapNotice = Localization.format(
+                "startup.first_config_failed",
+                error.localizedDescription
+            )
         }
 
         supervisor.onChange = { [weak self] snapshot in
@@ -113,7 +145,7 @@ final class AppEnvironment: ObservableObject {
             return
         }
         terminating = true
-        overview.stop()
+        stopAllPanels()
         guard let supervisor else {
             heldLock?.release()
             heldLock = nil
@@ -146,6 +178,55 @@ final class AppEnvironment: ObservableObject {
 
     func restartCore() {
         supervisor?.restart()
+    }
+
+    // MARK: - Panels
+
+    /// Starts exactly the page being shown. The sidebar is generated from the
+    /// registry, so this switch is about panel *behaviour*, not its count: an
+    /// unregistered page simply refreshes nothing.
+    func startPanel(_ id: String?) {
+        switch id {
+        case PanelRegistry.overview.id: overview.start()
+        case PanelRegistry.policies.id: policies.start()
+        case PanelRegistry.subscriptions.id: subscriptions.start()
+        case PanelRegistry.rules.id: rules.start()
+        case PanelRegistry.connections.id: connections.start()
+        case PanelRegistry.logs.id: logs.start()
+        default: break
+        }
+    }
+
+    func stopAllPanels() {
+        overview.stop()
+        policies.stop()
+        subscriptions.stop()
+        rules.stop()
+        connections.stop()
+        logs.stop()
+    }
+
+    /// Writes the proxy setting, reloads, and then restarts only if the daemon
+    /// says the change cannot take effect in this process. The boolean the
+    /// interface keeps comes from a fresh configuration read, not from the
+    /// request that was sent.
+    @discardableResult
+    func setSystemProxy(_ enabled: Bool) async throws -> ConfigurationView {
+        guard let apiClient else {
+            throw APIError.unreachable("the API client is not available")
+        }
+        _ = try await apiClient.updateConfiguration(
+            ConfigUpdateRequest(logLevel: nil, systemProxy: enabled)
+        )
+        let reload = try await apiClient.reloadConfiguration()
+        if reload.pendingRestart.contains("system-proxy") {
+            restartCore()
+        }
+        let current = try await apiClient.configuration()
+        await MainActor.run {
+            overview.refresh()
+        }
+        return current
     }
 
     // MARK: - Presentation

@@ -274,6 +274,77 @@ func TestRefreshDueReportsAChange(t *testing.T) {
 	}
 }
 
+// TestRefreshNowForcesAChange proves a manual refresh ignores the schedule and
+// reports whether the daemon has to rebuild against a new node list.
+func TestRefreshNowForcesAChange(t *testing.T) {
+	second := "ss://" + "YWVzLTEyOC1nY206b3RoZXI" + "@other.example.com:8388#Other"
+	body := testLink
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		fmt.Fprintln(w, body)
+	}))
+	defer server.Close()
+
+	now := time.Unix(1700000000, 0)
+	mgr := New(Options{Now: func() time.Time { return now }})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests after import = %d, want 1", requests)
+	}
+
+	body = second
+	status, changed, err := mgr.RefreshNow(context.Background(), "airport")
+	if err != nil {
+		t.Fatalf("refresh now: %v", err)
+	}
+	if !changed {
+		t.Fatal("a forced refresh of a changed list reported no change")
+	}
+	if requests != 2 {
+		t.Fatalf("requests after manual refresh = %d, want 2", requests)
+	}
+	if status.Name != "airport" || status.Nodes != 1 || status.Error != "" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestRefreshNowRejectsAnUnknownName(t *testing.T) {
+	mgr := New(Options{})
+	if _, _, err := mgr.RefreshNow(context.Background(), "ghost"); !errors.Is(err, ErrUnknownSubscription) {
+		t.Fatalf("error = %v, want ErrUnknownSubscription", err)
+	}
+}
+
+// TestRefreshNowReportsAKeptFailure is the manual counterpart of the scheduled
+// case: the endpoint can return no transport error and still carry an Error
+// describing why the old nodes remain in force.
+func TestRefreshNowReportsAKeptFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, testLink)
+	}))
+	defer server.Close()
+
+	mgr := New(Options{})
+	if err := mgr.Import(context.Background(), testConfig(t, server.URL)); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	server.Close()
+	status, changed, err := mgr.RefreshNow(context.Background(), "airport")
+	if err != nil {
+		t.Fatalf("refresh now: %v", err)
+	}
+	if changed {
+		t.Fatal("a kept failure reported a node change")
+	}
+	if status.Nodes != 1 || status.Error == "" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
 func TestRetryDelayBacksOffAndStopsAtTheInterval(t *testing.T) {
 	cases := []struct {
 		attempts int

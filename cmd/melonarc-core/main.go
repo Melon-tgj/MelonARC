@@ -247,6 +247,10 @@ func run(args []string) error {
 		startedAt: time.Now(),
 		baseline:  &baseline,
 		history:   history,
+		// The desktop proxy controller the startup path used is handed to the
+		// API as well, so the four-state report reflects what this process
+		// actually took over and whether a recovery was left incomplete.
+		proxyStatus: proxy,
 		// The API reports the subscription state the daemon is running with,
 		// including the skip detail of each last refresh. It is the same
 		// manager the loader and the refresh loop use, so the detail a client

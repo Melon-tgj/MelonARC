@@ -212,11 +212,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/inbound", s.only(http.MethodGet, s.handleInbound))
 	mux.HandleFunc("/v1/failures", s.only(http.MethodGet, s.handleFailures))
 	mux.HandleFunc("/v1/dns", s.only(http.MethodGet, s.handleDNS))
-	// Subscriptions are read-only here: the daemon owns the refresh schedule,
-	// and the endpoints report what it kept rather than triggering a fetch. The
-	// summary stays a summary; the skip detail is a page of its own.
+	// The subscription summary and skip detail are read-only: the daemon owns
+	// the refresh schedule. The one write endpoint forces a named subscription
+	// to fetch now; it keeps the previous nodes if the fetch fails.
 	mux.HandleFunc("/v1/subscriptions", s.only(http.MethodGet, s.handleSubscriptions))
 	mux.HandleFunc("/v1/subscriptions/{name}/skipped", s.only(http.MethodGet, s.handleSubscriptionSkipped))
+	mux.HandleFunc("/v1/subscriptions/{name}/refresh", s.only(http.MethodPost, s.handleSubscriptionRefresh))
 	mux.HandleFunc("/v1/audit", s.only(http.MethodGet, s.handleAudit))
 	// The history endpoints read what the observation layer kept. They are
 	// read-only like the ones above: a record is written by the daemon as it
@@ -229,6 +230,7 @@ func (s *Server) routes() http.Handler {
 	// shape. They are the only two places that change a running daemon.
 	mux.HandleFunc("/v1/policies/select", s.only(http.MethodPost, s.handleSelect))
 	mux.HandleFunc("/v1/config/reload", s.only(http.MethodPost, s.handleReload))
+	mux.HandleFunc("/v1/config/update", s.only(http.MethodPost, s.handleConfigUpdate))
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.withAuth(mux)
 }

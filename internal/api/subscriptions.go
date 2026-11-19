@@ -56,6 +56,33 @@ func (s *Server) handleSubscriptionSkipped(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, view)
 }
 
+// handleSubscriptionRefresh forces one declared subscription to fetch now.
+// The name is a path segment like the skipped-detail endpoint, so a name with
+// a slash arrives percent-encoded and is decoded by the mux before it gets
+// here. The response always describes what is in force after the attempt: a
+// failed fetch keeps the previous nodes and reports them with an Error.
+func (s *Server) handleSubscriptionRefresh(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		writeError(w, http.StatusNotFound, "unknown_subscription", "no subscription is named here")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), reloadTimeout)
+	defer cancel()
+	view, err := s.provider.RefreshSubscription(ctx, name)
+	if err != nil {
+		s.record(r, ActionSubscriptionRefresh, ResultFailed, name+": "+err.Error())
+		writeProviderError(w, err)
+		return
+	}
+	detail := fmt.Sprintf("%s: refreshed=%t reloaded=%t nodes=%d", name, view.Refreshed, view.Reloaded, view.Nodes)
+	if view.Error != "" {
+		detail += ": " + view.Error
+	}
+	s.record(r, ActionSubscriptionRefresh, ResultOK, detail)
+	writeJSON(w, http.StatusOK, view)
+}
+
 // parseSkippedPage reads the two parameters of a skip-detail page.
 //
 // They are separate from the single limit of the other read endpoints because a

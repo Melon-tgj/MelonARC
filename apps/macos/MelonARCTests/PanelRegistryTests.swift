@@ -30,9 +30,10 @@ final class PanelRegistryTests: XCTestCase {
         XCTAssertFalse(PanelRegistry.navigation().contains { $0.id == "settings" })
     }
 
-    func testThisMilestoneFillsTheOverviewOnly() {
-        let ready = PanelRegistry.all.filter { $0.availability == .ready }.map(\.id)
-        XCTAssertEqual(ready, ["overview"])
+    func testEveryRegisteredPanelIsImplemented() {
+        let pending = PanelRegistry.all.filter { $0.availability != .ready }.map(\.id)
+        XCTAssertEqual(pending, [])
+        XCTAssertEqual(PanelRegistry.all.count, 7)
     }
 
     func testAnUnknownIdentifierResolvesToNothing() {

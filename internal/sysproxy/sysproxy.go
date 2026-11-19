@@ -108,6 +108,12 @@ type Controller struct {
 	// only restores a setting it is responsible for. A setting the user turned
 	// on by hand is not ours to remove.
 	applied bool
+	// recoveryFailed and recoveryDetail remember a takeover record this process
+	// could not fully put back. They are written before the API starts serving
+	// and are exposed through Status; a retained record must never be reported
+	// as a clean machine.
+	recoveryFailed bool
+	recoveryDetail string
 }
 
 // New returns the controller of this machine's desktop setting. snapshotPath is
@@ -157,6 +163,7 @@ func (c *Controller) Enable(ctx context.Context, s Settings) error {
 			// does reach Release still gets a chance to put the machine back.
 			c.snapshot = snap
 			c.applied = true
+			c.noteRecovery("a takeover was only partly written and could not be undone; the record is kept for the next start")
 			c.logger.Error("the system proxy is only partly set and the partial write could not be undone; the takeover record is kept",
 				"backend", c.backend.Name(), "error", err)
 			return fmt.Errorf("the system proxy could not be set (%s), and what was written before the failure could not all be put back; the takeover record is kept so the next start can restore it: %w",
@@ -194,6 +201,7 @@ func (c *Controller) Disable(ctx context.Context) error {
 func (c *Controller) Recover(ctx context.Context) error {
 	found, err := recoverSnapshot(ctx, c.path, c.backend)
 	if err != nil {
+		c.noteRecovery("a takeover record from an earlier run could not be restored; it is kept on disk")
 		return fmt.Errorf("the previous system proxy takeover could not be restored: %w", err)
 	}
 	if found {

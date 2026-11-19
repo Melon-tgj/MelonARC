@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -131,6 +132,50 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.record(r, ActionConfigReload, ResultOK, reloadDetail(view))
+	writeJSON(w, http.StatusOK, view)
+}
+
+// handleConfigUpdate writes the settings the local shell owns. It deliberately
+// does not reload: the caller reloads as a second step so the state it shows is
+// the state the daemon actually reached, not the state a file was asked to hold.
+func (s *Server) handleConfigUpdate(w http.ResponseWriter, r *http.Request) {
+	var req ConfigUpdateRequest
+	if err := decodeBody(r, &req); err != nil {
+		s.record(r, ActionConfigUpdate, ResultFailed, "malformed request: "+err.Error())
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	defer drainBody(r)
+	if req.LogLevel == nil && req.SystemProxy == nil {
+		s.record(r, ActionConfigUpdate, ResultFailed, "no settings were named")
+		writeError(w, http.StatusBadRequest, "bad_request", "at least one setting is required")
+		return
+	}
+	if req.LogLevel != nil {
+		switch strings.ToLower(strings.TrimSpace(*req.LogLevel)) {
+		case "debug", "info", "warn", "error":
+		default:
+			s.record(r, ActionConfigUpdate, ResultFailed, "invalid log level")
+			writeError(w, http.StatusBadRequest, "bad_request", "log_level must be debug, info, warn or error")
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), reloadTimeout)
+	defer cancel()
+	view, err := s.provider.UpdateConfig(ctx, req)
+	if err != nil {
+		s.record(r, ActionConfigUpdate, ResultFailed, err.Error())
+		writeProviderError(w, err)
+		return
+	}
+	detail := "path " + view.Path
+	if req.LogLevel != nil {
+		detail += ", log-level " + view.LogLevel
+	}
+	if req.SystemProxy != nil {
+		detail += ", system-proxy " + strconv.FormatBool(view.SystemProxy)
+	}
+	s.record(r, ActionConfigUpdate, ResultOK, detail)
 	writeJSON(w, http.StatusOK, view)
 }
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -175,5 +176,110 @@ func TestSubscriptionEndpointsRejectOtherMethods(t *testing.T) {
 	// second, unauthenticated door to the configuration.
 	if rec := request(t, s, http.MethodGet, "/v1/subscriptions", ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("a request without a token gave %d, want 401", rec.Code)
+	}
+}
+
+// TestSubscriptionRefreshEndpoint checks that a POST forces one named refresh,
+// returns the facts a client draws, and is recorded as a write.
+func TestSubscriptionRefreshEndpoint(t *testing.T) {
+	p := &fakeProvider{refresh: SubscriptionRefreshView{
+		Refreshed: true, Reloaded: true, Nodes: 12, Skipped: 3,
+		FetchedAt: "2026-11-18T08:00:00Z", Attempts: 0,
+	}}
+	s := newTestServer(t, p)
+	rec := post(t, s, "/v1/subscriptions/airport/refresh", "test-token", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	body := decode[SubscriptionRefreshView](t, rec)
+	if body.Subscription != "airport" || !body.Refreshed || !body.Reloaded {
+		t.Fatalf("view = %+v", body)
+	}
+	if body.Nodes != 12 || body.Skipped != 3 || body.FetchedAt != "2026-11-18T08:00:00Z" {
+		t.Fatalf("facts = %+v", body)
+	}
+	if p.lastSkipped.name != "airport" {
+		t.Errorf("the provider was asked about %q, want airport", p.lastSkipped.name)
+	}
+	entries := auditOf(t, s)
+	if len(entries) != 1 || entries[0].Action != ActionSubscriptionRefresh || entries[0].Result != ResultOK {
+		t.Fatalf("audit = %+v", entries)
+	}
+	raw := rec.Body.String()
+	for _, want := range []string{
+		`"subscription":"airport"`, `"refreshed":true`, `"reloaded":true`, `"nodes":12`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("response has no %s: %s", want, raw)
+		}
+	}
+}
+
+// TestSubscriptionRefreshFailureStaysInTheView keeps a failed fetch out of the
+// error channel: the previous nodes were kept, so the request succeeded and the
+// reason is carried in the answer the interface can show.
+func TestSubscriptionRefreshFailureStaysInTheView(t *testing.T) {
+	p := &fakeProvider{refresh: SubscriptionRefreshView{
+		Nodes: 12, Attempts: 2, Error: "the server answered 502 Bad Gateway",
+	}}
+	s := newTestServer(t, p)
+	rec := post(t, s, "/v1/subscriptions/airport/refresh", "test-token", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	body := decode[SubscriptionRefreshView](t, rec)
+	if body.Refreshed || body.Reloaded || body.Error == "" || body.Nodes != 12 {
+		t.Fatalf("view = %+v", body)
+	}
+	entries := auditOf(t, s)
+	if len(entries) != 1 || entries[0].Result != ResultOK {
+		t.Fatalf("a kept-nodes failure must still be a recorded OK: %+v", entries)
+	}
+}
+
+// TestSubscriptionRefreshReportsProviderErrors keeps the error shape of the
+// other write endpoints: a name the daemon does not know is a JSON 404.
+func TestSubscriptionRefreshReportsProviderErrors(t *testing.T) {
+	p := &fakeProvider{refreshErr: NotFound("unknown_subscription", "no subscription is named here")}
+	s := newTestServer(t, p)
+	rec := post(t, s, "/v1/subscriptions/ghost/refresh", "test-token", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d (%s)", rec.Code, rec.Body.String())
+	}
+	body := decode[struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}](t, rec)
+	if body.Error.Code != "unknown_subscription" {
+		t.Fatalf("code = %q", body.Error.Code)
+	}
+	entries := auditOf(t, s)
+	if len(entries) != 1 || entries[0].Result != ResultFailed {
+		t.Fatalf("audit = %+v", entries)
+	}
+}
+
+// TestSubscriptionRefreshRejectsAnEmptyName keeps a blank name out of the
+// provider. The mux folds a double slash into a redirect before the handler,
+// so the handler's own guard is exercised directly here.
+func TestSubscriptionRefreshRejectsAnEmptyName(t *testing.T) {
+	p := &fakeProvider{}
+	s := newTestServer(t, p)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/subscriptions/x/refresh", nil)
+	req.SetPathValue("name", "  ")
+	s.handleSubscriptionRefresh(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if p.lastSkipped.name != "" {
+		t.Errorf("an empty name reached the provider: %q", p.lastSkipped.name)
+	}
+	// The redirect for a literal empty segment must not reach the provider
+	// either.
+	rec = post(t, s, "/v1/subscriptions//refresh", "test-token", "")
+	if p.lastSkipped.name != "" {
+		t.Errorf("a folded empty segment reached the provider: %q", p.lastSkipped.name)
 	}
 }

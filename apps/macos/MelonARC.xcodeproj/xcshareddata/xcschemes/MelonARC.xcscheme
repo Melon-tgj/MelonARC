@@ -34,6 +34,20 @@
                ReferencedContainer = "container:MelonARC.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1A0000000000000000000012"
+               BuildableName = "MelonARCUITests.xctest"
+               BlueprintName = "MelonARCUITests"
+               ReferencedContainer = "container:MelonARC.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -50,6 +64,16 @@
                BlueprintIdentifier = "1A0000000000000000000011"
                BuildableName = "MelonARCTests.xctest"
                BlueprintName = "MelonARCTests"
+               ReferencedContainer = "container:MelonARC.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1A0000000000000000000012"
+               BuildableName = "MelonARCUITests.xctest"
+               BlueprintName = "MelonARCUITests"
                ReferencedContainer = "container:MelonARC.xcodeproj">
             </BuildableReference>
          </TestableReference>

@@ -67,11 +67,56 @@ type ConfigView struct {
 	// user has to be able to check from a client.
 	SystemProxy       bool     `json:"system_proxy"`
 	SystemProxyBypass []string `json:"system_proxy_bypass,omitempty"`
+	// SystemProxyState is the four-state takeover report: configured,
+	// pending_restart, applied and recovery_failed, collapsed into one display
+	// state plus the facts behind it. The booleans above remain for clients that
+	// only need the configured value.
+	SystemProxyState SystemProxyView `json:"system_proxy_state"`
 	// PendingRestart lists the settings whose value in the loaded
 	// configuration is not in force because applying it needs a restart. It
 	// is empty when the running process and the file agree, and it stays
 	// until a restart, however many reloads happened in between.
 	PendingRestart []string `json:"pending_restart"`
+}
+
+// SystemProxyState is the display state of the desktop proxy takeover. The
+// strings are stable wire values; a client switches on them rather than on the
+// raw booleans so that precedence between the facts is decided in one place.
+const (
+	// SystemProxyOff: nothing configured and nothing taken over.
+	SystemProxyOff = "off"
+	// SystemProxyConfigured: the configuration asks for a takeover, but the
+	// running process has not made one.
+	SystemProxyConfigured = "configured"
+	// SystemProxyPendingRestart: the configuration changed the desktop proxy
+	// setting and the change cannot take effect without a restart.
+	SystemProxyPendingRestart = "pending_restart"
+	// SystemProxyApplied: this process currently owns the takeover.
+	SystemProxyApplied = "applied"
+	// SystemProxyRecoveryFailed: a takeover record could not be fully put back
+	// and was retained for the next start. It wins over every other state.
+	SystemProxyRecoveryFailed = "recovery_failed"
+)
+
+// SystemProxyView is the four-state outlet the desktop shell needs. The raw
+// facts are carried beside the single display state so a client can explain
+// *why* it is showing a state without reading the configuration file itself.
+// It is always present in ConfigView (never a pointer), so an older core that
+// does not send it decodes to SystemProxyOff with every fact false.
+type SystemProxyView struct {
+	// State is one of the SystemProxy* constants, chosen by
+	// systemProxyState in the core so precedence is decided there.
+	State string `json:"state"`
+	// Configured mirrors [General] system-proxy in the loaded configuration.
+	Configured bool `json:"configured"`
+	// PendingRestart is true when "system-proxy" is in pending_restart.
+	PendingRestart bool `json:"pending_restart"`
+	// Applied is true when this process owns the current takeover.
+	Applied bool `json:"applied"`
+	// RecoveryFailed is true when a takeover record could not be fully put
+	// back and was retained; Detail then carries the short reason.
+	RecoveryFailed bool   `json:"recovery_failed"`
+	Detail         string `json:"detail,omitempty"`
 }
 
 // ProxyView is one outbound as exposed by the API.
@@ -479,6 +524,28 @@ type SkippedEntryView struct {
 	Reason string `json:"reason"`
 }
 
+// SubscriptionRefreshView is the outcome of a forced subscription refresh.
+// A refresh that could not fetch still answers with a view: the previous nodes
+// were kept, and Error carries the reason — the same policy as a scheduled
+// refresh. Reloaded says whether the node list changed enough to rebuild the
+// routing artefacts.
+type SubscriptionRefreshView struct {
+	Subscription string `json:"subscription"`
+	// Refreshed is true when the fetch and parse completed. A failed attempt
+	// that kept the previous nodes reports false with Error set.
+	Refreshed bool `json:"refreshed"`
+	// Reloaded is true when the new nodes were installed by a reload. It is
+	// false both when nothing changed and when the refresh failed.
+	Reloaded bool `json:"reloaded"`
+	Nodes    int  `json:"nodes"`
+	Skipped  int  `json:"skipped"`
+	// FetchedAt is when the refresh that produced these nodes finished, absent
+	// when the last refresh never completed.
+	FetchedAt string `json:"fetched_at,omitempty"`
+	Attempts  int    `json:"attempts"`
+	Error     string `json:"error,omitempty"`
+}
+
 // Provider supplies the daemon state the API serves. Every method must be safe
 // for concurrent use. The read methods never mutate anything; the two write
 // methods are the operations the local API accepts, and each of them either
@@ -511,6 +578,11 @@ type Provider interface {
 	// a refresh answers an empty page with Refreshed false, which is not an
 	// error.
 	SubscriptionSkipped(ctx context.Context, name string, offset, limit int) (SkippedListView, error)
+	// RefreshSubscription forces one declared subscription to refresh now,
+	// rebuilding the routing artefacts if its nodes changed. A name the
+	// configuration does not declare is reported as NotFound. A failed fetch
+	// keeps the previous nodes and is reported in the view, not as an error.
+	RefreshSubscription(ctx context.Context, name string) (SubscriptionRefreshView, error)
 	// History describes the observation history: how much it holds and
 	// whether its last write succeeded.
 	History(ctx context.Context) HistoryView
@@ -532,4 +604,26 @@ type Provider interface {
 	// configuration that does not validate is reported as Unprocessable and
 	// leaves the running one in force.
 	ReloadConfig(ctx context.Context) (ReloadView, error)
+	// UpdateConfig writes the settings the local shell owns to the
+	// configuration file. It does not reload: the caller then uses ReloadConfig
+	// and reports the state the daemon actually reached. A malformed patch is a
+	// BadRequest; a file that would no longer validate is Unprocessable and
+	// leaves the old file in place.
+	UpdateConfig(ctx context.Context, req ConfigUpdateRequest) (ConfigUpdateView, error)
+}
+
+// ConfigUpdateRequest is the body of POST /v1/config/update. Pointers keep an
+// omitted field distinct from an explicit false, which matters for the desktop
+// proxy switch.
+type ConfigUpdateRequest struct {
+	LogLevel    *string `json:"log_level,omitempty"`
+	SystemProxy *bool   `json:"system_proxy,omitempty"`
+}
+
+// ConfigUpdateView reports what was written and what still needs a restart.
+type ConfigUpdateView struct {
+	Path            string   `json:"path,omitempty"`
+	LogLevel        string   `json:"log_level,omitempty"`
+	SystemProxy     bool     `json:"system_proxy"`
+	RestartRequired []string `json:"restart_required"`
 }

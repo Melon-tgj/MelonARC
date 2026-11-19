@@ -1,19 +1,27 @@
+import Combine
 import SwiftUI
 
 /// The settings window.
 ///
-/// This milestone only has to prove that the paths are the ones the core uses, so
-/// the window reports them and nothing else. The switches — system proxy, log level,
-/// data directory — belong to the next milestone, and each of them will need the same
-/// pair of rules the previous shell had: a change that only the next core can apply
-/// is saved and then applied by a controlled restart, and a change the running API
-/// client is bound to asks for a new shell.
+/// The data directory is shown but deliberately not editable: M4 fixed the
+/// policy at "refuse a change" because the proxy snapshot, history, token and
+/// subscription cache would otherwise be split across two directories. The
+/// proxy switch is the setting that can be applied while the app is running:
+/// save, reload, restart only when the core says a restart is needed, then read
+/// the state back from the core.
 struct SettingsView: View {
     @ObservedObject var environment: AppEnvironment
+    @State private var proxyEnabled = false
+    @State private var proxyState = SystemProxyStateView(state: .off)
+    @State private var notice: String?
+    @State private var failure: APIError?
+    @State private var busy = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                proxyGroup
+                capabilitiesGroup
                 if let settings = environment.settings {
                     pathsGroup(settings)
                     if let notice = settings.notice {
@@ -25,7 +33,7 @@ struct SettingsView: View {
                 } else {
                     UnavailableView(
                         titleKey: "startup.failed.title",
-                        message: environment.settingsFailure ?? "",
+                        message: environment.launchFailure ?? environment.settingsFailure ?? "",
                         symbol: "exclamationmark.triangle"
                     )
                 }
@@ -37,13 +45,95 @@ struct SettingsView: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: 580, height: 400)
+        .frame(width: 580, height: 480)
+        .onAppear {
+            adopt(environment.overview.configuration)
+        }
+        .onReceive(environment.overview.$configuration) { configuration in
+            if !busy { adopt(configuration) }
+        }
+    }
+
+    private var proxyGroup: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle(Localization.text("settings.system_proxy.enabled"), isOn: $proxyEnabled)
+                    .disabled(busy || environment.apiClient == nil)
+                InfoRow(
+                    titleKey: "settings.system_proxy.state",
+                    value: Localization.text(proxyState.state.localizationKey),
+                    labelWidth: 132
+                )
+                if !proxyState.detail.isEmpty {
+                    Text(Localization.format("settings.system_proxy.detail", proxyState.detail))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
+                Button(action: saveProxy) {
+                    if busy {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text("settings.action.save")
+                    }
+                }
+                .disabled(busy || environment.apiClient == nil)
+                if let notice {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let failure {
+                    Text(Localization.format("settings.error", Localization.text("error.\(failure.code)")))
+                        .foregroundStyle(.red)
+                    Text(failure.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+        } label: {
+            Label {
+                Text("settings.section.system_proxy")
+            } icon: {
+                Image(systemName: "network")
+            }
+        }
+    }
+
+    private var capabilitiesGroup: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 7) {
+                InfoRow(
+                    titleKey: "overview.field.tun",
+                    value: Localization.text("common.not_implemented"),
+                    labelWidth: 132
+                )
+                Text("settings.tun.note")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+        } label: {
+            Label {
+                Text("settings.section.capabilities")
+            } icon: {
+                Image(systemName: "info.circle")
+            }
+        }
     }
 
     private func pathsGroup(_ settings: ShellSettings) -> some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 7) {
                 InfoRow(titleKey: "settings.field.data_dir", value: settings.dataDirectory.path, labelWidth: 120)
+                Text("settings.data_dir.note")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 InfoRow(titleKey: "settings.field.config", value: settings.configurationPath.path, labelWidth: 120)
                 InfoRow(titleKey: "settings.field.token", value: settings.tokenPath.path, labelWidth: 120)
                 InfoRow(titleKey: "settings.field.log", value: settings.logPath.path, labelWidth: 120)
@@ -59,6 +149,39 @@ struct SettingsView: View {
                 Text("settings.section.paths")
             } icon: {
                 Image(systemName: "folder")
+            }
+        }
+    }
+
+    private func adopt(_ configuration: ConfigurationView?) {
+        guard let configuration else { return }
+        proxyEnabled = configuration.systemProxy
+        proxyState = configuration.systemProxyState
+    }
+
+    private func saveProxy() {
+        busy = true
+        notice = nil
+        failure = nil
+        Task {
+            do {
+                let configuration = try await environment.setSystemProxy(proxyEnabled)
+                await MainActor.run {
+                    proxyEnabled = configuration.systemProxy
+                    proxyState = configuration.systemProxyState
+                    notice = Localization.text("settings.saved")
+                    busy = false
+                }
+            } catch let error as APIError {
+                await MainActor.run {
+                    failure = error
+                    busy = false
+                }
+            } catch {
+                await MainActor.run {
+                    failure = .unreachable(error.localizedDescription)
+                    busy = false
+                }
             }
         }
     }

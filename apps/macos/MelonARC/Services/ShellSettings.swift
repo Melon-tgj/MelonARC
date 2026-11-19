@@ -129,6 +129,34 @@ struct ShellSettings {
         )
     }
 
+    /// Pins the effective data directory for this installation.
+    ///
+    /// Changing it is refused rather than migrated: the token, configuration,
+    /// history, subscription cache and proxy snapshot all live there, and a
+    /// partial move would look like a clean install with a stranded takeover
+    /// record. The marker lives beside `shell.json`, not inside the directory it
+    /// names, so it is still there when a later launch asks for a different one.
+    func confirmDataDirectory(fileManager: FileManager = .default) throws {
+        let marker = settingsPath
+            .deletingLastPathComponent()
+            .appendingPathComponent(ShellPaths.dataDirectoryMarkerFileName)
+        let requested = dataDirectory.standardizedFileURL.path
+        if let data = fileManager.contents(atPath: marker.path),
+           let recorded = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !recorded.isEmpty {
+            if recorded != requested {
+                throw ShellError.dataDirectoryChanged(recorded, requested)
+            }
+            return
+        }
+        try fileManager.createDirectory(
+            at: marker.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        try Data((requested + "\n").utf8).write(to: marker, options: .atomic)
+    }
+
     /// Where a core binary is looked for, in this order: next to the shell, the
     /// explicit `core_path`, then each `PATH` entry. The order is part of the
     /// contract — the packaged core sits next to the shell inside `Contents/MacOS`
