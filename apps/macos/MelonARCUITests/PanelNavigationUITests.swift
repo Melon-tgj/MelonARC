@@ -48,8 +48,14 @@ final class PanelNavigationUITests: XCTestCase {
                 return
             }
             item.click()
-            let root = app.otherElements["panel.\(panel).root"]
-            XCTAssertTrue(root.waitForExistence(timeout: 10), "no root view for \(panel)")
+            let root = app.descendants(matching: .any)
+                .matching(identifier: "panel.\(panel).root")
+                .firstMatch
+            guard root.waitForExistence(timeout: 10) else {
+                print(app.debugDescription)
+                XCTFail("no root view for \(panel)")
+                return
+            }
         }
     }
 }

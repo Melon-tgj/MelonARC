@@ -6711,3 +6711,82 @@ CI #23 已证明 M4.3 的 `app.cells["panel.\(panel)"]` 仍未找到侧栏项；
    `Test the app and the real sidecar` 全绿，四个真核心用例继续执行且未跳过。
 2. 若 root 断言成为新的失败点，只按该步日志处理，不回退本阶段的侧栏查询修复。
 3. macOS job 转绿后按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 VM 验收。
+
+---
+
+## 阶段 M4.5 — XCUITest detail root 标识未暴露修复（2026-11-20）
+
+开工基线：`HEAD = 5d93ec9`（M4.4）。CI #24（提交 `1a53b88e`，2026-11-20 12:27 跑完）
+证实 M4.4 的侧栏修复生效（找到并点击了 OutlineRow，`no sidebar item for overview` 消失），
+UI 测试在 `PanelNavigationUITests.swift:52` 失败于新点：
+`XCTAssertTrue failed - no root view for overview`，exit 65。Sidecar 4 项与 52 项单元测试
+全过，Go / Frontend / Interop 全绿，候选 DMG 未产出。开工前重读了 `.m45-brief.md`、
+本文件 M4.4 节、`docs/development-doc-v1.md`、`RootView.swift` 与
+`PanelNavigationUITests.swift`。
+
+### 完成了什么
+
+- `apps/macos/MelonARC/UI/RootView.swift`：`detail:` 闭包里在
+  `.accessibilityIdentifier("panel.\(selection ?? "none").root")` 之前加一行
+  `.accessibilityElement(children: .contain)`。不改布局、文案与导航逻辑，面板仍由
+  `PanelRegistry` 与 `selection` 决定。
+- `apps/macos/MelonARCUITests/PanelNavigationUITests.swift`：detail root 查询从
+  `app.otherElements["panel.\(panel).root"]` 改为跨类型
+  `app.descendants(matching: .any).matching(identifier: "panel.\(panel).root").firstMatch`；
+  保留 10 秒超时，失败时先 `print(app.debugDescription)` 再以原文案
+  `no root view for \(panel)` 调 `XCTFail` 并返回，便于下次 CI 失败时直接看无障碍树。
+- M4.4 的 `sidebarItem(for:in:)` 未动；未改 Go、JS / 前端、`ci.yml`、SidecarTests、
+  其他测试与产品行为；未新增标识到六个面板内部，未加等待时间或占位视图。
+
+### 关键决策及理由
+
+- 根因已确诊：`RootView.swift` 的 root 标识挂在 `@ViewBuilder` 条件容器（`detail`，
+  if/switch 返回不同面板）上。`accessibilityIdentifier(_:)` 只是给视图加标识字符串，
+  本身不创建无障碍元素；容器自身不是无障碍元素时标识无处可挂，`app.otherElements[...]`
+  永远查不到。决定性证据：overview 是 `@State selection` 的初始值，应用启动即显示
+  overview，无需点击；10 秒等不到说明标识未暴露，不是慢或点击未生效。
+- 选 `.contain` 而不是 `.ignore` / `.combine`：苹果文档写明 `accessibilityElement(children:)`
+  会创建新的无障碍元素或改变已有元素的子元素行为；`.contain` 让子元素成为新元素的子元素，
+  容器成为可查询节点且内部按钮、文本照常可查，符合「保留面板内容可访问」的需求。
+  `.ignore` 会隐藏子元素，`.combine` 会把子元素合并，均不满足。
+- 测试侧同样不假设元素类型：跟 M4.4 侧栏查询保持同一模式，避免再次猜
+  `app.otherElements` 是否对应 SwiftUI 容器类型；失败路径打印整棵树，杜绝继续盲改。
+- 只动这三处，符合「最小改动、只修确诊问题」红线；未改 `ci.yml`，无需网页端重传。
+
+### 苹果官方文档依据
+
+- SwiftUI `View.accessibilityIdentifier(_:)` — 用指定字符串标识视图、供测试使用：
+  `https://developer.apple.com/documentation/swiftui/view/accessibilityidentifier(_:).md`
+- SwiftUI `View.accessibilityElement(children:)` — 创建无障碍元素或改变其子元素行为：
+  `https://developer.apple.com/documentation/swiftui/view/accessibilityelement(children:).md`
+- SwiftUI `AccessibilityChildBehavior.contain` — 子元素成为新无障碍元素的子元素，
+  作为无障碍容器分组；新元素在包含多个/零个无障碍元素，或单个无子元素时创建：
+  `https://developer.apple.com/documentation/swiftui/accessibilitychildbehavior/contain.md`
+
+### 构建与测试结果
+
+- 静态检查：`git diff --check` 通过；`check-project.py`（134 objects / 21 app sources /
+  20 test sources / 1 UI test source）通过；`check-strings.py`（109 keys / 2 languages，
+  三条既有 note 与本次无关）通过；`swiftc -parse`（Swift 6.4.2 Linux 工具链）对两个改动的
+  Swift 文件通过；红线 grep 在两个改动文件中零命中，`git status --short` 仅有两个目标文件
+  被跟踪修改，`.m45-brief.md` 仍是未跟踪简报，不纳入提交。
+- Go 与前端套件未重跑：本阶段只改一个 SwiftUI 文件与一个 UI 测试文件，未触碰 Go / JS；
+  基线仍按 M4.2/M4.3 记录（Go 1376 / 1355 / 21 / 0，前端离线 82 / 80 / 2 / 0、
+  实时 82 / 82 / 0 / 0）。
+- **未验证项**：`xcodebuild test`、XCUITest、六面板 root 断言、Release 构建、ad-hoc 签名、
+  DMG 与候选包校验，全部待推送后的 CI 确认。本机 Linux 无 SwiftUI / AppKit / Xcode，
+  `swiftc -parse` 只证明语法可解析，不声称 SwiftUI 编译通过或 UI 断言已转绿。
+
+### 遗留问题
+
+- 若 CI 再次失败，按新日志里的 `app.debugDescription` 无障碍树定位，不回退本阶段改动、
+  不猜测式追加标识。
+- M4 / M4.1 / M4.2 / M4.3 / M4.4 原有挂账不变：系统代理真实接管与恢复、强退恢复、
+  M5 干净 arm64 VM 验收，以及 Windows / Linux 主线的 A2 / B4 / C1 / C2 / C3。
+
+### 下一步计划
+
+1. 推送本地提交，重跑 macOS CI：确认 `testEveryBusinessPanelCanBeOpened` 转绿，
+   `Test the app and the real sidecar` 全绿，四个真核心用例继续执行且未跳过。
+2. 若仍失败，只用失败路径打印的无障碍树诊断单点问题。
+3. macOS job 转绿后按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 VM 验收。

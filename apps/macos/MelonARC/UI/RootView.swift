@@ -26,6 +26,7 @@ struct RootView: View {
             .navigationSplitViewColumnWidth(min: 176, ideal: 196, max: 260)
         } detail: {
             detail
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("panel.\(selection ?? "none").root")
         }
         .onAppear {
