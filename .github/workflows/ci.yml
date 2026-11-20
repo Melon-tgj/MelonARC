@@ -275,7 +275,7 @@ jobs:
     timeout-minutes: 90
     env:
       # One pin, recorded verbatim in toolchain.txt. Xcode 26.3 (17C529) ships
-      # the macOS 26.2 SDK and Swift 6.2.3; both macOS runner images list it.
+      # the macOS 26.2 SDK and Swift 6.2.4; both macOS runner images list it.
       # If the image moves, update this line instead of letting the build pick
       # a compiler without the glass symbols.
       XCODE_APP: /Applications/Xcode_26.3.app
@@ -311,7 +311,7 @@ jobs:
           grep -q 'Xcode 26.3' "$toolchain" || { echo "::error::expected Xcode 26.3"; exit 1; }
           grep -q 'Build version 17C529' "$toolchain" || { echo "::error::expected Xcode build 17C529"; exit 1; }
           grep -q '^sdk: 26\.2$' "$toolchain" || { echo "::error::expected macOS SDK 26.2"; exit 1; }
-          grep -q 'version 6\.2\.3' "$toolchain" || { echo "::error::expected Swift 6.2.3"; exit 1; }
+          grep -q 'version 6\.2\.4' "$toolchain" || { echo "::error::expected Swift 6.2.4"; exit 1; }
           grep -q '^uname -m: arm64$' "$toolchain" || { echo "::error::expected arm64 runner"; exit 1; }
 
       # These are the checks that can also run on Linux. They are repeated here
@@ -477,7 +477,7 @@ jobs:
           grep -q 'Xcode 26.3' "$toolchain" || { echo "::error::expected Xcode 26.3"; exit 1; }
           grep -q 'Build version 17C529' "$toolchain" || { echo "::error::expected Xcode build 17C529"; exit 1; }
           grep -q '^sdk: 26\.2$' "$toolchain" || { echo "::error::expected macOS SDK 26.2"; exit 1; }
-          grep -q 'version 6\.2\.3' "$toolchain" || { echo "::error::expected Swift 6.2.3"; exit 1; }
+          grep -q 'version 6\.2\.4' "$toolchain" || { echo "::error::expected Swift 6.2.4"; exit 1; }
           grep -q '^uname -m: arm64$' "$toolchain" || { echo "::error::expected arm64 runner"; exit 1; }
 
       - name: Check the project and string catalog
