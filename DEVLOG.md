@@ -6513,3 +6513,108 @@ SidecarTests.swift:201:65: error: cannot infer contextual base in reference to m
    未跳过。
 2. 转绿后再按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 虚拟机验收。
 3. 任何新失败按新日志定位；本机只做静态核对，不做盲改。
+
+---
+
+## 阶段 M4.3 — CI #21 UI 断言失败与真核心测试被跳过修复（2026-11-20）
+
+开工基线：`HEAD = 3e26b02`（M4.2），Go **1376 / 1355 / 21 / 0**，前端离线
+**82 / 80 / 2 / 0**，前端实时 **82 / 82 / 0 / 0**。CI 运行 #21（提交 `a9cf0508`）里
+#20 的 8 条 Swift 编译错误全部消失，MelonARC / MelonARCTests / MelonARCUITests 三个目标
+均编译通过，Go / 前端 / 互通三 job 全绿，52 项单元测试 0 失败；macOS job 仍在
+`Test the app and the real sidecar` 失败，候选 DMG 未产出。本机仍是 Linux 虚拟机：没有
+Swift / Xcode / macOS 桌面，不能本地编译或跑 UI 测试；改动只做静态核对，结论待推送后的
+CI 重跑确认。开工前重读了本文件的 M4 / M4.1 / M4.2 三节与阶段索引、
+`docs/development-doc-v1.md`、两个测试文件、`RootView.swift`、共享 scheme、`build-core.sh`
+与 CI 步骤上下文。
+
+### 完成了什么
+
+**一、CI #21 报错原文**
+
+```
+PanelNavigationUITests.swift:23: error: -[MelonARCUITests.PanelNavigationUITests testEveryBusinessPanelCanBeOpened] : XCTAssertTrue failed - no sidebar item for overview
+MELONARC_TEST_CORE is not set; the real-core tests were skipped
+```
+
+经过：应用 `org.melonarc.app` 正常启动，UI 测试在 10 秒内反复查找标识为 `panel.overview`
+的 Button（t = 2.84s 至 12.90s，多次检查均不存在），随后断言失败；Executed 1 test,
+with 1 failure。同时 4 项 SidecarTests 被跳过，本轮实际没有验证真实 sidecar。
+
+**二、两个问题的根因（按苹果官方文档核对）**
+
+1. **UI 断言**：`RootView.swift:22` 的 `.accessibilityIdentifier("panel.\(panel.id)")` 加在
+   `List(selection:)` 侧栏的行视图上；测试却用 `app.buttons[...]`（只匹配 button 控件）。
+   苹果 `XCUIElementQuery` 官方文档的 macOS 示例是
+   `list.outlines["Sidebar"].cells.containing(.button, identifier:"Untitled Book").count`：
+   侧栏是 outline，侧栏项是其中的 **cell**，而不是按钮。`XCUIElementTypeQueryProvider`
+   文档也分别定义 `cells`（cell 元素）与 `buttons`（button 控件）两套查询。标识符没有变化，
+   错的是查询的元素类型。
+2. **真核心用例被跳过**：CI 步骤 env 里的 `MELONARC_TEST_CORE` 只进入 `xcodebuild` 进程，
+   没有进入 XCTest 测试运行器进程；`SidecarTests.swift:14` 从
+   `ProcessInfo.processInfo.environment` 读到空值，于是 `XCTSkip`。苹果 Xcode 13 发行说明
+   明确：`xcodebuild` 只把调用环境中带 `TEST_RUNNER_` 前缀的变量传给测试运行器进程，并去掉
+   前缀；`Environment variable reference` 也写明该前缀是测试运行器按原名读到变量所必需的。
+   因此路径本身没错（`build-core.sh` 默认输出正是该路径），错的是送值机制。
+3. **防跳过检查被绕过**：同一 `run` 块用 `set -euo pipefail`，`xcodebuild` 失败时脚本立即退出，
+   后面的 `grep` 防跳过检查根本不执行。
+
+**三、修复内容（只动确诊处）**
+
+- `apps/macos/MelonARCUITests/PanelNavigationUITests.swift:22`：
+  `app.buttons["panel.\(panel)"]` → `app.cells["panel.\(panel)"]`。只改查询的元素类型；
+  标识符、等待、点击与 root view 断言全部不变，产品代码 `RootView.swift` 不动。
+- `.github/workflows/ci.yml:325` 的测试步骤 env 改名为
+  `TEST_RUNNER_MELONARC_TEST_CORE`（值仍是同一个 workspace 路径）；测试代码继续读
+  `MELONARC_TEST_CORE`，由 `xcodebuild` 去前缀后送入运行器。不改测试代码、不写死绝对路径、
+  不加 test plan / scheme 环境变量，也不动其余 CI 步骤。
+- 同一步 `run` 块：`status=0`；`xcodebuild ... | tee "$log" || status=$?` 先记下退出码；
+  `grep` 防跳过检查照常执行，命中跳过消息时把 `status` 置 1；最后 `exit "$status"`。
+  正常失败仍按原码退出（例如 65），跳过在任何情况下都会让步骤失败。
+
+### 关键决策及理由
+
+- 修测试查询而不是把侧栏行包成 Button：苹果文档确认侧栏行暴露为 cell，改一行测试即可；
+  改 `RootView.swift` 会碰产品代码与视图身份，且与「二选一、只动一处」的约束相悖。
+- 用 `app.cells[...]` 而不限定 `app.outlines["..."].cells[...]`：项目没有给 outline 容器设
+  标识符，`cells` 后代查询直接按已有行标识符匹配，改动最小；文档已确认 cell 这一元素类型。
+- 用 `TEST_RUNNER_` 前缀而不是新增 test plan：发行说明给出的就是 `xcodebuild` 的原生机制；
+  新增 test plan 要同时改 scheme 与工程文件清单，牵动无关检查，且不能按 CI 运行号动态传路径。
+- 保留 `SidecarTests.swift` 的跳过逻辑与 `grep` 文案：跳过仍是开发者本机无核心时的诚实行为，
+  CI 里则通过前缀送值 + `grep` 兜底把它判失败，两道防线都不放宽。
+- 退出码用 `|| status=$?` 捕获而不是 `set +e`：保持 `set -euo pipefail` 全程生效，
+  且 `grep` 无论 `xcodebuild` 成功失败都会执行。
+
+### 构建与测试结果
+
+- 静态检查：`bash -n` 通过（CI 测试步骤从 YAML 抽出后单独检查、`apps/macos/scripts/*.sh`），
+  PyYAML 6.0.1 解析 `.github/workflows/ci.yml` 成功并确认 4 个 job 与测试步骤 env；
+  `check-project.py`（134 objects / 21 app sources / 20 test sources / 1 UI test source）、
+  `check-strings.py`（109 keys / 2 languages，三条既有 note 与本次无关）、`git diff --check`
+  均无错误。逐行核对了测试步骤：`env` 前缀、传给测试代码的键名、`tee` 日志路径、`grep`
+  文案、退出码传递一致。
+- 退出码逻辑用假 `xcodebuild` 做了 4 种组合仿真：成功且无跳过 → 0；失败且无跳过 → 65；
+  成功但有跳过 → 1；失败且有跳过 → 1，全部符合预期。仿真只验证 shell 控制流，不替代
+  `xcodebuild` 实跑。
+- Go 与前端套件未重跑：本阶段只改一个 UI 测试文件与 `ci.yml`，未触碰 Go / JS；基线仍按
+  M4.2 记录（Go 1376 / 1355 / 21 / 0，前端离线 82 / 80 / 2 / 0、实时 82 / 82 / 0 / 0）。
+- **未验证项**：Swift 编译、`xcodebuild test`、UI 测试、真实核心用例，全部待推送后的 CI
+  重跑确认；Release 构建、ad-hoc 签名、DMG 与候选包校验同样未验。本机 Linux 无 Swift /
+  Xcode，不声称 UI 断言已通过，也不声称候选包已生成。
+
+### 遗留问题
+
+- M4 / M4.1 / M4.2 原有挂账不变：系统代理真实接管与恢复、强退恢复、M5 干净 arm64 VM 验收，
+  以及 Windows / Linux 主线的 A2 / B4 / C1 / C2 / C3。
+- cell 这一元素类型是苹果文档与静态核对的结论；若 CI 重跑仍报 `no sidebar item`，须按新日志
+  或无障碍树快照重新定位，不继续猜改。
+- **ci.yml 需用户经网页端上传，快照推送带不上去**：本地提交包含 UI 测试修复、`ci.yml`
+  与本文；快照推送不会把 `ci.yml` 的 env 前缀与退出码修复带上去，必须另行经网页端上传，
+  否则 CI 重跑不会带上这两处改动。
+
+### 下一步计划
+
+1. 推送本地提交，并把 `ci.yml` 经网页端上传，重跑 macOS CI：确认 UI 断言通过、四个真核心
+   用例执行且未跳过、`Test the app and the real sidecar` 转绿。
+2. 转绿后再按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 虚拟机验收。
+3. 任何新失败按新日志定位；本机只做静态核对，不做盲改。

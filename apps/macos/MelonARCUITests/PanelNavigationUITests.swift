@@ -19,7 +19,7 @@ final class PanelNavigationUITests: XCTestCase {
         defer { app.terminate() }
 
         for panel in panels {
-            let item = app.buttons["panel.\(panel)"]
+            let item = app.cells["panel.\(panel)"]
             XCTAssertTrue(item.waitForExistence(timeout: 10), "no sidebar item for \(panel)")
             item.click()
             let root = app.otherElements["panel.\(panel).root"]
