@@ -322,21 +322,23 @@ jobs:
 
       - name: Test the app and the real sidecar
         env:
-          MELONARC_TEST_CORE: ${{ github.workspace }}/apps/macos/MelonARC/Core/melonarc-core
+          TEST_RUNNER_MELONARC_TEST_CORE: ${{ github.workspace }}/apps/macos/MelonARC/Core/melonarc-core
         run: |
           set -euo pipefail
           log="$RUNNER_TEMP/macos/xcodebuild-test.log"
+          status=0
           xcodebuild test \
             -project apps/macos/MelonARC.xcodeproj \
             -scheme MelonARC \
             -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath "$RUNNER_TEMP/macos/DerivedData" \
-            2>&1 | tee "$log"
+            2>&1 | tee "$log" || status=$?
           # A skipped real-core test would make this job green for no reason.
           if grep -q 'MELONARC_TEST_CORE is not set' "$log"; then
             echo "::error::the real-core tests were skipped, so the sidecar is not verified"
-            exit 1
+            status=1
           fi
+          exit "$status"
 
       - name: Build the Release app
         run: |
