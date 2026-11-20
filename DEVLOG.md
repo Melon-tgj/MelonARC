@@ -7057,3 +7057,24 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
 2. 按方案顺序进入后续阶段：§2 订阅创建与面板状态、§3 信息架构、§5 更新检查；
    每阶段单独记录 CI 与虚拟机证据。
 3. 新候选通过后在用户 arm64 macOS 虚拟机做 M5 验收，再发 v0.1.0-preview.1。
+
+### M5.1 修复记录（CI #33 工具链断言，2026-11-20）
+
+- **失败原因**：CI 运行 #33（提交 `fec0dfd1`）中 `macos-15` 与 `macos-26` 两个
+  job 都在第一步「Select Xcode and record the toolchain」报 `expected Swift 6.2.3`
+  并以 exit 1 退出。Go / Frontend / Interop 三个 job 全绿；图标验证、签名、
+  打包均未执行，九张新图标尚未被 CI 验证。
+- **证据**：CI 日志显示两个 runner 镜像中 Xcode 26.3（Build 17C529）自带的
+  Swift 实为 **6.2.4（Apple Swift version 6.2.4，swiftlang-6.2.4.1.4）**；
+  Xcode 26.3 与 SDK 26.2 的断言均已通过，两个镜像表现一致。根因是工具链方案
+  误写为 6.2.3，应以 Xcode 26.3 实测自带的 6.2.4 为准。
+- **修复内容**：只改 `.github/workflows/ci.yml` 三处——约第 278 行注释里的
+  `Swift 6.2.3`，以及约第 314、480 行两个 macOS job 的断言
+  `grep -q 'version 6\.2\.3'` 与报错文案 `expected Swift 6.2.3`，全部改为
+  6.2.4。Xcode 路径、SDK 版本、图标、脚本及其他文件均未改动。
+- **本地验证**：PyYAML 解析 `ci.yml` 得 5 个 job（go、frontend、interop、
+  macos、macos-glass-ui），30 个 `run` 块全部通过 `bash -n`，
+  `git diff --check` 干净。本机无 Swift / Xcode，未本地重跑真实工具链探测。
+- **待验证**：本地提交后由 Muse 走快照流程推送（`ci.yml` 仍需网页端上传），
+  重跑 CI 确认两个 macOS job 的工具链步骤转绿、图标门槛与合成反例执行、
+  唯一候选 DMG 正常产出。
