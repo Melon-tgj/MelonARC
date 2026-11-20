@@ -6932,3 +6932,128 @@ Muse 独立核验（分支文件、CI #26/#27 日志、本地 `ci.yml`）全部�
 2. 取候选包进入 M5：用户在自己的 arm64 macOS 虚拟机先验 SHA-256，再做真实使用、
    强退恢复、预置代理 / PAC / 绕过列表的接管与恢复、真实 Gatekeeper 首开验收；
    通过后发 v0.1.0-preview.1。任何修复都产生新候选包与新验收记录。
+
+---
+
+## 阶段 M5.1 — 固定桌面构建工具链并补齐应用图标（2026-11-20）
+
+开工基线：`HEAD = 002c0db`（M4.7），工作区只有未跟踪的 `.m51-brief.md` /
+`.m51-plan.md`。开工前重读了本文件 M4.7 与下一步计划、
+`~/workspace/projects/melonarc-macos-plan.md` 的 D10 / D11 与 M4 / M5 两节、
+`docs/development-doc-v1.md`，再读了 `.m51-plan.md` 全文。严格只做方案 §1 的
+工具链部分与 §4 的图标部分；§2（订阅创建 / 面板状态）、§3（信息架构 / 布局）、
+§5（更新检查）与 §1 的侧栏实现均不在本阶段范围内。
+
+### 完成了什么
+
+**M5.1a 工具链（提交 1）**
+
+- `.github/workflows/ci.yml` 两个 Mac 作业的 `XCODE_APP` 都固定为
+  `/Applications/Xcode_26.3.app`；原有 `macos-15` 作业继续做回退 UI 测试并
+  产出唯一的候选 DMG，新增 `macos-glass-ui`（`runs-on: macos-26`）作业：
+  同一套件、同一提交、先跑 `build-core.sh` 构建真实 sidecar、跑
+  `xcodebuild test` 界面用例并把 `.xcresult`（含 XCUITest 截图附件）与日志上传，
+  不签名、不打包、不冻结候选。
+- 两个作业的选择步骤相同：路径失效时打印 `/Applications/Xcode*.app` 后退出；
+  记录 `xcode-select -p`、`xcodebuild -version`、SDK 版本、`xcrun swift --version`、
+  Go 版本、`sw_vers`、架构到 `toolchain.txt`，再断言 Xcode 26.3 / 17C529 /
+  SDK 26.2 / Swift 6.2.3 / arm64。部署下限 13.0、`SWIFT_VERSION = 5.0`
+  语言模式、Go 1.27.4（go.mod）与 arm64 均未改。
+- `apps/macos/scripts/verify-binaries.sh` 改用 `xcrun vtool -show-build`：
+  对壳与核心分别断言 `minos 13.0`，并额外断言壳的 `sdk 26.2`（Go 交叉编译的
+  核心不带 SDK 加载命令，故只查壳）。`check-candidate.sh` 交付前再核对成品
+  `LSMinimumSystemVersion` 为 13.0（Info.plist 中该键展开
+  `$(MACOSX_DEPLOYMENT_TARGET)`）。
+
+**M5.1b 图标（提交 2）**
+
+- 根因复核：build 30 的 `xcodebuild-release.log` 第 156、191 行把唯一的
+  `mac / 1024x1024 / 1x` 图片报为 `unassigned child`；苹果官方
+  App Icon Type 参考表明确 1024×1024 是 App Store 图标，macOS 槽位是
+  16/32/128/256/512 pt，故该图从未被资源编译器采用。
+- 保留 `AppIcon.png`（1024×1024）作 `512x512 / 2x` 输入，另生成九张 PNG
+  （16/32/128/256/512 的 1x 与 2x，其中 32/256/512 的两种比例各有独立文件名；
+  2x 的 1024 复用原图）。本机是 Linux、无 `sips`，改用已安装的 ImageMagick
+  `convert -resize NxN!` 从原图直接缩放，逐张用 `identify` 核对像素
+  （16/32/64/128/256/512/1024 全部正确）。这是静态资源生成，不进入产物代码；
+  苹果工具在本开发机确实不可用，故按红线要求在此说明理由。
+- `Contents.json` 改为十个 `idiom: mac` 的不重复槽位；`check-project.py`
+  新增第 6 节：解析目录、断言恰好十槽位且 `(idiom,size,scale)` 不重复、
+  文件存在、直接读 PNG 的 IHDR 得到实际像素并与 `size × scale` 一致。
+- 新增 `scripts/verify-app-icon.sh`：从 plist 同时解析 `CFBundleIconFile`
+  （可省略扩展名）与 `CFBundleIconName`，要求对应 `.icns` 存在且能被
+  `iconutil -c iconset` 解码；抽验 16/128/512 三种表示并用 `sips` 核对像素，
+  另要求至少一张 `@2x` 高分辨率表示；存在 `Assets.car` 时用
+  `xcrun assetutil --info` 检查并记录图标条目数。发行日志里涉及 AppIcon 的
+  `unassigned child`、非法槽位报告直接失败。脚本输出相对资源路径与 SHA-256。
+- `package-dmg.sh` 在签名后与 DMG 只读挂载副本上各跑一次该脚本，`diff`
+  两份报告要求完全一致；`check-candidate.sh` 在冻结前再跑一次作为图标门槛。
+  CI 加了一个合成反例：只有 `CFBundleIconName`、没有任何图标资源的应用必须被拒。
+- 顺带核查并修复 `check-candidate.sh` 末尾 `digest: unbound variable`：
+  `digest` 只在 heredoc 内的 Python 里定义，shell 在 `set -u` 下确实未绑定；
+  该命令替换在子 shell 里报错但外层 `echo` 仍返回 0，所以 CI #30 只打印警告
+  却照常成功。现改为直接输出已校验的 `$expected`，不影响清单内容。
+
+官方文档依据：App Icon Type 参考
+（<https://developer.apple.com/library/archive/documentation/Xcode/Reference/xcode_ref-Asset_Catalog_Format/AppIconType.html>）、
+Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requirements>）、
+打包与公证要求（<https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution>）。
+实现只用苹果工具解析成品；唯一的第三方工具是 Linux 上生成静态 PNG 的 ImageMagick。
+
+### 关键决策及理由
+
+1. **保留 `macos-15` 为唯一产包作业，把 26 作业定为纯界面测试。**
+   两种托管镜像都列有 Xcode 26.3，但候选包只能有一份；新作业验证玻璃分支
+   （系统 26 起可用），旧作业继续覆盖回退样式，发布路径不变，避免双份 DMG
+   与双份摘要。
+2. **版本探测与断言内联在两个作业里，不新添脚本。**
+   两个作业各有一份 `env.XCODE_APP` 作为唯一版本开关；探测步骤输出完整
+   工具链清单后再断言，失败时日志里保留实际版本与可用套件列表，便于定位。
+3. **图标按传统桌面槽位而不是继续用 1024 @1x。**
+   部署下限 13.0 走传统 ICNS 路径；十槽位让资源编译器产出多尺寸表示，
+   校验脚本再从成品反向核对，而不是只看 `Info.plist` 里的图标名。
+4. **签名前后各验一次且比较报告。**
+   签名能封装一份没有图标的应用；只验源码目录或只验镜像都可能漏掉某一环节。
+   相对路径 + 摘要的报告在两处必须一致，能同时发现缺失、错位与替换。
+
+本阶段留出的扩展点：槽位表由 `Contents.json` 数据与 `check-project.py` 的
+期望集合共同描述，新槽位只改这两处；`verify-app-icon.sh` 接受应用路径与可选
+构建日志，可被任意打包 / 验收步骤复用；`macos-glass-ui` 作业是后续玻璃界面
+用例的落点，新增用例无需再改 CI 结构。
+
+### 当前状态（本地验证结果）
+
+- `python3 apps/macos/scripts/check-project.py` 通过（134 objects / 21 app /
+  20 test / 1 UI test）；用 build 30 式单槽位目录做负例，检查器返回 1 并报出
+  槽位数与槽位集合两处错误。
+- `python3 apps/macos/scripts/check-strings.py` 通过（109 keys / 2 languages）。
+- PyYAML 解析 `ci.yml` 得到 5 个 job（go、frontend、interop、macos、
+  macos-glass-ui），30 个 `run` 块全部通过 `bash -n`；五个脚本自身也通过
+  `bash -n`。
+- 用临时桩替换 `plutil` / `iconutil` / `sips` / `shasum` 做纯 shell 逻辑检查：
+  合规样本输出 `icon: Contents/Resources/AppIcon.icns sha256=…`；无图标资源
+  与日志含 `unassigned child` 两种样本均被拒绝。这只是本地脚本流程检查，
+  不代表苹果工具已在本机验证。
+- `git diff --check` 干净；红线 grep 未命中非开源商业产品名。
+- Go / 前端套件未重跑（本阶段未触碰 Go、JS 与依赖），基线仍按 M4.2/M4.3：
+  Go 1376 / 1355 / 21 / 0，前端离线 82 / 80 / 2 / 0、实时 82 / 82 / 0 / 0。
+- **本地未验**：`xcodebuild`、`actool`、图标实际编译、`codesign`、DMG 挂载、
+  `assetutil`、真实 Gatekeeper 首开，全部待推送后 CI 与 M5 虚拟机确认。
+
+### 遗留问题
+
+- 本机没有 Swift / Xcode，新作业里的玻璃界面用例目前仍是现有导航测试
+  （截图作为 XCUITest 附件保存在 `.xcresult`）；专门的玻璃控件用例随方案 §1
+  的侧栏实现进入后续阶段，本阶段未改任何 Swift 源码。
+- 新版套件 26.3 对现有工程的完整编译结果、图标 ICNS 的实际表示集合、
+  `XCODEBUILD_RELEASE_LOG` 传入后的日志门槛是否命中，均待 CI 实测。
+- M4 / M5 原有挂账（系统代理真实接管与恢复、强退恢复、预置代理 / PAC /
+  绕过列表、干净 arm64 VM 验收，以及 A2 / B4 / C1 / C2 / C3）不变。
+
+### 下一步计划
+
+1. 本地提交后由 Muse 走快照流程：代码推送 + `ci.yml` 经网页端上传，重跑 CI；
+   核对五个 job、工具链断言、图标门槛、合成反例与唯一候选 DMG 全部通过。
+2. 按方案顺序进入后续阶段：§2 订阅创建与面板状态、§3 信息架构、§5 更新检查；
+   每阶段单独记录 CI 与虚拟机证据。
+3. 新候选通过后在用户 arm64 macOS 虚拟机做 M5 验收，再发 v0.1.0-preview.1。

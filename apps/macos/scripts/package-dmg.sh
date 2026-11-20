@@ -31,6 +31,12 @@ for binary in "$core" "$main"; do
 done
 codesign --verify --deep --strict --verbose=2 "$app"
 
+# The icon is checked after signing and again on the mounted copy; both reports
+# must name the same resource with the same digest.
+icon_work=$(mktemp -d "${TMPDIR:-/tmp}/melonarc-icon-report.XXXXXX")
+bash "$here/verify-app-icon.sh" "$app" "${XCODEBUILD_RELEASE_LOG:-}" \
+  > "$icon_work/signed.txt"
+
 hdiutil create -volname "${name%.app}" -srcfolder "$app" -ov -format UDZO "$dmg"
 hdiutil verify "$dmg"
 
@@ -40,6 +46,7 @@ detach() {
     hdiutil detach "$mount" >/dev/null
   fi
   rmdir "$mount" 2>/dev/null || true
+  rm -rf "$icon_work"
 }
 trap detach EXIT
 hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg" >/dev/null
@@ -53,6 +60,11 @@ codesign --verify --deep --strict --verbose=2 "$mounted"
 bash "$here/verify-binaries.sh" \
   "$mounted/Contents/MacOS/${name%.app}" \
   "$mounted/Contents/MacOS/melonarc-core"
+bash "$here/verify-app-icon.sh" "$mounted" > "$icon_work/mounted.txt"
+if ! diff -u "$icon_work/signed.txt" "$icon_work/mounted.txt"; then
+  echo "::error::the app icon differs between the signed app and the mounted DMG copy"
+  exit 1
+fi
 detach
 trap - EXIT
 

@@ -5,6 +5,8 @@
 # script only checks their output and writes the manifest beside the artifact.
 set -euo pipefail
 
+here=$(cd "$(dirname "$0")" && pwd)
+
 app=$1
 dmg=$2
 commit=$3
@@ -39,10 +41,17 @@ grep -q 'Privacy statement' "$resources/PRIVACY.md" \
   && grep -q '隐私声明' "$resources/PRIVACY.md" \
   || fail "the bundled privacy statement is not bilingual"
 
-copyright=$(plutil -extract NSHumanReadableCopyright raw -o - "$app/Contents/Info.plist") \
+bash "$here/verify-app-icon.sh" "$app"
+
+copyright=
+$(plutil -extract NSHumanReadableCopyright raw -o - "$app/Contents/Info.plist") \
   || fail "the bundle copyright could not be read"
 printf '%s\n' "$copyright" | grep -q 'GPL-3.0-only' \
   || fail "the bundle copyright does not state GPL-3.0-only"
+
+minimum=$(plutil -extract LSMinimumSystemVersion raw -o - "$app/Contents/Info.plist") \
+  || fail "the bundle minimum system version could not be read"
+[ "$minimum" = "13.0" ] || fail "the bundle minimum system version is $minimum, expected 13.0"
 
 expected=$(shasum -a 256 "$dmg" | awk '{print $1}')
 recorded=$(awk '{print $1}' "$dmg.sha256")
@@ -74,4 +83,4 @@ with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PY
 
-echo "ok: candidate $dmg_name $(echo "$digest" | cut -c1-12)…"
+echo "ok: candidate $dmg_name $(printf '%s' "$expected" | cut -c1-12)…"

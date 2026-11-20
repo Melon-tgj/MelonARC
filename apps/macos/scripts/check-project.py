@@ -20,6 +20,7 @@ sentence instead of a compiler error about a missing file.
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "MelonARC.xcodeproj" / "project.pbxproj"
 SCHEME = ROOT / "MelonARC.xcodeproj" / "xcshareddata" / "xcschemes" / "MelonARC.xcscheme"
+APP_ICON = ROOT / "MelonARC" / "Resources" / "Assets.xcassets" / "AppIcon.appiconset"
 
 IDENTIFIER = re.compile(r"^[0-9A-F]{24}$")
 PRODUCTS = {"MelonARC.app", "MelonARCTests.xctest", "MelonARCUITests.xctest"}
@@ -295,6 +297,48 @@ def main() -> int:
         if "TestableReference" not in scheme:
             failures.append("the scheme has no test action, so `xcodebuild test` would run nothing")
 
+    # 6. The ten traditional macOS icon slots must each have a PNG of the
+    #    declared pixel size. actool silently skips a 1024x1024 / 1x image.
+    catalog = APP_ICON / "Contents.json"
+    if not catalog.exists():
+        failures.append("the app icon catalog is missing")
+    else:
+        try:
+            images = json.loads(catalog.read_text(encoding="utf-8"))["images"]
+        except (OSError, ValueError, KeyError) as error:
+            failures.append(f"the app icon catalog does not parse: {error}")
+            images = []
+        slots = [(image.get("idiom"), image.get("size"), image.get("scale")) for image in images]
+        sizes = ("16x16", "32x32", "128x128", "256x256", "512x512")
+        expected_slots = {("mac", size, scale) for size in sizes for scale in ("1x", "2x")}
+        if len(images) != 10:
+            failures.append(f"the app icon catalog has {len(images)} images, expected 10")
+        for slot in sorted(set(slots)):
+            if slots.count(slot) != 1:
+                failures.append(f"the app icon slot {slot} is declared more than once")
+        if set(slots) != expected_slots:
+            failures.append("the app icon must declare the ten mac 1x/2x slots, each once")
+        for image in images:
+            filename = image.get("filename")
+            size, scale = image.get("size"), image.get("scale")
+            if not isinstance(filename, str):
+                failures.append("an app icon slot has no filename")
+                continue
+            path = APP_ICON / filename
+            if not path.exists():
+                failures.append(f"the app icon file {filename} does not exist")
+                continue
+            if size not in sizes or scale not in ("1x", "2x"):
+                continue
+            pixels = int(size.split("x", 1)[0]) * (2 if scale == "2x" else 1)
+            try:
+                width, height = png_size(path)
+            except (OSError, ValueError) as error:
+                failures.append(f"{filename} is not a readable PNG: {error}")
+                continue
+            if (width, height) != (pixels, pixels):
+                failures.append(f"{filename} is {width}x{height}, expected {pixels}x{pixels}")
+
     for note in notes:
         print(f"note: {note}")
     for failure in failures:
@@ -306,6 +350,14 @@ def main() -> int:
         f"{len(test_sources)} test sources, {len(ui_test_sources)} UI test sources"
     )
     return 0
+
+
+def png_size(path: Path) -> tuple[int, int]:
+    """Reads the IHDR dimensions without an image library."""
+    data = path.read_bytes()[:24]
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        raise ValueError("not a PNG with an IHDR chunk")
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
 
 
 def resolve_path(objects: dict, identifier: str) -> Path | None:
