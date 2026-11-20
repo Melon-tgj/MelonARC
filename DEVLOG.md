@@ -6790,3 +6790,72 @@ UI 测试在 `PanelNavigationUITests.swift:52` 失败于新点：
    `Test the app and the real sidecar` 全绿，四个真核心用例继续执行且未跳过。
 2. 若仍失败，只用失败路径打印的无障碍树诊断单点问题。
 3. macOS job 转绿后按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 VM 验收。
+
+---
+
+## 阶段 M4.6 — 合并 GPT 的侧栏点击修复与打包 bug 修复（2026-11-20）
+
+开工基线：`HEAD = 2498223`（M4.5），远端 `fb8683dc`。CI #25（`fb8683dc`，
+2026-11-20 12:54 跑完）UI 测试失败于新点：点击 policies 侧栏行三次均
+`Not hittable: OutlineRow`（`PanelNavigationUITests.swift:50`，exit 65）；
+M4.5 的 root 修复已证实生效（`panel.overview.root` 在 3.34 秒出现）。
+用户把 Muse 整理的提示词交给 GPT 最强模型，GPT 在分支
+`codex/fix-macos-sidebar-hit-testing` 上修复（提交 `2ff2574`、`5185d13`），
+Muse 独立核验（分支文件、CI #26/#27 日志、本地 `ci.yml`）全部属实后，
+原样并入 main。本阶段无新写的产品代码：测试文件逐字节采用 `5185d13` 版本，
+`ci.yml` 改动为 GPT 的诊断补丁加一行打包修复。
+
+### 根因（GPT 定位，CI #26/#27 日志证实）
+
+- `sidebarItem` 找到的行是对的，但 `OutlineRow` 本身不可点击：
+  policies、subscriptions、connections、rules 四行的 `rowHittable=false`；
+  同一行里带 `panel.<id>` 标识的 `StaticText` 标签 `hittable=true`，
+  点击标签后目标根节点随即出现。应用前台、窗口 980×620 均已排除。
+- #26 还验证了一个决定修复方式的细节：logs 行报告 `isHittable == true`，
+  点击也无报错，但失败时的无障碍树显示 rules 仍被选中——`isHittable`
+  只说明框架能为该元素算出命中点，点击是否完成导航仍须以目标根节点验证。
+  启动时 overview 已选中，所以原测试第一次通过也无法验证切换。
+
+### 完成了什么
+
+- `apps/macos/MelonARCUITests/PanelNavigationUITests.swift`：逐字节采用
+  `5185d13` 版本。新增 `clickSidebarItem`：找到行后优先点行内带目标标识的
+  标签，标识直接在行上时仍点原行；每次点击前打印 `[sidebar]` 诊断
+  （面板、前台状态、窗口与行 frame、选中状态、行 `isHittable`、实际点击
+  目标）；失败时在 teardown 里附加全屏截图并打印无障碍树；循环末尾从 logs
+  切回 overview 再验一次。`sidebarItem` 查询、detail `.contain`、root 断言未动。
+- `.github/workflows/ci.yml` 两处：
+  1. 打包修复（Sign and package 步骤）：`$GITHUB_ENV` 写入的变量只在后续步骤
+     生效，同一步内读 `${CANDIDATE_DMG}` 得到空值——#27 日志证实它造出了
+     `macos.dmg` 却去 `hdiutil verify` 验证 `macos/` 目录（exit 1）。改为
+     本步骤内用 shell 变量 `dmg`，`$GITHUB_ENV` 写入保留供下一步
+     Check and freeze 步骤读取。
+  2. 并入 GPT 的失败诊断补丁（用户 Mac 本地 `macos-test-diagnostics.patch`，
+     已通过 `git apply --check`）：测试步骤加 `id: app_tests` 与
+     `-resultBundlePath "$RUNNER_TEMP/macos/Tests.xcresult"`；新增
+     Upload failed test diagnostics 步骤，测试失败时上传 `Tests.xcresult`
+     与 `xcodebuild-test.log`（保留 14 天）。
+
+### 构建与测试结果
+
+- 分支 CI #27（`5185d13`）：测试步骤全绿，UI 测试 28.571 秒、六个面板逐个
+  打开且最后切回 overview，52 项单元测试与 4 项 SidecarTests 全部执行且通过；
+  唯一失败是 Sign and package（即本阶段修的打包 bug）。
+- 本地验证：`git apply --check` 通过；PyYAML 解析 `ci.yml`（4 个 job）通过；
+  改动的 `run` 块 `bash -n` 通过；`swiftc -parse` 对测试文件通过；
+  `git diff --check` 通过；红线 grep 零命中；`check-project.py` /
+  `check-strings.py` 通过。
+- **未验证项**：打包修复与诊断上传步骤待 main 上 CI 验证；DMG 产出、
+  候选包校验与 M5 VM 验收仍待 CI 转绿后进行。
+
+### 遗留问题
+
+- 互通 job 在 CI #25 红（exit 1），细节未查；若新一轮 CI 仍红再定位。
+- M4 / M4.1–M4.5 原有挂账不变：系统代理真实接管与恢复、强退恢复、
+  M5 干净 arm64 VM 验收，以及 Windows / Linux 主线的 A2 / B4 / C1 / C2 / C3。
+
+### 下一步计划
+
+1. 推送本地提交并上传新 `ci.yml`，重跑 CI：确认测试步骤全绿、Sign and
+   package 通过、候选 DMG 与 `.sha256`、`candidate.json` 产出。
+2. macOS job 转绿后按 M4 计划取候选包，进入 M5 VM 验收。
