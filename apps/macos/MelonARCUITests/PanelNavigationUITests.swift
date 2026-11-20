@@ -37,22 +37,53 @@ final class PanelNavigationUITests: XCTestCase {
         return rows.first { $0.frame.contains(frame) }
     }
 
+    private func clickSidebarItem(_ item: XCUIElement, for panel: String, in app: XCUIApplication) {
+        let identifier = "panel.\(panel)"
+        let window = app.windows.containing(.any, identifier: identifier).firstMatch
+        let windowFrame = window.exists ? String(describing: window.frame) : "missing"
+        let rowHittable = item.isHittable
+        print("[sidebar] panel=\(panel) foreground=\(app.state == .runningForeground) window=\(windowFrame) row=\(item.frame) selected=\(item.isSelected) rowHittable=\(rowHittable)")
+
+        if !rowHittable {
+            let label = item.descendants(matching: .any).matching(identifier: identifier).firstMatch
+            for content in [label, item.staticTexts.firstMatch] where content.exists {
+                let hittable = content.isHittable
+                print("[sidebar] panel=\(panel) child=\(content.elementType) frame=\(content.frame) childHittable=\(hittable)")
+                if hittable {
+                    content.click()
+                    return
+                }
+            }
+        }
+        // An offscreen row can still be scrolled into view by click().
+        item.click()
+    }
+
     func testEveryBusinessPanelCanBeOpened() {
         let app = XCUIApplication()
+        addTeardownBlock {
+            if (self.testRun?.totalFailureCount ?? 0) > 0 {
+                let screen = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+                screen.name = "Sidebar navigation failure"
+                self.add(screen)
+                print("[sidebar] failure appState=\(app.state.rawValue)")
+                if app.state != .notRunning { print(app.debugDescription) }
+            }
+            app.terminate()
+        }
         app.launch()
-        defer { app.terminate() }
 
-        for panel in panels {
+        // Reopen overview from logs so it also requires a selection change.
+        for panel in panels + ["overview"] {
             guard let item = sidebarItem(for: panel, in: app) else {
                 XCTFail("no sidebar item for \(panel)")
                 return
             }
-            item.click()
+            clickSidebarItem(item, for: panel, in: app)
             let root = app.descendants(matching: .any)
                 .matching(identifier: "panel.\(panel).root")
                 .firstMatch
             guard root.waitForExistence(timeout: 10) else {
-                print(app.debugDescription)
                 XCTFail("no root view for \(panel)")
                 return
             }
