@@ -6618,3 +6618,96 @@ with 1 failure。同时 4 项 SidecarTests 被跳过，本轮实际没有验证�
    用例执行且未跳过、`Test the app and the real sidecar` 转绿。
 2. 转绿后再按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 虚拟机验收。
 3. 任何新失败按新日志定位；本机只做静态核对，不做盲改。
+
+---
+
+## 阶段 M4.4 — XCUITest 侧栏标识跨类型查询修复（2026-11-20）
+
+开工基线：`HEAD = d41cabc`（M4.3）。CI #23（提交 `eb37791`）中 Go / Frontend /
+Interop 全绿，52 项单元测试与 4 项 SidecarTests 全部通过，macOS job 仍只在
+`PanelNavigationUITests.testEveryBusinessPanelCanBeOpened` 失败：`PanelNavigationUITests.swift:23`
+的 `XCTAssertTrue failed - no sidebar item for overview`，exit 65，候选 DMG 未产出。
+CI #23 已证明 M4.3 的 `app.cells["panel.\(panel)"]` 仍未找到侧栏项；本机是 Linux，
+无 Xcode / SwiftUI / AppKit / XCUITest，不能 dump XCTest 无障碍树，也不能编译或运行 UI 测试。
+开工前重读了 `.m44-brief.md`、本文件 M4.3 节、`docs/development-doc-v1.md`、
+`PanelNavigationUITests.swift`、`RootView.swift` 与 `PanelRegistry.swift`。
+
+### 完成了什么
+
+- `apps/macos/MelonARCUITests/PanelNavigationUITests.swift` 新增私有辅助方法
+  `sidebarItem(for:in:)`，替代直接 `app.cells["panel.\(panel)"]`：
+  1. 先按 `app.descendants(matching: .any).matching(identifier: "panel.\(panel)").firstMatch`
+     等待标识出现，保留原来的 10 秒超时与 `no sidebar item for \(panel)` 断言文案。
+  2. 再依次尝试 `.outlineRow` / `.cell` 上按标识直接匹配与 `containing(.any, identifier:)`
+     匹配，只返回行/单元格候选，避免点击普通文本元素。
+  3. 若标识挂在行内子视图而非行本身，则用标识元素的 `frame` 在 `.outlineRow` /
+     `.cell` 后代中反查包含它的行，并返回该行供 `click()`。
+- `item.click()` 与 detail root 断言保持原样；未改 `app.otherElements["panel.\(panel).root"]`，
+  因为失败尚未跑到该步，没有确诊它有问题。
+- `RootView.swift` 未改；侧栏仍由 `PanelRegistry.navigation()` 生成，未新增面板数量或清单。
+- 未改 Go、JS / 前端、`ci.yml`、SidecarTests、其他测试与产品行为。
+
+### 关键决策及理由
+
+- 只改测试文件：CI 已排除 `button` 与 `cell` 两种单一类型假设，但本机不能导出真实无障碍树；
+  按苹果官方 API 覆盖 `.outlineRow` / `.cell` 并用 frame 反查可点击行，是当前能做的
+  最小、可验证修复。改 `RootView.swift` 的无障碍结构会动产品代码与视图身份，留到 CI
+  给出新诊断后再决定。
+- 优先按现有 `accessibilityIdentifier` 查询，不按本地化文案查询：标识与语言/翻译加载无关，
+  也与既有测试约定一致。
+- 使用 `app.descendants(matching: .outlineRow)`，不用 `XCUIElementQueryProvider.outlineRows`
+  属性：苹果文档将 `outlineRows` 标为 Xcode 16.3+ 可用，后代查询在本项目工具链约束下更稳。
+- 只点击 `.outlineRow` / `.cell` 候选：简报明确要求不能查到不可交互文本后直接 `click()`；
+  frame 反查的目的正是把行内标识提升回可点击行。
+- 不改 detail root 查询：它尚未执行到，按「只动确诊问题」红线保留。
+
+### 苹果官方文档依据
+
+- `XCUIElementQuery` — `descendants(matching:)`、`containing(_:identifier:)` 与 macOS
+  outline/cell 示例：`https://developer.apple.com/documentation/xcuiautomation/xcuielementquery.md`
+- `XCUIElementQuery.matching(identifier:)` — 按 identifier/title/label/value/placeholderValue 匹配：
+  `https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/matching(identifier:).md`
+- `XCUIElementQuery.containing(_:identifier:)` — 匹配含指定类型后代的元素：
+  `https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/containing(_:identifier:).md`
+- `XCUIElementQuery.descendants(matching:)` — 返回指定类型的全部后代：
+  `https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/descendants(matching:).md`
+- `XCUIElementQuery.subscript(_:)` — 按标识符取后代元素：
+  `https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/subscript(_:).md`
+- `XCUIElement.ElementType` — 区分 `.any`、`.cell`、`.outlineRow`、`.staticText`，且无 `.row`：
+  `https://developer.apple.com/documentation/xcuiautomation/xcuielement/elementtype.md`
+- `XCUIElementTypeQueryProvider.outlineRows` — 确认为 outline row 查询，但标注 Xcode 16.3+：
+  `https://developer.apple.com/documentation/xcuiautomation/xcuielementtypequeryprovider/outlinerows.md`
+- SwiftUI `View.accessibilityIdentifier(_:)` — 测试用、用户不可见的稳定标识：
+  `https://developer.apple.com/documentation/swiftui/view/accessibilityidentifier(_:).md`
+- SwiftUI `View.accessibilityElement(children:)` — 仅作为核查过的产品侧备选方案；本阶段未采用：
+  `https://developer.apple.com/documentation/swiftui/view/accessibilityelement(children:).md`
+- WWDC25 What's new in accessibility — SwiftUI 无障碍树可能只暴露文本元素，查询类型需与实际树匹配：
+  `https://developer.apple.com/videos/play/wwdc2025/344/`
+
+### 构建与测试结果
+
+- 静态检查：`git diff --check` 通过；`check-project.py`（134 objects / 21 app sources /
+  20 test sources / 1 UI test source）通过；`check-strings.py`（109 keys / 2 languages，
+  三条既有 note 与本次无关）通过；`git status --short` 仅有目标 UI 测试文件被跟踪修改，
+  `.m44-brief.md` 仍是未跟踪简报，不纳入提交。
+- Go 与前端套件未重跑：本阶段只改一个 UI 测试文件，未触碰 Go / JS；基线仍按 M4.2/M4.3
+  记录（Go 1376 / 1355 / 21 / 0，前端离线 82 / 80 / 2 / 0、实时 82 / 82 / 0 / 0）。
+- **未验证项**：Swift 编译、`xcodebuild test`、XCUITest、detail root 断言、Release 构建、
+  ad-hoc 签名、DMG 与候选包校验，全部待推送后的 CI 确认。本机 Linux 无 Swift / Xcode，
+  不声称 UI 断言已通过，也不声称候选包已生成。
+
+### 遗留问题
+
+- CI #23 没有无障碍树快照；本阶段按官方文档覆盖可点击行类型并以 frame 反查，仍属待 CI
+  验证的修复。若再失败，须按新日志或树快照定位，不继续盲改。
+- detail root 查询 `app.otherElements["panel.\(panel).root"]` 未改、未验证；若侧栏查询转绿后
+  root 断言失败，按新日志单独处理。
+- M4 / M4.1 / M4.2 / M4.3 原有挂账不变：系统代理真实接管与恢复、强退恢复、M5 干净 arm64 VM
+  验收，以及 Windows / Linux 主线的 A2 / B4 / C1 / C2 / C3。
+
+### 下一步计划
+
+1. 推送本地提交，重跑 macOS CI：确认 `testEveryBusinessPanelCanBeOpened` 转绿，
+   `Test the app and the real sidecar` 全绿，四个真核心用例继续执行且未跳过。
+2. 若 root 断言成为新的失败点，只按该步日志处理，不回退本阶段的侧栏查询修复。
+3. macOS job 转绿后按 M4 计划取候选 DMG、`.sha256` 与 `candidate.json`，进入 M5 VM 验收。

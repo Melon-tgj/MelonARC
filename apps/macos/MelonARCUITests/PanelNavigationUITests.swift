@@ -13,14 +13,40 @@ final class PanelNavigationUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    private func sidebarItem(for panel: String, in app: XCUIApplication) -> XCUIElement? {
+        let identifier = "panel.\(panel)"
+        let identified = app.descendants(matching: .any)
+            .matching(identifier: identifier)
+            .firstMatch
+        guard identified.waitForExistence(timeout: 10) else { return nil }
+
+        let queries = [
+            app.descendants(matching: .outlineRow).matching(identifier: identifier),
+            app.descendants(matching: .outlineRow).containing(.any, identifier: identifier),
+            app.descendants(matching: .cell).matching(identifier: identifier),
+            app.descendants(matching: .cell).containing(.any, identifier: identifier),
+        ]
+        for query in queries {
+            let candidate = query.firstMatch
+            if candidate.exists { return candidate }
+        }
+
+        let frame = identified.frame
+        let rows = app.descendants(matching: .outlineRow).allElementsBoundByIndex
+            + app.descendants(matching: .cell).allElementsBoundByIndex
+        return rows.first { $0.frame.contains(frame) }
+    }
+
     func testEveryBusinessPanelCanBeOpened() {
         let app = XCUIApplication()
         app.launch()
         defer { app.terminate() }
 
         for panel in panels {
-            let item = app.cells["panel.\(panel)"]
-            XCTAssertTrue(item.waitForExistence(timeout: 10), "no sidebar item for \(panel)")
+            guard let item = sidebarItem(for: panel, in: app) else {
+                XCTFail("no sidebar item for \(panel)")
+                return
+            }
             item.click()
             let root = app.otherElements["panel.\(panel).root"]
             XCTAssertTrue(root.waitForExistence(timeout: 10), "no root view for \(panel)")
