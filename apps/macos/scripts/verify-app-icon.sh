@@ -49,10 +49,10 @@ for name in $names; do
   icns="$resources/${name}.icns"
   relative=${icns#"$app/"}
   [ -f "$icns" ] || fail "the icon named in Info.plist has no resource: $relative"
-  iconutil -c iconset -o "$iconset/$name" "$icns" \
+  iconutil -c iconset -o "$iconset/$name.iconset" "$icns" \
     || fail "iconutil could not decode $relative"
   for representation in icon_16x16.png icon_128x128.png icon_512x512.png; do
-    image="$iconset/$name/$representation"
+    image="$iconset/$name.iconset/$representation"
     [ -f "$image" ] || fail "$relative has no $representation representation"
     pixels=$(sips -g pixelWidth -g pixelHeight "$image" \
       | awk '/pixelWidth:/ { w = $2 } /pixelHeight:/ { h = $2 } END { print w "x" h }')
@@ -61,7 +61,7 @@ for name in $names; do
     [ "$pixels" = "$want" ] || fail "$image is $pixels, expected $want"
   done
   shopt -s nullglob
-  high=("$iconset/$name"/*@2x.png)
+  high=("$iconset/$name.iconset"/*@2x.png)
   shopt -u nullglob
   [ "${#high[@]}" -gt 0 ] || fail "$relative has no high-resolution representation"
   digest=$(shasum -a 256 "$icns" | awk '{print $1}')

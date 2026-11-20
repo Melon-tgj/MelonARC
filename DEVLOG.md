@@ -7078,3 +7078,29 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
 - **待验证**：本地提交后由 Muse 走快照流程推送（`ci.yml` 仍需网页端上传），
   重跑 CI 确认两个 macOS job 的工具链步骤转绿、图标门槛与合成反例执行、
   唯一候选 DMG 正常产出。
+
+### M5.1 修复记录（CI #35 iconutil 输出路径，2026-11-20）
+
+- **失败原因**：CI 运行 #35（提交 `1ae8c66`）中工具链断言全过，52 个单元测试
+  与 UI 测试全过、`** TEST SUCCEEDED **`，玻璃界面作业全绿，日志全文检索
+  `unassigned` 为 0（图标槽位问题已解决），Go / Frontend / Interop 全绿；
+  新失败点在 `macos-15` 作业的 Sign and package 步骤：codesign 签名与校验已通过，
+  随后图标校验脚本因参数错误退出，与工具链版本无关。
+- **证据**：Sign and package 日志原文为
+  `Invalid arguments, --output argument. The file extension must equal iconset.`；
+  `apps/macos/scripts/verify-app-icon.sh` 原第 52 行为
+  `iconutil -c iconset -o "$iconset/$name" "$icns" \`，输出路径缺少 `.iconset`
+  后缀，而 iconutil 要求 `-o` 路径扩展名必须为 `iconset`。第 55、64 行的后续
+  读取沿用了同一无后缀路径。
+- **修复内容**：只改 `apps/macos/scripts/verify-app-icon.sh` 三行——第 52 行输出
+  路径改为 `"$iconset/$name.iconset"`，第 55 行读取改为
+  `"$iconset/$name.iconset/$representation"`，第 64 行通配改为
+  `"$iconset/$name.iconset"/*@2x.png`。输出目录与两处读取目录一致；
+  `iconset` 仍是 `mktemp -d` 创建的同一个临时根目录，`trap 'rm -rf "$iconset"' EXIT`
+  继续覆盖整个临时目录（含新建的 `.iconset` 子目录）。`ci.yml`、图标文件、
+  其他脚本与其他文件均未改动。
+- **本地验证**：`bash -n` 通过，`git diff --check` 干净，逐行复核路径拼接一致；
+  `shellcheck` 本机不可用，未执行。本机是 Linux、没有 `iconutil` / `sips`，
+  无法实跑该脚本，真实结果待 CI 确认。
+- **待验证**：本地提交后由 Muse 走快照流程推送，重跑 CI 确认 Sign and package
+  步骤的图标校验通过、唯一候选 DMG 正常产出。
