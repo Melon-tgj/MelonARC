@@ -41,22 +41,13 @@ final class PanelNavigationUITests: XCTestCase {
         let identifier = "panel.\(panel)"
         let window = app.windows.containing(.any, identifier: identifier).firstMatch
         let windowFrame = window.exists ? String(describing: window.frame) : "missing"
-        let rowHittable = item.isHittable
-        print("[sidebar] panel=\(panel) foreground=\(app.state == .runningForeground) window=\(windowFrame) row=\(item.frame) selected=\(item.isSelected) rowHittable=\(rowHittable)")
-
-        if !rowHittable {
-            let label = item.descendants(matching: .any).matching(identifier: identifier).firstMatch
-            for content in [label, item.staticTexts.firstMatch] where content.exists {
-                let hittable = content.isHittable
-                print("[sidebar] panel=\(panel) child=\(content.elementType) frame=\(content.frame) childHittable=\(hittable)")
-                if hittable {
-                    content.click()
-                    return
-                }
-            }
-        }
-        // An offscreen row can still be scrolled into view by click().
-        item.click()
+        let label = item.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        let hasLabel = label.exists
+        let target = hasLabel ? label : item
+        print("[sidebar] panel=\(panel) foreground=\(app.state == .runningForeground) window=\(windowFrame) "
+            + "row=\(item.frame) selected=\(item.isSelected) rowHittable=\(item.isHittable)")
+        print("[sidebar] target=\(hasLabel ? "label" : "row") frame=\(target.frame) hittable=\(target.isHittable)")
+        target.click()
     }
 
     func testEveryBusinessPanelCanBeOpened() {
