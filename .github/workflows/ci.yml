@@ -321,6 +321,7 @@ jobs:
         run: bash apps/macos/scripts/build-core.sh
 
       - name: Test the app and the real sidecar
+        id: app_tests
         env:
           TEST_RUNNER_MELONARC_TEST_CORE: ${{ github.workspace }}/apps/macos/MelonARC/Core/melonarc-core
         run: |
@@ -332,6 +333,7 @@ jobs:
             -scheme MelonARC \
             -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath "$RUNNER_TEMP/macos/DerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/macos/Tests.xcresult" \
             2>&1 | tee "$log" || status=$?
           # A skipped real-core test would make this job green for no reason.
           if grep -q 'MELONARC_TEST_CORE is not set' "$log"; then
@@ -339,6 +341,16 @@ jobs:
             status=1
           fi
           exit "$status"
+
+      - name: Upload failed test diagnostics
+        if: failure() && steps.app_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-test-diagnostics
+          path: |
+            ${{ runner.temp }}/macos/Tests.xcresult
+            ${{ runner.temp }}/macos/xcodebuild-test.log
+          retention-days: 14
 
       - name: Build the Release app
         run: |
@@ -369,9 +381,10 @@ jobs:
         run: |
           app="$RUNNER_TEMP/macos/DerivedData/Build/Products/Release/MelonARC.app"
           version="${CANDIDATE_VERSION}.${GITHUB_RUN_NUMBER}"
-          echo "CANDIDATE_DMG=melonarc-${version}-macos-arm64.dmg" >> "$GITHUB_ENV"
+          dmg="melonarc-${version}-macos-arm64.dmg"
+          echo "CANDIDATE_DMG=${dmg}" >> "$GITHUB_ENV"
           bash apps/macos/scripts/package-dmg.sh \
-            "$app" "$RUNNER_TEMP/macos/${CANDIDATE_DMG}"
+            "$app" "$RUNNER_TEMP/macos/${dmg}"
 
       - name: Check and freeze the candidate manifest
         env:
