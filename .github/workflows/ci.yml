@@ -1,9 +1,10 @@
 name: CI
 
-# Four jobs, in the order the repository is built: the Go tree, the desktop
+# Five jobs, in the order the repository is built: the Go tree, the desktop
 # frontend with a real core behind it, the interop gate that dials reference
-# implementations of each protocol, and the native macOS application built
-# with Apple's own toolchain.
+# implementations of each protocol, the native macOS application built with
+# Apple's own toolchain, and a macOS 26 UI pass that exercises the glass branch
+# without producing a release artifact.
 #
 # Nothing here downloads into the repository, and nothing here needs a secret:
 # the reference implementations are fetched into a directory outside the tree and
@@ -273,10 +274,11 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     env:
-      # One pin, recorded verbatim in toolchain.txt. If the runner image moves
-      # to another Xcode, update this single line rather than letting the build
-      # silently pick a different compiler.
-      XCODE_APP: /Applications/Xcode_16.4.app
+      # One pin, recorded verbatim in toolchain.txt. Xcode 26.3 (17C529) ships
+      # the macOS 26.2 SDK and Swift 6.2.3; both macOS runner images list it.
+      # If the image moves, update this line instead of letting the build pick
+      # a compiler without the glass symbols.
+      XCODE_APP: /Applications/Xcode_26.3.app
       MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
@@ -288,7 +290,7 @@ jobs:
 
       - name: Select Xcode and record the toolchain
         run: |
-          set -eu
+          set -euo pipefail
           if [ ! -d "$XCODE_APP" ]; then
             echo "::error::pinned Xcode $XCODE_APP is not installed on this runner"
             ls -d /Applications/Xcode*.app || true
@@ -299,11 +301,18 @@ jobs:
           {
             printf 'xcode-select: '; xcode-select -p
             xcodebuild -version
-            swift --version
+            printf 'sdk: '; xcrun --sdk macosx --show-sdk-version
+            xcrun swift --version
             go version
             sw_vers
             printf 'uname -m: '; uname -m
-          } | tee "$RUNNER_TEMP/macos/toolchain.txt"
+          } 2>&1 | tee "$RUNNER_TEMP/macos/toolchain.txt"
+          toolchain="$RUNNER_TEMP/macos/toolchain.txt"
+          grep -q 'Xcode 26.3' "$toolchain" || { echo "::error::expected Xcode 26.3"; exit 1; }
+          grep -q 'Build version 17C529' "$toolchain" || { echo "::error::expected Xcode build 17C529"; exit 1; }
+          grep -q '^sdk: 26\.2$' "$toolchain" || { echo "::error::expected macOS SDK 26.2"; exit 1; }
+          grep -q 'version 6\.2\.3' "$toolchain" || { echo "::error::expected Swift 6.2.3"; exit 1; }
+          grep -q '^uname -m: arm64$' "$toolchain" || { echo "::error::expected arm64 runner"; exit 1; }
 
       # These are the checks that can also run on Linux. They are repeated here
       # so a project-file or catalog mistake fails before a nine-minute Xcode
@@ -313,6 +322,22 @@ jobs:
           set -eu
           python3 apps/macos/scripts/check-project.py
           python3 apps/macos/scripts/check-strings.py
+
+      # A build-30 style bundle has the icon name but no icon resource. The
+      # release gate must reject that sample instead of sealing an empty icon.
+      - name: Reject an icon name without an icon resource
+        run: |
+          set -euo pipefail
+          fake=$(mktemp -d "${TMPDIR:-/tmp}/melonarc-icon-negative.XXXXXX")
+          mkdir -p "$fake/Empty.app/Contents/Resources"
+          plutil -create xml1 "$fake/Empty.app/Contents/Info.plist"
+          plutil -insert CFBundleIconName -string AppIcon "$fake/Empty.app/Contents/Info.plist"
+          if bash apps/macos/scripts/verify-app-icon.sh "$fake/Empty.app" >/dev/null 2>&1; then
+            echo "::error::the icon check accepted a bundle with no icon resource"
+            exit 1
+          fi
+          rm -rf "$fake"
+          echo "ok: icon check rejects a bundle with an icon name but no image"
 
       # The core is a build input of the Xcode target, which copies it into
       # Contents/MacOS. go.mod selects the compiler; CGO is off so no SDK is
@@ -378,6 +403,7 @@ jobs:
       - name: Sign and package
         env:
           CANDIDATE_VERSION: 0.1.0-preview-candidate
+          XCODEBUILD_RELEASE_LOG: ${{ runner.temp }}/macos/xcodebuild-release.log
         run: |
           app="$RUNNER_TEMP/macos/DerivedData/Build/Products/Release/MelonARC.app"
           version="${CANDIDATE_VERSION}.${GITHUB_RUN_NUMBER}"
@@ -408,4 +434,91 @@ jobs:
             ${{ runner.temp }}/macos/xcodebuild-test.log
             ${{ runner.temp }}/macos/xcodebuild-release.log
           if-no-files-found: error
+          retention-days: 14
+
+  # The glass branch is compiled by the same Xcode as the release job and run
+  # on macOS 26, where the native glass API is available. This job only tests
+  # that branch; the single candidate DMG still comes from the macOS 15 job.
+  macos-glass-ui:
+    name: macOS 26 UI (glass)
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      XCODE_APP: /Applications/Xcode_26.3.app
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Select Xcode and record the toolchain
+        run: |
+          set -euo pipefail
+          if [ ! -d "$XCODE_APP" ]; then
+            echo "::error::pinned Xcode $XCODE_APP is not installed on this runner"
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE_APP"
+          mkdir -p "$RUNNER_TEMP/macos"
+          {
+            printf 'xcode-select: '; xcode-select -p
+            xcodebuild -version
+            printf 'sdk: '; xcrun --sdk macosx --show-sdk-version
+            xcrun swift --version
+            go version
+            sw_vers
+            printf 'uname -m: '; uname -m
+          } 2>&1 | tee "$RUNNER_TEMP/macos/toolchain.txt"
+          toolchain="$RUNNER_TEMP/macos/toolchain.txt"
+          grep -q 'Xcode 26.3' "$toolchain" || { echo "::error::expected Xcode 26.3"; exit 1; }
+          grep -q 'Build version 17C529' "$toolchain" || { echo "::error::expected Xcode build 17C529"; exit 1; }
+          grep -q '^sdk: 26\.2$' "$toolchain" || { echo "::error::expected macOS SDK 26.2"; exit 1; }
+          grep -q 'version 6\.2\.3' "$toolchain" || { echo "::error::expected Swift 6.2.3"; exit 1; }
+          grep -q '^uname -m: arm64$' "$toolchain" || { echo "::error::expected arm64 runner"; exit 1; }
+
+      - name: Check the project and string catalog
+        run: |
+          set -eu
+          python3 apps/macos/scripts/check-project.py
+          python3 apps/macos/scripts/check-strings.py
+
+      - name: Build the darwin/arm64 core
+        run: bash apps/macos/scripts/build-core.sh
+
+      - name: Run the glass UI tests
+        env:
+          TEST_RUNNER_MELONARC_TEST_CORE: ${{ github.workspace }}/apps/macos/MelonARC/Core/melonarc-core
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/macos/xcodebuild-glass-test.log"
+          status=0
+          xcodebuild test \
+            -project apps/macos/MelonARC.xcodeproj \
+            -scheme MelonARC \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/macos/GlassDerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/macos/GlassTests.xcresult" \
+            2>&1 | tee "$log" || status=$?
+          # A skipped real-core test would make this job green for no reason.
+          if grep -q 'MELONARC_TEST_CORE is not set' "$log"; then
+            echo "::error::the real-core tests were skipped, so the sidecar is not verified"
+            status=1
+          fi
+          exit "$status"
+
+      # XCUITest screenshots are XCTest attachments inside the result bundle.
+      - name: Upload glass UI screenshots and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-glass-ui-diagnostics
+          path: |
+            ${{ runner.temp }}/macos/GlassTests.xcresult
+            ${{ runner.temp }}/macos/xcodebuild-glass-test.log
+            ${{ runner.temp }}/macos/toolchain.txt
+          if-no-files-found: warn
           retention-days: 14
