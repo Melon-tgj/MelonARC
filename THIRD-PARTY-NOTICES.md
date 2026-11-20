@@ -4,6 +4,9 @@ What this file is: every third-party component this repository builds on, the ve
 this tree selects, the licence that component ships, and whether its code ends up in the
 binaries `scripts/build-release.sh` produces.
 
+MelonARC itself is distributed under GPL-3.0-only (see LICENSE); this file lists only
+third-party components and does not change the licence of any of them.
+
 - **Checked on** 2026-11-15 (stage 21), Linux/x86_64, Go 1.27.4, against the module cache
   of that toolchain. The four module-graph-only modules that were unverified then were
   downloaded and read on 2026-11-16 (stage 24); see section 2.

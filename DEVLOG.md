@@ -6859,3 +6859,76 @@ Muse 独立核验（分支文件、CI #26/#27 日志、本地 `ci.yml`）全部�
 1. 推送本地提交并上传新 `ci.yml`，重跑 CI：确认测试步骤全绿、Sign and
    package 通过、候选 DMG 与 `.sha256`、`candidate.json` 产出。
 2. macOS job 转绿后按 M4 计划取候选包，进入 M5 VM 验收。
+
+---
+
+## 阶段 M4.7 — 修复候选包冻结校验缺少许可声明（2026-11-20）
+
+开工基线：`HEAD = 99ca31e`（M4.6），工作区干净；`.m47-brief.md` 为未跟踪简报，
+不纳入提交。开工前重读了本文件 M4.6 节与下一步计划、
+`~/workspace/projects/melonarc-macos-plan.md` 的 M4 / M5 两节，并确认全局配置
+自动加载的项目简报已读（含 D1–D11、测试基线与工作红线）。
+
+### CI #29 失败与根因
+
+- CI #29（提交 `0e6d9f23`，2026-11-20 14:11 查完）总耗时 3m40s：Go / Frontend /
+  Interop 三 job 全绿；macOS job 的 UI 测试（31.624 秒，六面板逐个打开并切回
+  overview）、52 项单元测试、4 项 SidecarTests（3.558 秒，未跳过）、Sign and
+  package 全绿，DMG 已生成并校验 VALID（SHA-256
+  `c11a52d5e542a6f9be0d4568948954270581f795d454106be1f95736e574dfa2`）。
+- 唯一失败：最后一步 `Check and freeze the candidate manifest`（0 秒），
+  报错原文：`Error: the bundled notices do not state GPL-3.0-only`（exit 1）。
+  失败步骤后的 Upload-artifact（melonarc-macos-arm64）被跳过，DMG / `.sha256` /
+  `candidate.json` 均不可下载；`candidate.json` 由该失败步骤写入，故候选包未冻结。
+- 根因已定位：`apps/macos/scripts/check-candidate.sh:36` 执行
+  `grep -q 'GPL-3.0-only' "$resources/THIRD-PARTY-NOTICES.md"`；包内该文件即仓库
+  根目录同名文档（Xcode 工程引用 `../../../THIRD-PARTY-NOTICES.md`）。原文件开头
+  只说明它列第三方组件及其许可，从未声明 MelonARC 项目自身的许可，grep 必然失败。
+  同脚本 `Info.plist` 的 `NSHumanReadableCopyright` 校验排在后面，尚未跑到。
+
+### 完成了什么
+
+- 仅在仓库根目录 `THIRD-PARTY-NOTICES.md` 的 `What this file is` 段落之后增加一段：
+  MelonARC 自身以 GPL-3.0-only 发布（见 LICENSE），本文件仅列第三方组件，
+  且不改变任何第三方组件的许可。措辞不声称任何第三方组件是 GPL-3.0-only。
+- `apps/macos/MelonARC/Info.plist:34` 的 `NSHumanReadableCopyright` 原值已是
+  `MelonARC contributors. GPL-3.0-only.`，已含所需字样，未改动。
+- 未改 `check-candidate.sh`、`ci.yml`、任何代码与测试；未改打包逻辑。本阶段无
+  代码改动、无新增扩展点；macOS 原生优先原则仍适用于后续实现，本阶段未涉及
+  新增 Swift / AppKit 实现，无需引用新的苹果官方文档。
+
+### 本地验证结果（全部实跑）
+
+- `grep -q 'GPL-3.0-only' THIRD-PARTY-NOTICES.md`：通过（输出确认 PASS）。
+- `apps/macos/MelonARC/Info.plist` 的 `NSHumanReadableCopyright`：确认值为
+  `MelonARC contributors. GPL-3.0-only.`，含 GPL-3.0-only；无需补写。
+- `python3 apps/macos/scripts/check-project.py`：通过，输出
+  `ok: project has 134 objects, 21 app sources, 20 test sources, 1 UI test sources`。
+- `scripts/build-release.sh` 第 1 节解析只读核对：用脚本第 118–128 行同一段 awk 对
+  `HEAD:THIRD-PARTY-NOTICES.md` 与当前文件抽取模块表并排序比较，结果完全一致
+  （17 行），新增声明位于 `## 1.` 之前，不进入第 1 节，不破坏与核心链接模块的同步校验。
+- `git diff --check`：通过（输出确认 PASS）。
+- 红线 grep：按已知非开源商业产品名清单扫描新增改动行，零命中；未触碰
+  `.github/workflows/ci.yml`，无需用户经网页端重传。
+- Go 与前端套件未重跑：本阶段只改一个文档文件，未触碰 Go / JS / 依赖；基线仍按
+  M4.2/M4.3 记录（Go 1376 / 1355 / 21 / 0，前端离线 82 / 80 / 2 / 0、
+  实时 82 / 82 / 0 / 0）。
+- **未验证项**：`xcodebuild`、签名、DMG 打包、`check-candidate.sh` 全流程、
+  `Check and freeze the candidate manifest` 与候选包冻结，全部待推送后 CI 确认。
+  本机 Linux 无 Xcode / macOS 工具链，不声称上述任一环节已验证。
+
+### 遗留问题
+
+- M4 / M4.1–M4.6 原有挂账不变：系统代理真实接管与恢复、强退恢复、预置代理 /
+  PAC / 绕过列表行为、M5 干净 arm64 VM 验收，以及 Windows / Linux 主线的
+  A2 / B4 / C1 / C2 / C3。
+- 若新一轮 CI 在 Check and freeze 之后暴露新的校验失败（例如 Info.plist 或
+  `candidate.json` 内容问题），按该步日志单独定位，不回退本阶段文档修复。
+
+### 下一步计划
+
+1. 推送本地提交后重跑 CI，确认 `Check and freeze the candidate manifest` 通过，
+   候选 DMG / `.sha256` / `candidate.json` 产出并可下载。
+2. 取候选包进入 M5：用户在自己的 arm64 macOS 虚拟机先验 SHA-256，再做真实使用、
+   强退恢复、预置代理 / PAC / 绕过列表的接管与恢复、真实 Gatekeeper 首开验收；
+   通过后发 v0.1.0-preview.1。任何修复都产生新候选包与新验收记录。
