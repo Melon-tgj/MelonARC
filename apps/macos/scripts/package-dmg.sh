@@ -35,7 +35,7 @@ codesign --verify --deep --strict --verbose=2 "$app"
 # must name the same resource with the same digest.
 icon_work=$(mktemp -d "${TMPDIR:-/tmp}/melonarc-icon-report.XXXXXX")
 bash "$here/verify-app-icon.sh" "$app" "${XCODEBUILD_RELEASE_LOG:-}" \
-  > "$icon_work/signed.txt"
+  | tee "$icon_work/signed.txt"
 
 hdiutil create -volname "${name%.app}" -srcfolder "$app" -ov -format UDZO "$dmg"
 hdiutil verify "$dmg"
@@ -60,7 +60,7 @@ codesign --verify --deep --strict --verbose=2 "$mounted"
 bash "$here/verify-binaries.sh" \
   "$mounted/Contents/MacOS/${name%.app}" \
   "$mounted/Contents/MacOS/melonarc-core"
-bash "$here/verify-app-icon.sh" "$mounted" > "$icon_work/mounted.txt"
+bash "$here/verify-app-icon.sh" "$mounted" | tee "$icon_work/mounted.txt"
 if ! diff -u "$icon_work/signed.txt" "$icon_work/mounted.txt"; then
   echo "::error::the app icon differs between the signed app and the mounted DMG copy"
   exit 1

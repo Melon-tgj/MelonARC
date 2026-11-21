@@ -7104,3 +7104,36 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
   无法实跑该脚本，真实结果待 CI 确认。
 - **待验证**：本地提交后由 Muse 走快照流程推送，重跑 CI 确认 Sign and package
   步骤的图标校验通过、唯一候选 DMG 正常产出。
+
+### M5.1 修复记录（CI #36 图标校验输出可见性，2026-11-20）
+
+- **定位过程**：CI 运行 #36（提交 `045dd027`）仍红；`macos-15` 作业 Sign and
+  package 步骤日志仅 20 行，codesign 对 `melonarc-core` 与 `.app` 的签名、
+  以及 `--verify --deep --strict` 校验全部通过，随后无任何错误行直接
+  `Process completed with exit code 1`。按 `package-dmg.sh`（`set -euo pipefail`）
+  顺序，`codesign --verify` 之后第一条命令就是 `verify-app-icon.sh`，日志中
+  也没有任何 hdiutil 输出，故失败发生在图标校验，DMG 创建根本未执行。
+- **根因**：`package-dmg.sh` 原第 37–38 行把 `verify-app-icon.sh` 的全部 stdout
+  重定向到 runner 临时目录下的 `$icon_work/signed.txt`，而该脚本的 `fail()`
+  与成功报告都走 stdout；后续步骤全部跳过、未上传该报告，runner 已销毁，
+  因此确切的失败分支在 GitHub 日志里不可读。这是诊断可见性问题，并非图标
+  本身已被定罪：构建日志中 `unassigned child` 与非法槽位报告 0 命中，actool
+  已生成 thinned 的 `AppIcon.icns` 与 `Assets.car`，Info.plist 声明
+  `CFBundleIconName=AppIcon`，Contents.json 十槽位齐全；剩余候选分支（`.icns`
+  不在 Resources 内、iconutil 解码失败、必需表示缺失或像素不对、缺 @2x、
+  assetutil 读 `Assets.car` 失败）仅为推断，未确认。
+- **修复内容**：只改 `apps/macos/scripts/package-dmg.sh` 两行——签名后的图标
+  校验 `> "$icon_work/signed.txt"` 改为 `| tee "$icon_work/signed.txt"`；挂载副本
+  上的校验 `> "$icon_work/mounted.txt"` 改为 `| tee "$icon_work/mounted.txt"`。
+  文件开头 `set -euo pipefail`（第 5 行）已确认启用，管道中任一命令失败仍使
+  脚本退出；`tee` 同时把校验输出写进日志与同名文件，后面 `diff -u` 仍能读到
+  两份报告。`ci.yml`、图标文件、`verify-app-icon.sh` 本身、其他脚本与文件、
+  Go 代码均未改动。
+- **本地验证**：`bash -n` 通过，`git diff --check` 干净，复核了 `set -euo pipefail`
+  与两处写入文件的路径不变；本机是 Linux、没有 `iconutil` / `sips` / `hdiutil`，
+  无法实跑，真实结果待 CI 确认。Go job 另有 `TestRealityRejectsWrongCredential`
+  （`reality_handshake_test.go:173`，dial succeeded、应拒未拒）失败，M5.1 未动
+  Go 代码且 #35 同轮曾绿，疑似偶发，本次不改，待重跑确认。
+- **待验证**：本地提交后由 Muse 走快照流程推送，重跑 CI 时直接从 Sign and
+  package 日志读取图标校验的实际输出以确定失败分支；若图标校验通过则确认
+  唯一候选 DMG 产出，同时观察 Go 测试是否复现。
