@@ -57,6 +57,12 @@
 		1A0000000000000000000239 /* SECURITY.md in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000127 /* SECURITY.md */; };
 		1A000000000000000000023A /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000128 /* README.md */; };
 		1A000000000000000000023B /* PRIVACY.md in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000129 /* PRIVACY.md */; };
+		1A0000000000000000000240 /* SidebarPanelButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000130 /* SidebarPanelButton.swift */; };
+		1A0000000000000000000241 /* PanelStateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000131 /* PanelStateView.swift */; };
+		1A0000000000000000000242 /* SubscriptionEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000132 /* SubscriptionEditorView.swift */; };
+		1A0000000000000000000243 /* PanelCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000133 /* PanelCard.swift */; };
+		1A0000000000000000000244 /* PanelDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000134 /* PanelDetailView.swift */; };
+		1A0000000000000000000245 /* PanelStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000135 /* PanelStateTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -135,6 +141,12 @@
 		1A0000000000000000000127 /* SECURITY.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = ../../../SECURITY.md; sourceTree = "<group>"; };
 		1A0000000000000000000128 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = ../../../README.md; sourceTree = "<group>"; };
 		1A0000000000000000000129 /* PRIVACY.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = ../../../PRIVACY.md; sourceTree = "<group>"; };
+		1A0000000000000000000130 /* SidebarPanelButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarPanelButton.swift; sourceTree = "<group>"; };
+		1A0000000000000000000131 /* PanelStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelStateView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000132 /* SubscriptionEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionEditorView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000133 /* PanelCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelCard.swift; sourceTree = "<group>"; };
+		1A0000000000000000000134 /* PanelDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelDetailView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000135 /* PanelStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelStateTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -238,6 +250,11 @@
 				1A0000000000000000000112 /* PanelPlaceholderView.swift */,
 				1A0000000000000000000113 /* SettingsView.swift */,
 				1A0000000000000000000121 /* PanelViews.swift */,
+				1A0000000000000000000130 /* SidebarPanelButton.swift */,
+				1A0000000000000000000131 /* PanelStateView.swift */,
+				1A0000000000000000000132 /* SubscriptionEditorView.swift */,
+				1A0000000000000000000133 /* PanelCard.swift */,
+				1A0000000000000000000134 /* PanelDetailView.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -272,6 +289,7 @@
 				1A000000000000000000011F /* SidecarTests.swift */,
 				1A0000000000000000000122 /* APIModelsTests.swift */,
 				1A0000000000000000000123 /* LocalizationTests.swift */,
+				1A0000000000000000000135 /* PanelStateTests.swift */,
 			);
 			path = MelonARCTests;
 			sourceTree = "<group>";
@@ -437,6 +455,11 @@
 				1A0000000000000000000213 /* SettingsView.swift in Sources */,
 				1A0000000000000000000231 /* PanelModels.swift in Sources */,
 				1A0000000000000000000232 /* PanelViews.swift in Sources */,
+				1A0000000000000000000240 /* SidebarPanelButton.swift in Sources */,
+				1A0000000000000000000241 /* PanelStateView.swift in Sources */,
+				1A0000000000000000000242 /* SubscriptionEditorView.swift in Sources */,
+				1A0000000000000000000243 /* PanelCard.swift in Sources */,
+				1A0000000000000000000244 /* PanelDetailView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -464,6 +487,7 @@
 				1A0000000000000000000230 /* SidecarTests.swift in Sources */,
 				1A0000000000000000000234 /* APIModelsTests.swift in Sources */,
 				1A0000000000000000000235 /* LocalizationTests.swift in Sources */,
+				1A0000000000000000000245 /* PanelStateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

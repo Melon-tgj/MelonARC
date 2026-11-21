@@ -260,7 +260,7 @@ func run(args []string) error {
 	// The reloader keeps the probe context alive for the groups it starts, and
 	// the state reaches it through the API. Both are wired before the API
 	// starts answering, so a reload request cannot arrive at a nil function.
-	state.reload = (&reloader{
+	subReloader := &reloader{
 		path:     cfg.Path,
 		handler:  handler,
 		state:    state,
@@ -270,7 +270,9 @@ func run(args []string) error {
 		logger:   logger,
 		subs:     subs,
 		ctx:      ctx,
-	}).reload
+	}
+	state.reload = subReloader.reload
+	state.createSubscription = subReloader.createSubscription
 
 	// The refresh loop owns subscription updates from here on. A refresh that
 	// changes the node list goes through the same reload path an API request

@@ -496,6 +496,17 @@ type SubscriptionListView struct {
 	Subscriptions []SubscriptionView `json:"subscriptions"`
 }
 
+// SubscriptionCreateRequest is the body of POST /v1/subscriptions.
+//
+// IntervalSeconds mirrors the interval a [Subscription] line carries. Omitting
+// it selects the six-hour default, so a shell only has to send it when the user
+// changes the field.
+type SubscriptionCreateRequest struct {
+	Name            string `json:"name"`
+	URL             string `json:"url"`
+	IntervalSeconds int64  `json:"interval_seconds,omitempty"`
+}
+
 // SkippedListView is one page of a subscription's skip detail.
 //
 // Refreshed separates "nothing was skipped" from "no refresh has completed
@@ -583,6 +594,12 @@ type Provider interface {
 	// configuration does not declare is reported as NotFound. A failed fetch
 	// keeps the previous nodes and is reported in the view, not as an error.
 	RefreshSubscription(ctx context.Context, name string) (SubscriptionRefreshView, error)
+	// CreateSubscription writes one [Subscription] declaration, fetches it and
+	// installs the result in one atomic step. It reports created=false for a
+	// retried create of the same declaration. A name with a different
+	// declaration is a Conflict; an import or apply failure is Unprocessable
+	// and leaves the running daemon untouched.
+	CreateSubscription(ctx context.Context, req SubscriptionCreateRequest) (SubscriptionView, bool, error)
 	// History describes the observation history: how much it holds and
 	// whether its last write succeeded.
 	History(ctx context.Context) HistoryView

@@ -212,10 +212,17 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/inbound", s.only(http.MethodGet, s.handleInbound))
 	mux.HandleFunc("/v1/failures", s.only(http.MethodGet, s.handleFailures))
 	mux.HandleFunc("/v1/dns", s.only(http.MethodGet, s.handleDNS))
-	// The subscription summary and skip detail are read-only: the daemon owns
-	// the refresh schedule. The one write endpoint forces a named subscription
-	// to fetch now; it keeps the previous nodes if the fetch fails.
-	mux.HandleFunc("/v1/subscriptions", s.only(http.MethodGet, s.handleSubscriptions))
+	// The summary is a read and the same path also accepts one write: adding a
+	// declaration. The refresh schedule itself is still owned by the daemon;
+	// the separate refresh endpoint only forces one named subscription to fetch
+	// now and keeps its previous nodes if that fetch fails.
+	mux.HandleFunc("/v1/subscriptions", s.onlyMethods(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.handleSubscriptionCreate(w, r)
+			return
+		}
+		s.handleSubscriptions(w, r)
+	}, http.MethodGet, http.MethodPost))
 	mux.HandleFunc("/v1/subscriptions/{name}/skipped", s.only(http.MethodGet, s.handleSubscriptionSkipped))
 	mux.HandleFunc("/v1/subscriptions/{name}/refresh", s.only(http.MethodPost, s.handleSubscriptionRefresh))
 	mux.HandleFunc("/v1/audit", s.only(http.MethodGet, s.handleAudit))
@@ -261,14 +268,23 @@ func (s *Server) authorised(r *http.Request) bool {
 // only wraps a handler so that other methods get a JSON 405 instead of the
 // plain text one the mux would produce.
 func (s *Server) only(method string, next http.HandlerFunc) http.HandlerFunc {
+	return s.onlyMethods(next, method)
+}
+
+// onlyMethods is only with more than one accepted verb. The Allow header lists
+// every verb the route accepts, so an old client that tries to write with GET
+// can discover POST without guessing.
+func (s *Server) onlyMethods(next http.HandlerFunc, methods ...string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != method {
-			w.Header().Set("Allow", method)
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
-				fmt.Sprintf("%s expects %s", r.URL.Path, method))
-			return
+		for _, method := range methods {
+			if r.Method == method {
+				next(w, r)
+				return
+			}
 		}
-		next(w, r)
+		w.Header().Set("Allow", strings.Join(methods, ", "))
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			fmt.Sprintf("%s expects %s", r.URL.Path, strings.Join(methods, " or ")))
 	}
 }
 

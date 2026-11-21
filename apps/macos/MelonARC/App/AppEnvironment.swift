@@ -22,6 +22,17 @@ final class AppEnvironment: ObservableObject {
         case unprotected(String)
     }
 
+    struct BootstrapEvent: Equatable {
+        enum Kind: Equatable {
+            case written
+            case failed
+        }
+
+        let kind: Kind
+        let path: String
+        let detail: String
+    }
+
     let settings: ShellSettings?
     /// Why the settings could not be resolved at all. Not a reason to refuse to
     /// show a window; it is the reason the window shows one sentence.
@@ -40,6 +51,7 @@ final class AppEnvironment: ObservableObject {
     @Published private(set) var snapshot = CoreSnapshot()
     /// A line about the first-run configuration, when something was said about it.
     @Published private(set) var bootstrapNotice: String?
+    @Published private(set) var bootstrapEvent: BootstrapEvent?
     /// A launch-time refusal, such as a data-directory change. The core is not
     /// started in that case, and the window says so instead of showing stale
     /// state from a directory this launch is not allowed to use.
@@ -115,15 +127,19 @@ final class AppEnvironment: ObservableObject {
         do {
             let wrote = try FirstRunConfig.ensure(at: settings.configurationPath)
             if wrote {
-                bootstrapNotice = Localization.format(
-                    "startup.first_config_written",
-                    settings.configurationPath.path
+                bootstrapNotice = Localization.text("startup.first_config_written_short")
+                bootstrapEvent = BootstrapEvent(
+                    kind: .written,
+                    path: settings.configurationPath.path,
+                    detail: Localization.text("startup.first_config_written_short")
                 )
             }
         } catch {
-            bootstrapNotice = Localization.format(
-                "startup.first_config_failed",
-                error.localizedDescription
+            bootstrapNotice = Localization.text("startup.first_config_failed_short")
+            bootstrapEvent = BootstrapEvent(
+                kind: .failed,
+                path: settings.configurationPath.path,
+                detail: error.localizedDescription
             )
         }
 

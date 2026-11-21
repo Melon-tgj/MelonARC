@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -188,6 +191,137 @@ func (r *reloader) reload(ctx context.Context) (api.ReloadView, error) {
 	return view, nil
 }
 
+// createSubscription adds one declaration and installs its nodes in the same
+// atomic step as a reload.
+//
+// The network fetch is kept outside the commit section and is applied to a fork
+// of the subscription manager, so a provider that is down or a body with no
+// usable links cannot change what the daemon is running. The commit section is
+// short: check that the file is still the one we read, write it, swap the
+// manager's state, then install the routing artefacts under the same lock a pin
+// uses.
+func (r *reloader) createSubscription(ctx context.Context, req api.SubscriptionCreateRequest) (api.SubscriptionView, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.subs == nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_unavailable",
+			"subscription management is not available in this process")
+	}
+	path := r.path
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("config_not_readable", err.Error())
+	}
+	patch := config.SubscriptionPatch{
+		Name:     strings.TrimSpace(req.Name),
+		URL:      strings.TrimSpace(req.URL),
+		Interval: time.Duration(req.IntervalSeconds) * time.Second,
+	}
+	if err := config.ValidateSubscriptionPatch(patch); err != nil {
+		return api.SubscriptionView{}, false, api.BadRequest("invalid_subscription", err.Error())
+	}
+	updated, changed, err := config.EditSubscription(original, patch)
+	if err != nil {
+		var conflict *config.SubscriptionConflict
+		if errors.As(err, &conflict) {
+			return api.SubscriptionView{}, false, api.Conflict("subscription_conflict", err.Error())
+		}
+		return api.SubscriptionView{}, false, api.BadRequest("invalid_subscription", err.Error())
+	}
+	if !changed {
+		return r.state.subscriptionView(patch.Name), false, nil
+	}
+	cfg, err := config.Parse(updated)
+	if err != nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_apply_failed", err.Error())
+	}
+	if err := cfg.Validate(); err != nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_apply_failed", err.Error())
+	}
+	cfg.Path, cfg.BaseDir = path, r.state.snapshot().cfg.BaseDir
+
+	staging := r.subs.Fork()
+	if err := staging.Import(ctx, cfg); err != nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_import_failed",
+			fmt.Sprintf("%v\nthe previous configuration is still in force", err))
+	}
+	program, err := compileRules(cfg, r.datasets, r.logger)
+	if err != nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_apply_failed", err.Error())
+	}
+	resolver, err := buildResolver(cfg)
+	if err != nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_apply_failed", err.Error())
+	}
+	dialers, err := buildDialers(cfg, resolver, r.logger)
+	if err != nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_apply_failed", err.Error())
+	}
+	warnUnusableProtocols(cfg, r.logger)
+	registry, err := buildRegistry(cfg, dialers)
+	if err != nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_apply_failed", err.Error())
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			registry.Close()
+		}
+	}()
+	router, err := inbound.NewPolicyRouter(registry, dialers)
+	if err != nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_apply_failed", err.Error())
+	}
+	next := stateSnapshot{
+		cfg: cfg, program: program, registry: registry,
+		resolver: resolver, dialers: dialers,
+	}
+	startGroups(r.ctx, registry, r.logger)
+
+	start := time.Now()
+	previous := r.state.snapshot()
+	r.state.commitMu.Lock()
+	err = config.CheckFileVersion(path, original)
+	if err == nil {
+		err = config.ReplaceFile(path, original, updated)
+	}
+	if err != nil {
+		r.state.commitMu.Unlock()
+		if errors.Is(err, config.ErrConfigChanged) {
+			return api.SubscriptionView{}, false, api.Conflict("config_changed",
+				"the configuration was edited while the subscription was being fetched; retry the request")
+		}
+		return api.SubscriptionView{}, false, api.Unprocessable("config_not_written", err.Error())
+	}
+	r.subs.Adopt(staging)
+	replaced, dropped, err := r.commitLocked(next, router)
+	r.state.commitMu.Unlock()
+	if err != nil {
+		_ = config.ReplaceFile(path, updated, original)
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_apply_failed",
+			fmt.Sprintf("%v\nthe previous configuration is still in force", err))
+	}
+	committed = true
+
+	if replaced.registry != nil {
+		replaced.registry.Close()
+	}
+	if replaced.dialers != nil && replaced.dialers != dialers {
+		replaced.dialers.Disown()
+	}
+	r.level.Set(logLevel(cfg.General.LogLevel))
+	r.logger.Info("subscription created", "subscription", patch.Name,
+		"nodes", len(cfg.Proxies)-len(previous.cfg.Proxies),
+		"elapsed", time.Since(start).Round(time.Millisecond))
+	for _, detail := range dropped {
+		r.logger.Warn("a pinned policy member did not survive the subscription create", "detail", detail)
+	}
+	r.state.recordReload(path, true, fmt.Sprintf("subscription %s created", patch.Name))
+
+	return r.state.subscriptionView(patch.Name), true, nil
+}
+
 // commit installs a finished rebuild, and reports what it replaced together with
 // the pins it could not keep.
 //
@@ -207,7 +341,12 @@ func (r *reloader) reload(ctx context.Context) (api.ReloadView, error) {
 func (r *reloader) commit(next stateSnapshot, router inbound.Router) (stateSnapshot, []string, error) {
 	r.state.commitMu.Lock()
 	defer r.state.commitMu.Unlock()
+	return r.commitLocked(next, router)
+}
 
+// commitLocked is commit with the shared lock already held. A create uses it to
+// keep the version check, the file write and the state swap in one section.
+func (r *reloader) commitLocked(next stateSnapshot, router inbound.Router) (stateSnapshot, []string, error) {
 	// The pins of the registry that is still in force, read now rather than when
 	// the rebuild began: a switch that landed during the rebuild is exactly the
 	// one that must not be lost.

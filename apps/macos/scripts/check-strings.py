@@ -62,6 +62,7 @@ RUNTIME_FAMILIES = [
     "error.http_status",
     "error.decoding",
     "error.unknown_subscription",
+    "error.subscription_refresh_failed",
     "error.not_found",
     "error.method_not_allowed",
     "error.bad_request",

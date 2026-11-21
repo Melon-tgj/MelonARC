@@ -30,6 +30,11 @@ final class LocalizationTests: XCTestCase {
             "error.unprocessable_entity", "error.internal_error",
             "error.data_directory_changed", "common.not_implemented",
             "settings.system_proxy.enabled", "settings.tun.note",
+            "subscriptions.action.add", "subscriptions.empty.title",
+            "connections.empty.title", "panel.state.loading", "panel.state.retry",
+            "overview.proxy.unknown", "overview.state.unknown",
+            "settings.section.network", "settings.section.diagnostics",
+            "settings.section.about", "error.subscription_refresh_failed",
         ]
         for key in keys {
             XCTAssertFalse(try value(key, language: "en", in: strings).isEmpty, key)

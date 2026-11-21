@@ -28,6 +28,9 @@ const (
 	ActionConfigUpdate = "config.update"
 	// ActionSubscriptionRefresh forces one subscription to fetch now.
 	ActionSubscriptionRefresh = "subscription.refresh"
+	// ActionSubscriptionCreate writes one [Subscription] declaration and
+	// installs the nodes it contributes.
+	ActionSubscriptionCreate = "subscription.create"
 )
 
 // The outcomes an audit entry can carry.

@@ -38,6 +38,10 @@ type fakeProvider struct {
 	skippedErr    error
 	refresh       SubscriptionRefreshView
 	refreshErr    error
+	createView    SubscriptionView
+	createCreated bool
+	createErr     error
+	lastCreate    SubscriptionCreateRequest
 	lastLimit     int
 	lastReq       ExplainRequest
 	lastFailLimit int
@@ -118,6 +122,14 @@ func (f *fakeProvider) RefreshSubscription(_ context.Context, name string) (Subs
 	view := f.refresh
 	view.Subscription = name
 	return view, f.refreshErr
+}
+func (f *fakeProvider) CreateSubscription(_ context.Context, req SubscriptionCreateRequest) (SubscriptionView, bool, error) {
+	f.lastCreate = req
+	view := f.createView
+	if view.Name == "" {
+		view.Name = req.Name
+	}
+	return view, f.createCreated, f.createErr
 }
 
 func newTestServer(t *testing.T, p Provider) *Server {

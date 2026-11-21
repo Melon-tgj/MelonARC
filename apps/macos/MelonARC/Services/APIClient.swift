@@ -31,6 +31,10 @@ enum APIEndpoint: String, CaseIterable {
     static func subscriptionRefresh(_ name: String) -> String {
         "/v1/subscriptions/\(escapedSegment(name))/refresh"
     }
+
+    static func subscriptionSkipped(_ name: String, offset: Int, limit: Int) -> String {
+        "/v1/subscriptions/\(escapedSegment(name))/skipped?offset=\(offset)&limit=\(limit)"
+    }
 }
 
 /// A call that could not be completed.
@@ -145,7 +149,7 @@ final class APIClient {
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
+        configuration.timeoutIntervalForResource = 35
         configuration.waitsForConnectivity = false
         self.session = URLSession(configuration: configuration, delegate: redirects, delegateQueue: nil)
     }
@@ -174,8 +178,22 @@ final class APIClient {
         try await send(.get, APIEndpoint.subscriptions.rawValue)
     }
 
+    func createSubscription(_ request: SubscriptionCreateRequest) async throws -> SubscriptionView {
+        try await send(
+            .post,
+            APIEndpoint.subscriptions.rawValue,
+            body: AnyEncodable(request),
+            accepted: [200, 201],
+            timeout: 35
+        )
+    }
+
     func refreshSubscription(_ name: String) async throws -> SubscriptionRefreshView {
         try await send(.post, APIEndpoint.subscriptionRefresh(name))
+    }
+
+    func subscriptionSkipped(_ name: String, offset: Int, limit: Int) async throws -> SubscriptionSkippedView {
+        try await send(.get, APIEndpoint.subscriptionSkipped(name, offset: offset, limit: limit))
     }
 
     func connections(limit: Int) async throws -> ConnectionListView {
@@ -209,7 +227,9 @@ final class APIClient {
     private func send<T: Decodable>(
         _ method: Method,
         _ path: String,
-        body: AnyEncodable? = nil
+        body: AnyEncodable? = nil,
+        accepted: Set<Int> = [200],
+        timeout: TimeInterval? = nil
     ) async throws -> T {
         let token = try readToken()
         guard let base = address.baseURL, let url = URL(string: path, relativeTo: base)?.absoluteURL else {
@@ -218,7 +238,7 @@ final class APIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = method.rawValue
-        request.timeoutInterval = timeout
+        request.timeoutInterval = timeout ?? self.timeout
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
@@ -242,13 +262,14 @@ final class APIClient {
         guard let http = response as? HTTPURLResponse else {
             throw APIError.status(0, nil)
         }
-        switch http.statusCode {
-        case 200:
+        if accepted.contains(http.statusCode) {
             do {
                 return try Self.makeDecoder().decode(T.self, from: data)
             } catch {
                 throw APIError.decoding(String(describing: error))
             }
+        }
+        switch http.statusCode {
         case 401, 403:
             throw APIError.unauthorized
         default:

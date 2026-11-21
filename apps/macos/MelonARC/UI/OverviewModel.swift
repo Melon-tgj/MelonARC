@@ -1,31 +1,25 @@
 import Combine
 import Foundation
 
-/// The overview's own state: what the last authenticated read said.
-///
-/// The polling lives here rather than in the view so that leaving the panel stops it
-/// — a settings window or a hidden window must not keep asking the core for a status
-/// it is not drawing. The interval is a compromise the previous page also made: two
-/// seconds is fast enough to see a core start or die, slow enough that a window left
-/// open overnight costs nothing worth measuring.
 final class OverviewModel: ObservableObject {
     static let refreshInterval: TimeInterval = 2
 
     @Published private(set) var status: StatusView?
     @Published private(set) var configuration: ConfigurationView?
-    @Published private(set) var failure: APIError?
-    @Published private(set) var lastUpdated: Date?
+    @Published private(set) var statusFailure: APIError?
+    @Published private(set) var configurationFailure: APIError?
+    @Published private(set) var lastStatusSuccess: Date?
+    @Published private(set) var lastConfigurationSuccess: Date?
 
     private let client: APIClient?
     private var timer: Timer?
     private var refreshing = false
+    private var generation = 0
 
     init(client: APIClient?) {
         self.client = client
     }
 
-    /// Starts the timer, and refreshes once immediately so the panel is never blank
-    /// for a whole interval.
     func start() {
         guard timer == nil, client != nil else { return }
         refresh()
@@ -39,37 +33,45 @@ final class OverviewModel: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        generation += 1
     }
 
-    /// One read of `/v1/status`, and of `/v1/config` when the first succeeded. A
-    /// configuration read that fails on its own is not worth an error banner: the
-    /// status is the answer the panel exists for.
     func refresh() {
         guard let client, !refreshing else { return }
         refreshing = true
+        generation += 1
+        let current = generation
         Task { [weak self] in
-            var status: StatusView?
-            var configuration: ConfigurationView?
-            var failure: APIError?
-            do {
-                status = try await client.status()
-                configuration = try? await client.configuration()
-            } catch let error as APIError {
-                failure = error
-            } catch {
-                failure = .unreachable(error.localizedDescription)
-            }
+            guard let self else { return }
+            async let status = client.status()
+            async let configuration = client.configuration()
+            let statusResult = await Result { try await status }
+            let configurationResult = await Result { try await configuration }
             await MainActor.run {
-                self?.refreshing = false
-                self?.failure = failure
-                if let status {
-                    self?.status = status
-                    self?.configuration = configuration
-                    self?.lastUpdated = Date()
+                guard current == self.generation else { return }
+                self.refreshing = false
+                switch statusResult {
+                case .success(let value):
+                    self.status = value
+                    self.statusFailure = nil
+                    self.lastStatusSuccess = Date()
+                case .failure(let error):
+                    self.statusFailure = self.map(error)
                 }
-                // A failed read keeps the last known values on screen: blanking the
-                // panel would hide that the core had been answering a second ago.
+                switch configurationResult {
+                case .success(let value):
+                    self.configuration = value
+                    self.configurationFailure = nil
+                    self.lastConfigurationSuccess = Date()
+                case .failure(let error):
+                    self.configurationFailure = self.map(error)
+                }
             }
         }
+    }
+
+    private func map(_ error: Error) -> APIError {
+        if let error = error as? APIError { return error }
+        return .unreachable(error.localizedDescription)
     }
 }

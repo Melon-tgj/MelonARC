@@ -126,6 +126,7 @@ func assembleCore(t *testing.T, cfgPath string) *testCore {
 		ctx:     ctx,
 	}
 	state.reload = reload.reload
+	state.createSubscription = reload.createSubscription
 	startGroups(ctx, registry, testLogger())
 
 	srv, err := api.New(api.Options{Addr: "127.0.0.1:0", Provider: state, Version: "test", Logger: testLogger()})

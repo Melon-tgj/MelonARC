@@ -50,4 +50,30 @@ final class APIModelsTests: XCTestCase {
             "/v1/subscriptions/a%2Fb/refresh"
         )
     }
+
+    func testConnectionPagesDecodeBothEmptyAndPopulatedBodies() throws {
+        let empty = try decoder().decode(ConnectionListView.self, from: Data(#"{"count":0,"connections":[]}"#.utf8))
+        XCTAssertEqual(empty.count, 0)
+        XCTAssertTrue(empty.connections.isEmpty)
+
+        let raw = """
+        {"count":1,"connections":[{"time":"2026-11-21T10:00:00Z","protocol":"HTTP",
+        "target":"example.org:443","network":"tcp","rule":"final","policy":"direct",
+        "outbound":"direct","up":12,"down":34,"duration_ms":7.5}]}
+        """
+        let page = try decoder().decode(ConnectionListView.self, from: Data(raw.utf8))
+        XCTAssertEqual(page.connections.count, 1)
+        XCTAssertEqual(page.connections.first?.protocolName, "HTTP")
+        XCTAssertEqual(page.connections.first?.durationMs, 7.5)
+    }
+
+    func testSubscriptionCreateRequestUsesTheCoreFieldName() throws {
+        let request = SubscriptionCreateRequest(name: "demo", url: "https://example.org/feed", intervalSeconds: 21600)
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let object = try JSONSerialization.jsonObject(with: encoder.encode(request)) as? [String: Any]
+        XCTAssertEqual(object?["name"] as? String, "demo")
+        XCTAssertEqual(object?["url"] as? String, "https://example.org/feed")
+        XCTAssertEqual(object?["interval_seconds"] as? Int, 21600)
+    }
 }

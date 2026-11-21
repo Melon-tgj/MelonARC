@@ -175,6 +175,27 @@ struct SubscriptionListView: Decodable, Equatable {
     let subscriptions: [SubscriptionView]
 }
 
+struct SubscriptionCreateRequest: Encodable, Equatable {
+    let name: String
+    let url: String
+    let intervalSeconds: Int64?
+}
+
+struct SubscriptionSkippedEntryView: Decodable, Equatable {
+    let item: Int
+    let reason: String
+}
+
+struct SubscriptionSkippedView: Decodable, Equatable {
+    let subscription: String
+    let refreshed: Bool
+    let fetchedAt: String?
+    let total: Int
+    let offset: Int
+    let limit: Int
+    let skipped: [SubscriptionSkippedEntryView]
+}
+
 struct SubscriptionRefreshView: Decodable, Equatable {
     let subscription: String
     let refreshed: Bool
@@ -202,7 +223,7 @@ struct ConnectionView: Decodable, Equatable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case time, target, network, rule, policy, outbound, up, down
         case protocolName = "protocol"
-        case durationMs = "duration_ms"
+        case durationMs
     }
 
     var id: String { "\(time)-\(protocolName)-\(target)-\(network)" }

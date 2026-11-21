@@ -1,8 +1,5 @@
 import SwiftUI
 
-/// One label/value pair. A fixed label column keeps the values aligned without a
-/// grid, which is the kind of layout that survives a localization turning a label
-/// into a longer word.
 struct InfoRow: View {
     let titleKey: String
     let value: String
@@ -20,25 +17,28 @@ struct InfoRow: View {
     }
 }
 
-/// The overview: the one panel this milestone can fill, and the proof that the
-/// native window reaches the real core with a real token.
-///
-/// Everything drawn here comes from an authenticated read. The state of the process
-/// comes from the supervisor, which is the only thing that knows whether the child
-/// exists; the numbers below it come from `/v1/status`, which is the only thing that
-/// knows whether it is answering.
 struct OverviewView: View {
     @ObservedObject var model: OverviewModel
     @ObservedObject var environment: AppEnvironment
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 14) {
                 header
-                coreGroup
-                systemProxyGroup
-                if let failure = model.failure {
-                    errorGroup(failure)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 14) {
+                        runtimeCard
+                        takeoverCard
+                        routingCard
+                    }
+                    VStack(alignment: .leading, spacing: 14) {
+                        runtimeCard
+                        takeoverCard
+                        routingCard
+                    }
+                }
+                if statusFailure != nil || configurationFailure != nil {
+                    problemCard
                 }
                 footer
             }
@@ -47,8 +47,6 @@ struct OverviewView: View {
         }
         .navigationTitle(Text("panel.overview.title"))
     }
-
-    // MARK: - Sections
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -65,108 +63,132 @@ struct OverviewView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("overview.action.restart") {
+            NavigationLink(Localization.text("overview.action.details"), value: PanelDetailRoute.overview)
+            .buttonStyle(.bordered)
+            Button(Localization.text("overview.action.restart")) {
                 environment.restartCore()
             }
             .disabled(environment.supervisor == nil)
         }
     }
 
-    private var coreGroup: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 7) {
-                InfoRow(titleKey: "overview.field.version", value: model.status?.version ?? "—")
-                InfoRow(titleKey: "overview.field.uptime",
-                        value: model.status.map { Formatting.uptime($0.uptimeSeconds) } ?? "—")
-                InfoRow(titleKey: "overview.field.rules",
-                        value: model.status.map { String($0.ruleCount) } ?? "—")
-                InfoRow(titleKey: "overview.field.policies",
-                        value: model.status.map { String($0.policyCount) } ?? "—")
-                InfoRow(titleKey: "overview.field.config",
-                        value: Formatting.path(model.status?.configPath ?? model.configuration?.path))
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 2)
-        } label: {
-            Label {
-                Text("overview.section.core")
-            } icon: {
-                Image(systemName: "gauge")
+    private var runtimeCard: some View {
+        PanelCard(
+            titleKey: "overview.section.runtime",
+            symbol: "gauge",
+            actions: { EmptyView() }
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                InfoRow(titleKey: "overview.field.version", value: model.status?.version ?? unknownValue)
+                InfoRow(
+                    titleKey: "overview.field.uptime",
+                    value: model.status.map { Formatting.uptime($0.uptimeSeconds) } ?? unknownValue
+                )
+                if let statusFailure = model.statusFailure {
+                    Text(Localization.format("overview.status.error", Localization.text("error.\(statusFailure.code)")))
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                if let updated = model.lastStatusSuccess {
+                    Text(Localization.format("overview.updated.status", timeString(updated)))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
     }
 
-    private var systemProxyGroup: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 7) {
+    private var takeoverCard: some View {
+        PanelCard(
+            titleKey: "overview.section.takeover",
+            symbol: "network",
+            actions: { EmptyView() }
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
                 InfoRow(titleKey: "overview.field.system_proxy_state", value: proxyStateText)
-                InfoRow(titleKey: "overview.field.system_proxy",
-                        value: booleanText(model.configuration?.systemProxy))
-                InfoRow(titleKey: "overview.field.pending_restart", value: pendingRestartText)
-                if let detail = model.configuration?.systemProxyState.detail, !detail.isEmpty {
-                    Text(Localization.format("overview.recovery_detail", detail))
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .textSelection(.enabled)
-                }
                 InfoRow(titleKey: "overview.field.inbound", value: inboundText)
                 InfoRow(titleKey: "overview.field.tun", value: Localization.text("common.not_implemented"))
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 2)
-        } label: {
-            Label {
-                Text("overview.section.system_proxy")
-            } icon: {
-                Image(systemName: "network")
+                if let configurationFailure = model.configurationFailure {
+                    Text(Localization.format(
+                        "overview.config.error",
+                        Localization.text("error.\(configurationFailure.code)")
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                }
+                if let updated = model.lastConfigurationSuccess {
+                    Text(Localization.format("overview.updated.config", timeString(updated)))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
     }
 
-    private func errorGroup(_ failure: APIError) -> some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(Localization.format("overview.error", Localization.text("error.\(failure.code)")))
-                    .foregroundStyle(.red)
-                Text(failure.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+    private var routingCard: some View {
+        PanelCard(
+            titleKey: "overview.section.routing",
+            symbol: "arrow.triangle.branch",
+            actions: { EmptyView() }
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                InfoRow(
+                    titleKey: "overview.field.rules",
+                    value: model.status.map { String($0.ruleCount) } ?? unknownValue
+                )
+                InfoRow(
+                    titleKey: "overview.field.policies",
+                    value: model.status.map { String($0.policyCount) } ?? unknownValue
+                )
+                InfoRow(
+                    titleKey: "overview.field.pending_restart",
+                    value: pendingRestartText
+                )
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 2)
-        } label: {
-            Label {
-                Text("overview.section.problem")
-            } icon: {
-                Image(systemName: "exclamationmark.triangle")
+        }
+    }
+
+    private var problemCard: some View {
+        PanelCard(
+            titleKey: "overview.section.problem",
+            symbol: "exclamationmark.triangle",
+            actions: { EmptyView() }
+        ) {
+            VStack(alignment: .leading, spacing: 6) {
+                if let statusFailure = model.statusFailure {
+                    Text(Localization.format("overview.status.error", Localization.text("error.\(statusFailure.code)")))
+                        .foregroundStyle(.red)
+                }
+                if let configurationFailure = model.configurationFailure {
+                    Text(Localization.format(
+                        "overview.config.error",
+                        Localization.text("error.\(configurationFailure.code)")
+                    ))
+                    .foregroundStyle(.red)
+                }
+                if let failure = environment.snapshot.failure {
+                    Text(environmentFailureText(failure))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let failure = environment.snapshot.failure {
-                Text(environmentFailureText(failure))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
             if let notice = environment.bootstrapNotice {
                 Text(notice)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-            if let updated = model.lastUpdated {
-                Text(Localization.format("overview.updated", timeString(updated)))
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
             }
         }
         .padding(.top, 2)
     }
 
-    // MARK: - Values
+    private var unknownValue: String {
+        Localization.text("overview.state.unknown")
+    }
 
     private var subtitle: String {
         var parts: [String] = []
@@ -194,27 +216,26 @@ struct OverviewView: View {
         }
     }
 
-    private func booleanText(_ value: Bool?) -> String {
-        guard let value else { return "—" }
-        return Localization.text(value ? "common.on" : "common.off")
-    }
-
     private var proxyStateText: String {
         guard let state = model.configuration?.systemProxyState else {
-            return Localization.text(SystemProxyState.off.localizationKey)
+            return model.configurationFailure == nil
+                ? Localization.text("overview.proxy.unknown")
+                : Localization.text("overview.state.unknown")
         }
         return Localization.text(state.state.localizationKey)
     }
 
     private var pendingRestartText: String {
         guard let pending = model.configuration?.pendingRestart, !pending.isEmpty else {
-            return Localization.text("common.none")
+            return model.configuration == nil
+                ? Localization.text("overview.state.unknown")
+                : Localization.text("common.none")
         }
         return pending.joined(separator: ", ")
     }
 
     private var inboundText: String {
-        guard let configuration = model.configuration else { return "—" }
+        guard let configuration = model.configuration else { return Localization.text("overview.state.unknown") }
         let http = configuration.httpListen ?? Localization.text("common.off")
         let socks = configuration.socks5Listen ?? Localization.text("common.off")
         return "HTTP \(http) · SOCKS5 \(socks)"

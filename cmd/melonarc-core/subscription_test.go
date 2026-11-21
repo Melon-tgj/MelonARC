@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -321,5 +323,97 @@ func TestAssembledCoreServesTheSkipDetail(t *testing.T) {
 	}
 	if code, body := apiStatus(t, core.api, "/v1/subscriptions/airport/skipped?limit=999"); code != http.StatusBadRequest {
 		t.Fatalf("a page above the cap answered %d (%s), want 400", code, body)
+	}
+}
+
+// TestCreateSubscriptionEndToEnd checks the whole write: a declaration is
+// appended to the file, the provider is fetched, and both the running routing
+// state and the API answer describe the new nodes. A retry of the same body must
+// answer 200 without fetching or writing again.
+func TestCreateSubscriptionEndToEnd(t *testing.T) {
+	var fetches atomic.Int32
+	link := "ss://YWVzLTI1Ni1nY206c2VjcmV0@fresh.example.com:8388#Fresh"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		fmt.Fprintln(w, link)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "melonarc.ini")
+	text := fmt.Sprintf(`[General]
+# the user's note must survive the create
+log-level = error
+http-listen = 127.0.0.1:%d
+socks5-listen = off
+data-dir = ./data
+
+[Rule]
+FINAL,direct
+`, freePort(t))
+	if err := os.WriteFile(cfgPath, []byte(text), 0o600); err != nil {
+		t.Fatalf("write configuration: %v", err)
+	}
+	core := assembleCore(t, cfgPath)
+	body := fmt.Sprintf(`{"name":"fresh","url":%q,"interval_seconds":21600}`, server.URL)
+	token, err := os.ReadFile(core.tokenPath)
+	if err != nil {
+		t.Fatalf("read token: %v", err)
+	}
+	post := func(text string) (int, api.SubscriptionView, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, core.api.URL()+"/v1/subscriptions", bytes.NewBufferString(text))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("post create: %v", err)
+		}
+		defer resp.Body.Close()
+		var view api.SubscriptionView
+		payload, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode < 400 {
+			if err := json.Unmarshal(payload, &view); err != nil {
+				t.Fatalf("decode %s: %v", payload, err)
+			}
+		}
+		return resp.StatusCode, view, string(payload)
+	}
+
+	code, view, payload := post(body)
+	if code != http.StatusCreated {
+		t.Fatalf("first create answered %d: %s", code, payload)
+	}
+	if view.Name != "fresh" || view.Nodes != 1 {
+		t.Fatalf("view = %+v, want one fresh node", view)
+	}
+	snapshot := core.state.snapshot()
+	if _, err := snapshot.registry.Resolve("fresh"); err != nil {
+		t.Fatalf("the created subscription group is not routable: %v", err)
+	}
+	onDisk, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(onDisk), "the user's note must survive the create") ||
+		!strings.Contains(string(onDisk), "interval=21600") {
+		t.Fatalf("the file lost content or the interval:\n%s", onDisk)
+	}
+
+	code, _, payload = post(body)
+	if code != http.StatusOK {
+		t.Fatalf("retry answered %d: %s", code, payload)
+	}
+	if fetches.Load() != 1 {
+		t.Fatalf("the retry fetched %d times, want 1", fetches.Load())
+	}
+
+	conflict := fmt.Sprintf(`{"name":"fresh","url":%q}`, "https://example.com/other")
+	code, _, payload = post(conflict)
+	if code != http.StatusConflict {
+		t.Fatalf("a conflicting declaration answered %d: %s", code, payload)
 	}
 }

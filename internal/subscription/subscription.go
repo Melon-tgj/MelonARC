@@ -93,6 +93,41 @@ func New(opts Options) *Manager {
 	return &Manager{opts: opts, state: make(map[string]*state)}
 }
 
+// Fork returns a manager with the same options and a deep copy of the current
+// state. It is the staging area a configuration write imports into: a fetch that
+// fails leaves the live manager, and therefore the daemon's running nodes,
+// exactly as they were.
+func (m *Manager) Fork() *Manager {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fork := New(m.opts)
+	for name, st := range m.state {
+		clone := *st
+		clone.nodes = copyProxies(st.nodes)
+		clone.skipped = copySkips(st.skipped)
+		fork.state[name] = &clone
+	}
+	return fork
+}
+
+// Adopt replaces this manager's state with the state of a prepared fork. It is
+// called at the commit point, after the new configuration file has been written,
+// so the manager and the file describe the same subscriptions.
+func (m *Manager) Adopt(fork *Manager) {
+	fork.mu.Lock()
+	state := make(map[string]*state, len(fork.state))
+	for name, st := range fork.state {
+		clone := *st
+		clone.nodes = copyProxies(st.nodes)
+		clone.skipped = copySkips(st.skipped)
+		state[name] = &clone
+	}
+	fork.mu.Unlock()
+	m.mu.Lock()
+	m.state = state
+	m.mu.Unlock()
+}
+
 // Import resolves every subscription declared by cfg and merges the result into
 // it, so the configuration that goes on to build dialers has the nodes its
 // rules and groups refer to.

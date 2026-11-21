@@ -34,6 +34,13 @@ enum Formatting {
         return String(format: amount < 10 ? "%.1f %@" : "%.0f %@", amount, units[unit])
     }
 
+    static func latency(_ milliseconds: Double) -> String {
+        guard milliseconds.isFinite, milliseconds >= 0 else { return "—" }
+        if milliseconds < 1 { return "<1 ms" }
+        if milliseconds < 10 { return String(format: "%.1f ms", milliseconds) }
+        return "\(Int(milliseconds.rounded())) ms"
+    }
+
     /// A path shortened for a table cell, keeping the last components.
     static func path(_ value: String?) -> String {
         guard let value, !value.isEmpty else { return "—" }

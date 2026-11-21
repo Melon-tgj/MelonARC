@@ -27,6 +27,44 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+// handleSubscriptionCreate writes one declaration and installs the nodes it
+// contributes. The URL is never put in the audit detail: subscription links
+// commonly carry a private token, and the audit ring is readable by every local
+// client with a token of its own.
+func (s *Server) handleSubscriptionCreate(w http.ResponseWriter, r *http.Request) {
+	var req SubscriptionCreateRequest
+	if err := decodeBody(r, &req); err != nil {
+		s.record(r, ActionSubscriptionCreate, ResultFailed, "malformed request: "+err.Error())
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	defer drainBody(r)
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		s.record(r, ActionSubscriptionCreate, ResultFailed, "no name given")
+		writeError(w, http.StatusBadRequest, "bad_request", "name is required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), reloadTimeout)
+	defer cancel()
+	view, created, err := s.provider.CreateSubscription(ctx, req)
+	if err != nil {
+		s.record(r, ActionSubscriptionCreate, ResultFailed, name+": "+err.Error())
+		writeProviderError(w, err)
+		return
+	}
+	result := "already declared"
+	if created {
+		result = "created"
+	}
+	s.record(r, ActionSubscriptionCreate, ResultOK, name+": "+result)
+	if created {
+		writeJSON(w, http.StatusCreated, view)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
 // handleSubscriptionSkipped serves one page of a subscription's skip detail.
 //
 // The name is a path segment, so a subscription whose name contains a slash —

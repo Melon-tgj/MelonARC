@@ -24,6 +24,8 @@ struct SettingsView: View {
                 capabilitiesGroup
                 if let settings = environment.settings {
                     pathsGroup(settings)
+                    diagnosticsGroup
+                    aboutGroup
                     if let notice = settings.notice {
                         Text(notice)
                             .font(.caption)
@@ -97,7 +99,7 @@ struct SettingsView: View {
             .padding(.top, 2)
         } label: {
             Label {
-                Text("settings.section.system_proxy")
+                Text("settings.section.network")
             } icon: {
                 Image(systemName: "network")
             }
@@ -146,9 +148,68 @@ struct SettingsView: View {
             .padding(.top, 2)
         } label: {
             Label {
-                Text("settings.section.paths")
+                Text("settings.section.diagnostics")
             } icon: {
                 Image(systemName: "folder")
+            }
+        }
+    }
+
+    private var diagnosticsGroup: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 7) {
+                if let event = environment.bootstrapEvent {
+                    InfoRow(titleKey: "settings.field.bootstrap", value: event.path, labelWidth: 120)
+                    Text(event.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                } else {
+                    Text("settings.bootstrap.none")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let failure = environment.overview.configurationFailure {
+                    Text(Localization.format("settings.error", Localization.text("error.\(failure.code)")))
+                        .foregroundStyle(.red)
+                    Button(Localization.text("panel.state.retry")) {
+                        environment.overview.refresh()
+                    }
+                }
+                Button(Localization.text("panel.state.reopen")) {
+                    environment.showMainWindow()
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+        } label: {
+            Label {
+                Text("settings.diagnostics.title")
+            } icon: {
+                Image(systemName: "wrench.and.screwdriver")
+            }
+        }
+    }
+
+    private var aboutGroup: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 7) {
+                InfoRow(
+                    titleKey: "settings.about.channel",
+                    value: Localization.text("settings.about.channel_value"),
+                    labelWidth: 120
+                )
+                Text("settings.footer")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+        } label: {
+            Label {
+                Text("settings.section.about")
+            } icon: {
+                Image(systemName: "info.circle")
             }
         }
     }

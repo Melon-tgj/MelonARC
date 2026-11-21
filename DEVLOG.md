@@ -7231,3 +7231,80 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
 - **下轮 CI 待验证**：Check and freeze 通过并产出唯一候选 DMG＋`.sha256`＋
   `candidate.json`；Interop 的 Snell v5 UDP 超时自行消失；图标、签名与
   DMG VALID 结论保持。
+
+### M5.2：订阅创建、面板状态、侧栏重做与卡片布局（2026-11-21）
+
+- **基线**：以 build 39 / `HEAD 0b5eba6` 为起点。用户虚拟机反馈内容页面可用，
+  但侧栏按钮过紧；本阶段同时回应侧栏间距、首条订阅创建、六面板空状态与
+  概览信息层级。
+- **Go 核心改动**：
+  - `internal/api/views.go` 增加 `SubscriptionCreateRequest` 和
+    `Provider.CreateSubscription`；`internal/api/server.go` 在
+    `/v1/subscriptions` 同路径按 GET/POST 分派，其他方法仍为 405 并给出
+    `Allow: GET, POST`；`internal/api/subscriptions.go` 增加创建 handler，
+    首次成功 201、同声明重试 200，并在审计中只记录名称、不记录订阅地址。
+  - `internal/config/edit.go` 增加 `[Subscription]` 定点编辑、规范化声明、
+    往返校验、整份配置 parse/validate、同目录临时文件原子替换与并发版本复核；
+    `cmd/melonarc-core/reload.go` 复用准备/提交路径，加入 `Manager.Fork/Adopt`
+    私有暂存，提交前持共享锁复核原文件，失败恢复原文件，不留下无法启动的配置。
+  - 稳定错误码覆盖 `invalid_subscription`、`subscription_conflict`、
+    `config_changed`、`subscription_import_failed`、`subscription_apply_failed`
+    等；测试覆盖端到端创建、重复点击、冲突、非法字段、并发写和重启保留。
+- **桌面壳改动**：
+  - `APIClient` 增加创建与跳过明细方法，显式接受创建响应的 200/201，写请求
+    35 秒时限而普通读仍为 5 秒；修正连接记录 `duration_ms` 解码键；新增
+    `SubscriptionCreateRequest` 与跳过明细 DTO。
+  - `PanelModels` 为五个列表页加入 `idle/loading/loaded/empty/failed` 阶段、
+    generation 与单次主线程发布；迟到读取不得覆盖新读取，写失败独立记录，
+    停止面板时递增请求代数；策略选择与订阅刷新去掉 `try?`，订阅刷新遇到响应内
+    `error` 非空也进入失败状态。
+  - 新增 `SidebarPanelButton.swift`：侧栏由 GeometryReader 计算可用高度，
+    六键等分、最小 56pt、四周 12pt、行间距 8pt，整行 `.contentShape` 可点；
+    保留 `panel.<id>` 与 `onMoveCommand`。系统 26 用 `.glass`，旧系统用
+    `SidebarFallbackStyle`（按下底色、约 120ms 复位、减少动态效果时只改底色）。
+  - 新增 `SubscriptionEditorView.swift`、`PanelStateView.swift`：
+    表单含名称、地址、可选间隔（默认 6 小时，显式最少 5 分钟），本地校验
+    HTTP/HTTPS 绝对地址，提交防双击；错误只展示稳定码与本地化文案，不回显地址；
+    旧核心返回 404/405 时提示当前核心不支持添加订阅并提供配置详情入口。
+    状态组件在系统 14+ 使用 `ContentUnavailableView`，系统 13 用等价 VStack。
+  - 新增 `PanelCard.swift`、`PanelDetailView.swift`：首页 20–24pt 外边距、
+    卡片 16pt 内边距、12–16pt 间距，宽窗两列、窄窗 `ViewThatFits` 单列；
+    `RootView` 用 `NavigationStack` + Hashable 路由承载概览/组/订阅/连接详情，
+    切页重置路径，轮询不影响正在阅读的详情。规则默认行紧邻显示 `FINAL → DIRECT`。
+  - `OverviewModel` 为 status 与 configuration 分别保存成功值与错误；未读到
+    代理状态显示“尚未读取”，读后失败保留上次值；`AppEnvironment` 增加结构化
+    首次写入事件，首页不再展示配置路径，诊断页可查看并定位。设置分为
+    “网络与能力”“诊断与文件”“关于与更新”。
+- **关键决策及理由**：创建链路把网络导入放在 `commitMu` 外，只在最终换文件和
+  安装快照时持锁，避免慢订阅阻塞其他设置写入；先完成全部可失败校验再写文件，
+  以失败恢复保证“创建失败不留坏配置”。侧栏只在版本样式入口切换原生 API，
+  公共存储与参数保持最低系统可识别类型，便于 13 回退与 26 玻璃分支共存。
+- **原生接口与文档依据**：玻璃按钮
+  <https://developer.apple.com/documentation/swiftui/glassbuttonstyle>；
+  空状态
+  <https://developer.apple.com/documentation/swiftui/contentunavailableview>；
+  响应式布局 <https://developer.apple.com/documentation/swiftui/viewthatfits>；
+  文件定位
+  <https://developer.apple.com/documentation/appkit/nsworkspace/activatefileviewerselecting(_:)>；
+  回环 API 会话约束
+  <https://developer.apple.com/documentation/foundation/urlsessionconfiguration>。
+- **本地验证**：`~/sdks/go/bin/gofmt -l internal/api internal/config internal/subscription cmd/melonarc-core`
+  无输出；`~/sdks/go/bin/go test ./...` 全包通过；
+  `python3 apps/macos/scripts/check-project.py` 通过（146 objects / 26 app sources /
+  21 test sources / 1 UI test source）；`python3 apps/macos/scripts/check-strings.py`
+  通过（186 keys / 2 languages，仅有未直接引用的说明键提示）；
+  `git diff --check` 干净；红线 grep 未发现产品仓库禁用词。
+  Linux Foundation Swift 架子 50 项中 49 过，唯一失败仍是既有的
+  CoreSupervisor 预算测试（Linux Foundation 进程/主队列行为差异，macOS CI 全绿，
+  非本阶段引入）；新增连接解码、创建请求编码与本地化断言均通过。
+  本机 Linux 无 Xcode/SwiftUI/AppKit，界面编译、资源编译、签名、DMG 与
+  XCUITest 均留待 CI，不声称已在本机编译通过。
+- **扩展点**：面板仍由 `PanelRegistry` 单一注册表生成，侧栏高度按实际条目数计算；
+  详情路由为可追加的 Hashable enum；API 路径集中在 `APIEndpoint`，写请求通过
+  `send` 的 accepted statuses 与超时参数扩展；面板状态机与卡片组件可复用于后续
+  页面，文案继续键值化。
+- **待验**：CI 需验证 13 回退样式与 26 玻璃分支、六按钮命中范围与键盘操作、
+  六个面板零项/有内容/失败/旧数据状态、订阅创建 201/200/409/400/422 与旧核心
+  404/405、慢响应与断线重试、非空连接解码、详情跳转与返回、浅深色与中英文排版。
+  候选 DMG 产出后由用户在 macOS 虚拟机实测“零条 → 添加 → 列表出现 → 重启仍存在”
+  与侧栏间距、按下反馈、短窗口滚动。

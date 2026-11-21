@@ -94,6 +94,11 @@ type daemonState struct {
 	// panicking.
 	reload func(context.Context) (api.ReloadView, error)
 
+	// createSubscription is installed with reload. It adds one declaration and
+	// installs its nodes atomically; a state built without it answers the create
+	// endpoint with a clear refusal instead of panicking.
+	createSubscription func(context.Context, api.SubscriptionCreateRequest) (api.SubscriptionView, bool, error)
+
 	// proxyStatus is the desktop proxy controller the startup path used. The
 	// API reads it so the four-state report describes what this process really
 	// did, rather than what the configuration file says it should have done.
@@ -612,6 +617,17 @@ func (s *daemonState) Subscriptions(context.Context) api.SubscriptionListView {
 		view.Subscriptions = append(view.Subscriptions, s.subscriptionView(sub.Name))
 	}
 	return view
+}
+
+// CreateSubscription implements api.Provider. The reloader owns the multi-step
+// operation; the state only forwards to it so the API never has to know how a
+// file, a fetched body and a routing snapshot are kept in step.
+func (s *daemonState) CreateSubscription(ctx context.Context, req api.SubscriptionCreateRequest) (api.SubscriptionView, bool, error) {
+	if s.createSubscription == nil {
+		return api.SubscriptionView{}, false, api.Unprocessable("subscription_unavailable",
+			"subscription management is not available in this process")
+	}
+	return s.createSubscription(ctx, req)
 }
 
 // subscriptionView reports one subscription, with the zero answer for a name the

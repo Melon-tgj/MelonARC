@@ -163,19 +163,80 @@ func TestSubscriptionSkippedRejectsBadPages(t *testing.T) {
 // other read endpoints follow: JSON 405 with the method that is allowed.
 func TestSubscriptionEndpointsRejectOtherMethods(t *testing.T) {
 	s := newTestServer(t, &fakeProvider{})
-	for _, path := range []string{"/v1/subscriptions", "/v1/subscriptions/airport/skipped"} {
-		rec := request(t, s, http.MethodPost, path, "test-token")
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Errorf("POST %s gave %d, want 405", path, rec.Code)
-		}
-		if got := rec.Header().Get("Allow"); got != http.MethodGet {
-			t.Errorf("POST %s Allow = %q", path, got)
-		}
+	rec := request(t, s, http.MethodPost, "/v1/subscriptions/airport/skipped", "test-token")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST skipped gave %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Errorf("POST skipped Allow = %q", got)
+	}
+	// The list path is both a read and the create endpoint: its 405 must say so.
+	rec = request(t, s, http.MethodDelete, "/v1/subscriptions", "test-token")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("DELETE subscriptions gave %d, want 405", rec.Code)
+	}
+	if got := rec.Header().Get("Allow"); got != "GET, POST" {
+		t.Errorf("DELETE subscriptions Allow = %q", got)
 	}
 	// An authenticated read still needs the token: the endpoints are not a
 	// second, unauthenticated door to the configuration.
 	if rec := request(t, s, http.MethodGet, "/v1/subscriptions", ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("a request without a token gave %d, want 401", rec.Code)
+	}
+}
+
+// TestSubscriptionCreateEndpoint checks the two success statuses, the error
+// mapping and that the URL never leaks into the audit ring.
+func TestSubscriptionCreateEndpoint(t *testing.T) {
+	const body = `{"name":"daily","url":"https://example.com/sub?token=private","interval_seconds":43200}`
+	p := &fakeProvider{createCreated: true, createView: SubscriptionView{Name: "daily", Nodes: 7}}
+	s := newTestServer(t, p)
+	rec := post(t, s, "/v1/subscriptions", "test-token", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first create gave %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	view := decode[SubscriptionView](t, rec)
+	if view.Name != "daily" || view.Nodes != 7 {
+		t.Fatalf("view = %+v", view)
+	}
+	if p.lastCreate.IntervalSeconds != 43200 {
+		t.Fatalf("interval = %d", p.lastCreate.IntervalSeconds)
+	}
+	p.createCreated = false
+	if rec := post(t, s, "/v1/subscriptions", "test-token", body); rec.Code != http.StatusOK {
+		t.Fatalf("retry gave %d, want 200", rec.Code)
+	}
+	audit := decode[AuditListView](t, request(t, s, http.MethodGet, "/v1/audit", "test-token"))
+	for _, entry := range audit.Entries {
+		if strings.Contains(entry.Detail, "private") {
+			t.Fatalf("the audit record leaked a subscription token: %+v", entry)
+		}
+	}
+}
+
+// TestSubscriptionCreateErrors maps the provider's RequestError to the status
+// the shell uses to choose between a form error and a conflict dialog.
+func TestSubscriptionCreateErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		status int
+		code   string
+	}{
+		"invalid":  {BadRequest("invalid_subscription", "bad url"), http.StatusBadRequest, "invalid_subscription"},
+		"conflict": {Conflict("subscription_conflict", "name taken"), http.StatusConflict, "subscription_conflict"},
+		"stale":    {Conflict("config_changed", "retry"), http.StatusConflict, "config_changed"},
+		"fetch":    {Unprocessable("subscription_import_failed", "fetch failed"), http.StatusUnprocessableEntity, "subscription_import_failed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestServer(t, &fakeProvider{createErr: tc.err})
+			rec := post(t, s, "/v1/subscriptions", "test-token", `{"name":"a","url":"https://example.com/a"}`)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.status)
+			}
+			if body := decode[errorView](t, rec); body.Error.Code != tc.code {
+				t.Fatalf("code = %q, want %q", body.Error.Code, tc.code)
+			}
+		})
 	}
 }
 
