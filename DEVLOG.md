@@ -7195,3 +7195,39 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
 - **下轮 CI 待验证**：`macos-15` 作业图标校验通过（512 表示出现、签名前后两份
   报告一致），Sign and package 与 DMG 挂载校验全绿，唯一候选 DMG＋`.sha256`＋
   `candidate.json` 产出；同时观察 Go 偶发测试是否复现。
+
+### M5.1 修复记录（CI #38 版权赋值行被拆坏，2026-11-20）
+
+- **CI #38 结果**（提交 `9a266b11`，运行
+  <https://github.com/Melon-tgj/MelonARC/actions/runs/44890775612>，3m18s）：
+  Go / Frontend / 玻璃 UI 全绿；M5.1 的图标修复已生效——`macos-15` 的
+  Sign and package 通过，日志出现 `icon:` / `car:` 成功行，DMG 已生成并校验
+  `VALID`，上一轮的 512 表示缺失报错未再出现。新的失败点前移到
+  Check and freeze the candidate manifest（exit 1），原文
+  `apps/macos/scripts/check-candidate.sh: line 48: MelonARC: command not found`
+  与 `Error: the bundle copyright could not be read`。
+- **根因与证据**：用 `git log -L` 核实，M5.1 提交 `f4ee8a6a` 在
+  `check-candidate.sh` 插入 `bash "$here/verify-app-icon.sh" "$app"` 时，把原本
+  正确的单行赋值拆成了两行：`copyright=` 独占一行置空，下一行的
+  `$(plutil -extract NSHumanReadableCopyright raw -o - "$app/Contents/Info.plist") \`
+  变成了独立命令；命令替换展开后，plutil 输出的版权字符串以 `MelonARC` 开头，
+  bash 遂尝试执行 `MelonARC` 命令而报 command not found（exit 127），触发
+  `|| fail`。这解释了为何 CI #30 能通过：当时该行尚未被拆开，写法是正确的；
+  只有 #38 引入了拆行才暴露此故障。同一脚本后续的
+  `minimum=$(plutil ...)` 仍是正确写法，可直接作为范本。
+- **修复内容**：只把第 46–48 行恢复为单行赋值
+  `copyright=$(plutil -extract NSHumanReadableCopyright raw -o - "$app/Contents/Info.plist") \`
+  加 `|| fail "the bundle copyright could not be read"`，上方的
+  `verify-app-icon.sh` 调用原样保留；脚本其余内容一字未动。Go 代码零改动。
+- **本地验证**：本机 Linux 无 `plutil`，故用 shell 函数 mock `plutil` 输出以
+  `MelonARC` 开头并含 `GPL-3.0-only` 的版权文本：修复后赋值正确落到
+  `copyright` 且 `grep -q 'GPL-3.0-only'` 通过；修复前的拆行写法稳定复现
+  `MelonARC: command not found`（rc=127）。`bash -n` 语法通过，
+  `git diff --check` 干净。未本地实跑 macOS 签名与冻结流程。
+- **Interop 超时判定**：本轮 Interop 的 `TestInteropSnell/v5/udp` 报 10.00s
+  超时，但 M5.1 全程未改任何 Go 代码，#37 在相同 Go 代码下 Interop 为绿，
+  #37 与 #38 之间只差 `project.pbxproj` 与 DEVLOG，不可能影响 Go 测试；
+  判定为偶发/瞬时，不改 Go 代码，留待下一轮 CI 重跑验证。
+- **下轮 CI 待验证**：Check and freeze 通过并产出唯一候选 DMG＋`.sha256`＋
+  `candidate.json`；Interop 的 Snell v5 UDP 超时自行消失；图标、签名与
+  DMG VALID 结论保持。

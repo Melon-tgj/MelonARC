@@ -43,8 +43,7 @@ grep -q 'Privacy statement' "$resources/PRIVACY.md" \
 
 bash "$here/verify-app-icon.sh" "$app"
 
-copyright=
-$(plutil -extract NSHumanReadableCopyright raw -o - "$app/Contents/Info.plist") \
+copyright=$(plutil -extract NSHumanReadableCopyright raw -o - "$app/Contents/Info.plist") \
   || fail "the bundle copyright could not be read"
 printf '%s\n' "$copyright" | grep -q 'GPL-3.0-only' \
   || fail "the bundle copyright does not state GPL-3.0-only"
