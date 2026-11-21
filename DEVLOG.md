@@ -7137,3 +7137,61 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
 - **待验证**：本地提交后由 Muse 走快照流程推送，重跑 CI 时直接从 Sign and
   package 日志读取图标校验的实际输出以确定失败分支；若图标校验通过则确认
   唯一候选 DMG 产出，同时观察 Go 测试是否复现。
+
+### M5.1 修复记录（CI #37 图标 512 表示缺失，2026-11-20）
+
+- **失败原文**：CI #37（提交 `c1502089`）中 Go / Frontend / Interop / 玻璃 UI
+  全绿，Go 的 `TestRealityRejectsWrongCredential` 未复现；`macos-15` 作业在
+  Sign and package 失败，原文
+  `Error: Contents/Resources/AppIcon.icns has no icon_512x512.png representation`
+  （exit 1）。CI #36 修复的 `tee` 已生效，报错直接进入 CI 日志，DMG 创建未执行。
+- **构建日志核查**：按随简报提供的逐行核查结论，CI #37 发布构建日志中两次
+  `actool` 调用均带 `--notices --warnings`，但 `com.apple.actool.document.warnings`
+  段为空，只有产物列表；没有 `unassigned child`、非法槽位、跳过项或按尺寸列出的
+  表示。唯一的 `CompileAssetCatalogVariant` 是 thinned 变体，产物为
+  `assetcatalog_output/thinned/AppIcon.icns` 与 `Assets.car`，随后
+  `builtin-linkAssetCatalog` 只把 thinned 产物链接进 `.app`。故资源编译未报错，
+  问题在 thinned 产物 `AppIcon.icns` 自身的表示集合。
+- **定因过程与证据**：
+  1. 源槽位：`Contents.json` 十个槽位全部 `idiom: mac`，16/32/128/256/512 的
+     1x/2x 与苹果 App Icon Type 参考表一致；1024×1024 是 App Store 图标，已按
+     M5.1b 映射为 `512x512 / 2x`。`check-project.py` 的唯一槽位与 PNG IHDR 像素
+     检查全通过，CI #37 的 actool 也无警告，排除槽位映射错误。
+  2. 远端漂移：用 `curl` 从 `raw.githubusercontent.com/.../main` 取回
+     `Contents.json` 与 10 张 PNG，与本地逐字节一致，排除网页端上传与快照不一致。
+  3. 重复 PNG：`AppIcon_512x512.png` 与 `AppIcon_256x256@2x.png` 同为 512×512、
+     SHA-256 相同。苹果 High Resolution 指南明确同像素的不同文件名代表不同点尺寸
+     （如 16×16@2x 与 32×32 不等价），且两槽位唯一、actool 无告警，故属合法复用，
+     不是 512 表示缺失的原因。
+  4. iconutil 与校验脚本：`iconutil -c iconset` 成功解码出 `icon_16x16.png` 与
+     `icon_128x128.png`，仅 `icon_512x512.png` 缺失，说明解码链正常；苹果 High
+     Resolution 指南把 512×512 列入完整 ICNS 表示集，脚本抽验 16/128/512 再加一个
+     @2x 的期望本身正确，不能删检查。
+  5. **定因**：苹果《Build settings reference》的 “Standalone Icon File Behavior”
+     （`ASSETCATALOG_COMPILER_STANDALONE_ICON_BEHAVIOR`）明确说明：默认只为
+     primary app icon 生成 “a small subset of sizes” 的 loose PNG/ICNS，供外部
+     管理工具显示代表图；该设置可设为 `all` 或 `none` 以增减 loose 文件的尺寸。
+     工程此前未设置该值，Xcode 26.3 走默认“小子集”，与观察到的 loose
+     `AppIcon.icns` 含 16/128、缺 512 完全吻合；图标数据仍另行进入 `Assets.car`，
+     但传统 ICNS 路径在 Finder/Dock 的大尺寸上会退化。这是构建配置问题，
+     不是脚本误报。
+- **修复内容**：只在 `apps/macos/MelonARC.xcodeproj/project.pbxproj` 的 app target
+  Debug / Release 两处 `ASSETCATALOG_COMPILER_APPICON_NAME` 之后各加一行
+  `ASSETCATALOG_COMPILER_STANDALONE_ICON_BEHAVIOR = all;`，共新增 2 行。
+  `verify-app-icon.sh` 的 16/128/512 与 @2x 校验一字未改，实质强度不降反升：
+  loose `.icns` 从子集变为完整尺寸集。图标源文件与 `ci.yml` 未改，无需网页端上传。
+- **官方文档依据**：Build settings reference “Standalone Icon File Behavior”
+  （<https://developer.apple.com/documentation/xcode/build-settings-reference#Standalone-Icon-File-Behavior>）；
+  Asset Catalog Format Reference “App Icon Type” 表 6-2
+  （<https://developer.apple.com/library/archive/documentation/Xcode/Reference/xcode_ref-Asset_Catalog_Format/AppIconType.html>）；
+  High Resolution Guidelines for OS X “Create a Set of Icons That Includes
+  High-Resolution Versions”
+  （<https://developer.apple.com/library/archive/documentation/GraphicsAnimation/Conceptual/HighResolutionOSX/Optimizing/Optimizing.html>）。
+- **本地验证**：两个脚本通过 `bash -n`；`check-project.py` 报 134 objects /
+  21 app / 20 test / 1 UI test，`check-strings.py` 报 109 keys / 2 languages；
+  Python 复核 10 个唯一 mac 槽位与全部 PNG 的 IHDR 像素一致；pbxproj 括号配平、
+  新增设置出现两次；`git diff --check` 干净。本机是 Linux，无
+  `xcodebuild` / `actool` / `iconutil` / `sips` / `hdiutil`，未本地实跑图标编译与校验。
+- **下轮 CI 待验证**：`macos-15` 作业图标校验通过（512 表示出现、签名前后两份
+  报告一致），Sign and package 与 DMG 挂载校验全绿，唯一候选 DMG＋`.sha256`＋
+  `candidate.json` 产出；同时观察 Go 偶发测试是否复现。
