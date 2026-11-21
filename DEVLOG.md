@@ -7308,3 +7308,48 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
   404/405、慢响应与断线重试、非空连接解码、详情跳转与返回、浅深色与中英文排版。
   候选 DMG 产出后由用户在 macOS 虚拟机实测“零条 → 添加 → 列表出现 → 重启仍存在”
   与侧栏间距、按下反馈、短窗口滚动。
+
+### M5.2 修复：CI #40 四处 Swift 编译错误（2026-11-21）
+
+- **背景**：CI #40（提交 a4076a5e）整体 Failure。Go/Frontend/Interop 全绿；
+  macOS 与 macOS 26 UI (glass) 两个作业红在 4 处 Swift 编译错误，52 项单元测试
+  与 UI 测试未执行，签名打包与 Check and freeze 被跳过，无候选 DMG。本机 Linux
+  无 Xcode/SwiftUI，只修编译错误，不改行为、不动架构、不碰工具链配置。
+- **版本差教训**：CI 钉的是 Xcode 26.3 / Swift 6.2.4，本机 Linux 工具链是
+  Swift 6.4.2。修复 1 的根因是 M5.2 代码按 6.4 才加入标准库的 SE-0530
+  （`Result.init(catching:)` 的异步重载）语义写成——6.4 本地能过、6.2.4 CI 会红。
+  今后写代码一律按 CI 钉的 6.2.4 语言版本，不依赖 6.4 才有的新语法。
+- **三处根因与改法**：
+  - `UI/OverviewModel.swift`：`await Result { try await … }` 在 6.2.4 下
+    `Result.init(catching:)` 只接受同步闭包，报 `cannot pass function of type
+    '() async throws -> StatusView' to parameter expecting synchronous function type`。
+    改为标准 do/catch 构造 `Result<StatusView, Error>` 与
+    `Result<ConfigurationView, Error>`；`async let status` / `async let configuration`
+    保持不动，两请求仍并行启动，只是顺序 await，不改变并行性（苹果官方文档
+    Concurrency 章 "Calling Asynchronous Functions in Parallel"）。
+  - `UI/OverviewView.swift`：第 40 行漏写 `model.`，`statusFailure` /
+    `configurationFailure` 属 OverviewModel 而非 View，报
+    `cannot find 'statusFailure' in scope`。同文件其余处均正确带 `model.`，
+    补上前缀即可。
+  - `Services/PanelModels.swift`：`writeFailure` 在基类 BoundedPanelModel 里是
+    `@Published private(set)`，private 限于声明类型内部，子类即使同文件也不能写，
+    报 `cannot assign to property: 'writeFailure' setter is inaccessible`。
+    改用基类已有的 `clearWriteFailure()`，并把它移出 `MainActor.run` 块
+    （该方法内部已自行派发到 MainActor）。
+- **被否掉的方案**：不升工具链；不自写
+  `extension Result { init(catching body: () async throws -> Success) async }`
+  （将来升到 6.4 会与标准库撞名）；不把 setter 放宽到 `fileprivate(set)` 或
+  internal（那是拆基类有意设的封装）。
+- **未复现的警告**：CI 日志里另有一条 PanelModels.swift:210:25 的 `statusFailure`
+  未使用警告，本地复核整个 PanelModels.swift 无该名字，210 行附近是
+  `refreshNow`。未凭猜测改动，待下一轮 CI 日志确认原文再处理。
+- **本地验证**：`python3 apps/macos/scripts/check-project.py` 通过（146 objects /
+  26 app sources / 21 test sources / 1 UI test source）；
+  `python3 apps/macos/scripts/check-strings.py` 通过（186 keys / 2 languages，仅有
+  未直接引用的说明键提示）；`git diff --check` 干净。Go 代码未动，未重跑 Go 测试；
+  Linux 测试架子不覆盖 SwiftUI/Combine 文件，未跑；本机 Swift 6.4.2 编译不了这些
+  文件，真正的验证靠 CI 重跑，不声称已在本机编译通过。
+- **扩展点**：本阶段只修编译错误，未新增或改动扩展点。
+- **待验**：CI 重跑确认四处编译错误全消、52 项单元测试与 UI 测试执行、
+  签名打包与 Check and freeze 通过并产出候选 DMG；未复现的
+  PanelModels.swift:210:25 警告待日志原文确认。

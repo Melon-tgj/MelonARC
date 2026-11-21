@@ -37,7 +37,7 @@ struct OverviewView: View {
                         routingCard
                     }
                 }
-                if statusFailure != nil || configurationFailure != nil {
+                if model.statusFailure != nil || model.configurationFailure != nil {
                     problemCard
                 }
                 footer

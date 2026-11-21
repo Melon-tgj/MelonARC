@@ -45,8 +45,18 @@ final class OverviewModel: ObservableObject {
             guard let self else { return }
             async let status = client.status()
             async let configuration = client.configuration()
-            let statusResult = await Result { try await status }
-            let configurationResult = await Result { try await configuration }
+            let statusResult: Result<StatusView, Error>
+            do {
+                statusResult = .success(try await status)
+            } catch {
+                statusResult = .failure(error)
+            }
+            let configurationResult: Result<ConfigurationView, Error>
+            do {
+                configurationResult = .success(try await configuration)
+            } catch {
+                configurationResult = .failure(error)
+            }
             await MainActor.run {
                 guard current == self.generation else { return }
                 self.refreshing = false

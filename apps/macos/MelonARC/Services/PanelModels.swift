@@ -182,10 +182,8 @@ final class SubscriptionsModel: BoundedPanelModel {
 
     func create(name: String, url: String, intervalSeconds: Int64?) async throws -> SubscriptionView {
         guard let api else { throw APIError.unreachable("the API client is not available") }
-        await MainActor.run {
-            creating = true
-            writeFailure = nil
-        }
+        await MainActor.run { creating = true }
+        clearWriteFailure()
         defer {
             Task { @MainActor in self.creating = false }
         }
