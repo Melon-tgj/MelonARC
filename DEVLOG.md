@@ -7585,3 +7585,39 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
 - **待验**：CI 重跑确认两条 macOS job 的 5 条错误全消、SwiftUI/AppKit 编译与
   资源/字符串编译通过、UI 测试与单元测试执行、签名打包与 Check and freeze
   通过并产出候选 DMG；无新的编译错误出现。
+
+### M5.3+M5.4 修复：CI #43 测试辅助函数名字冲突（2026-11-22）
+
+- **基线**：CI #43（远端提交 `b9a1dca4`，运行页
+   https://github.com/Melon-tgj/MelonARC/actions/runs/44993893060）失败。
+   Go、Frontend、Interop 三个 job 全绿；macOS 与 macOS 26 UI (glass)
+   两个 job 都是 Swift 编译错误，3 处失败，exit 65。错误原文
+   （ReleaseUpdateTests.swift:179:22）：`Use of 'record' refers to instance
+   method rather than global function 'record(tag:prerelease:draft:assets:)'
+   in module 'MelonARCTests'`。按用户附件 `.m43f-brief.md` 只修这处冲突，
+   不回退 M5.3 自研更新检查与 M5.4 排版优化，不动应用代码、行为、
+   架构、工具链与 CI 工作流。
+- **完成内容**：`apps/macos/MelonARCTests/ReleaseUpdateTests.swift` 中
+   文件级辅助函数 `record(tag:prerelease:draft:assets:)` 改名为
+   `releaseRecordJSON`，共 5 处同步更新（定义 49 行，调用 97、151、178、
+   179 行）。`ReleaseCandidate` / `ReleaseRecord` 初始化时的 `record:`
+   参数标签（104、288 行）不是函数调用，原样保留；
+   `ReleaseVersionTests.swift` 的私有实例方法与 `CoreSupervisor.swift`
+   的私有 `record(failure:)` 不动。改动文件仅该测试文件与本文档。
+- **关键决策及理由**：XCTestCase 自带实例方法 `record(_:)`，在测试方法内
+   成员查找先命中继承来的实例方法，标签对不上才报错；改名避开遮蔽，
+   比给调用加模块限定或改继承关系改动更小。新名字全仓无同名符号；
+   #42 未暴露此错是因为其失败在应用 target，测试 target 未轮到编译。
+- **本地验证**：`python3 apps/macos/scripts/check-project.py` 通过
+   （162 objects / 31 app sources / 25 test sources / 1 UI test source）；
+   `python3 apps/macos/scripts/check-strings.py` 通过（220 keys /
+   144 literal references / 2 languages，仅有未直接引用说明键提示）；
+   `~/sdks/swift/usr/bin/swiftc -parse` 覆盖改动文件，结果 `PARSE_OK`
+   （仅语法检查；本机 Linux 无 Xcode/SwiftUI/AppKit，类型错误本地查不出，
+   不声称已编译通过）；grep 确认文件内不再有 `record(`，2 处 `record:`
+   标签保留，全仓 `releaseRecordJSON` 仅该文件 5 处；`git diff --check`
+   干净；命名红线 grep 无命中。
+- **扩展点**：本阶段只改测试辅助函数命名，未新增或改动扩展点。
+- **待验**：CI 重跑确认两条 macOS job 的 3 处名字冲突全消、测试 target
+   正常编译并执行 ReleaseUpdateTests 等单元测试，签名打包与 Check and
+   freeze 不受影响。

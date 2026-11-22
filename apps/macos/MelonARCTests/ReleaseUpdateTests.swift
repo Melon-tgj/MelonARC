@@ -46,7 +46,7 @@ private func asset(
     return value
 }
 
-private func record(
+private func releaseRecordJSON(
     tag: String,
     prerelease: Bool = false,
     draft: Bool = false,
@@ -94,7 +94,7 @@ private func candidate(for data: Data, digest: String? = nil) throws -> ReleaseC
     let decoder = JSONDecoder()
     let decoded = try decoder.decode(
         ReleaseRecord.self,
-        from: releaseList([record(tag: "v42", assets: [asset(digest: digest)])])
+        from: releaseList([releaseRecordJSON(tag: "v42", assets: [asset(digest: digest)])])
     )
     let manifest = try decoder.decode(
         CandidateManifest.self,
@@ -148,7 +148,7 @@ final class ReleaseUpdateTests: XCTestCase {
             if request.url?.path.hasSuffix("/releases") == true {
                 return (
                     try releaseList([
-                        record(
+                        releaseRecordJSON(
                             tag: "preview-42",
                             prerelease: true,
                             assets: [asset(name: "candidate.json", url: manifestURL), asset(name: dmg)],
@@ -175,8 +175,8 @@ final class ReleaseUpdateTests: XCTestCase {
     }
 
     func testCheckFollowsOneTrustedNextPage() async throws {
-        let first = record(tag: "one")
-        let second = record(tag: "two", assets: [asset(name: "candidate.json")])
+        let first = releaseRecordJSON(tag: "one")
+        let second = releaseRecordJSON(tag: "two", assets: [asset(name: "candidate.json")])
         let transport = FakeReleaseTransport()
         transport.dataHandler = { request in
             if request.url?.query?.contains("page=2") == true {
