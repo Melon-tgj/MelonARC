@@ -7353,3 +7353,185 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
 - **待验**：CI 重跑确认四处编译错误全消、52 项单元测试与 UI 测试执行、
   签名打包与 Check and freeze 通过并产出候选 DMG；未复现的
   PanelModels.swift:210:25 警告待日志原文确认。
+
+### M5.3：macOS 自研手动更新检查（2026-11-21）
+
+- **基线**：CI #41（2026-11-20）已全绿并冻结候选
+  build 41（`melonarc-0.1.0-preview-candidate.41-macos-arm64.dmg`，
+  SHA-256 `20ab6ee61a0e0e4b750d0c40efd61a21a384ffd1737bbd0d61671fb175eb684d`）。
+  本阶段按用户附件 `.m53-brief.md` 与 GPT 答复 §5 落地手动更新检查；
+  起点本地 HEAD `9469dfb`，远端 `aa80fb0e`。M5.2 修复已验证，
+  本阶段不再改动侧栏、面板、CI 工作流或签名公证配置。
+- **完成内容**：
+  - 新增纯 Foundation 模型 `Services/ReleaseVersion.swift`：渠道筛选
+    （preview 含 prerelease、release 排除 prerelease、一律排除 draft）、
+    短版本/十进制 build 与最低系统版本比较、Release 分页去重、
+    `candidate.json` 清单解码与资产匹配、下载初始 URL 与重定向白名单、
+    GitHub `digest: sha256:<base64>` 与 manifest `sha256` 双重比对。
+    所有 JSON 键用显式 `CodingKeys` 映射，避免
+    `convertFromSnakeCase` 把 `browserDownloadURL` / `htmlURL` 猜成 `...Url`。
+  - 新增 `Services/ReleaseUpdateService.swift`：固定
+    `https://api.github.com/repos/Melon-tgj/MelonARC/releases?per_page=100`，
+    最多 5 页且只接受同 API host/path 的 `rel="next"`；403/429 读取
+    `Retry-After` / `X-RateLimit-Reset`；ephemeral URLSession 不带 Cookie、
+    凭据与缓存；请求头只有 `Accept` 与 `User-Agent`；绝不携带回环 API
+    令牌、订阅地址、诊断数据。下载走可信 github.com 发布资产与
+    GitHub 对象存储重定向链，流式 SHA-256 校验失败即清理本次临时文件，
+    未校验文件不交付给界面。通过可注入 `ReleaseHTTPTransport` 支持假传输测试。
+  - 新增 `UI/UpdateModel.swift` 与 `UI/UpdateView.swift`：单一共享状态机，
+    同时服务于菜单“检查更新…”、设置页“关于与更新”分组和结果 alert；
+    generation 防迟到结果覆盖；同步只允许一个检查或下载；取消会递增代际、
+    取消下载任务并清理已校验临时文件；保存使用 `NSSavePanel`，
+    保留/补写 quarantine 属性后验证，成功才 `NSWorkspace` 定位到文件。
+  - 接线 `AppEnvironment`（新增 `let update: UpdateModel`）、`MelonARCApp`
+    （菜单项与设置构造）、`SettingsView`（UpdateView）、`RootView`
+    （UpdateAlertModifier）、`Info.plist`（`MelonARCUpdateChannel` 读取 build
+    setting `MELONARC_UPDATE_CHANNEL = preview;`，`LSFileQuarantineEnabled`），
+    `project.pbxproj`（新增 4 个 app 源文件、2 个测试文件及其引用/编译阶段）。
+  - `check-candidate.sh` 冻结清单新增 `schema_version`、`short_version`、
+    `arch`、`minimum_system_version`、`bundle_id`，并读取最终 bundle 的
+    `CFBundleShortVersionString` / `CFBundleIdentifier` / `CFBundleVersion`
+    与 lipo 架构复核；保留 `candidate`、`version`、字符串 `build_number`、
+    `commit`、`sha256` 及既有冻结校验。`ci.yml` 未改，无需网页端上传。
+  - `Localizable.xcstrings` 新增 31 个中英键；`check-strings.py` 把动态
+    状态与动作键加入运行时白名单；`PRIVACY.md` 增补中英文说明：仅主动检查
+    才联系发布服务，请求不含令牌、订阅或诊断数据。
+  - 新增 `MelonARCTests/ReleaseVersionTests.swift`（9 项纯 Foundation，
+    已纳入 Linux 架子）与 `MelonARCTests/ReleaseUpdateTests.swift`
+    （8 项 macOS/Xcode 传输注入测试，覆盖空列表、预览构建、分页、限速、
+    断网、坏 JSON、下载校验、校验失败不交付、不可信资产零请求）。
+- **关键决策及理由**：沿用 ad-hoc／未公证发布现实，不做后台轮询、不静默安装、
+  不绕过 Gatekeeper；只把“已校验 DMG 保存到用户选择位置”作为成功终点，
+  由用户正常退出恢复代理后再手动替换应用。manifest 带 `schema_version`
+  与显式平台字段，后续渠道/架构/最低系统变化不必改客户端解析分支。
+  网络传输与业务判定分离，测试用假传输即可覆盖限速与恶意资产，不碰真实网络。
+- **关键错误与修复**：Linux 架子首轮抓到
+  `MelonARCUpdateChannel.accepts` 误用可选 `Bool?` 而非 `isDraft` /
+  `isPrerelease`，已修；随后抓到 `browser_download_url` 被
+  `convertFromSnakeCase` 映射成 `browserDownloadUrl` 导致解码失败，
+  改为显式 `CodingKeys` 并在所有相关解码器移除该策略；
+  用带 stub CryptoKit + FoundationNetworking 的 `swiftc -typecheck`
+  抓到 `check` 返回 `ReleaseCatalogResult` 未映射为 `UpdateCheckOutcome`，
+  已补显式 case 转换。以上均在提交前修完并复验。
+- **原生接口与文档依据**：`NSSavePanel.begin() async`
+  <https://developer.apple.com/documentation/appkit/nssavepanel/begin(completionhandler:)>；
+  `NSWorkspace.activateFileViewerSelecting`
+  <https://developer.apple.com/documentation/appkit/nsworkspace/activatefileviewerselecting(_:)>；
+  quarantine 属性
+  <https://developer.apple.com/documentation/foundation/urlresourcevalues/quarantineproperties>；
+  `URLSessionTaskDelegate.urlSession(_:didCreateTask:)`
+  <https://developer.apple.com/documentation/foundation/urlsessiontaskdelegate/urlsession(_:didcreatetask:)>；
+  `URLSessionConfiguration.ephemeral`
+  <https://developer.apple.com/documentation/foundation/urlsessionconfiguration/ephemeral>；
+  `CryptoKit.SHA256`
+  <https://developer.apple.com/documentation/cryptokit/sha256>。
+  实现遵循苹果官方文档，不凭经验猜 API 行为。
+- **本地验证**：`~/sdks/go/bin/go test ./...` 全包通过；
+  `python3 apps/macos/scripts/check-project.py` 通过（160 objects /
+  30 app sources / 25 test sources / 1 UI test source）；
+  `python3 apps/macos/scripts/check-strings.py` 通过（217 keys / 2 languages，
+  仅剩既有未直接引用的说明键提示）；`bash -n apps/macos/scripts/check-candidate.sh`
+  通过；`git diff --check` 干净；`swiftc -parse` 覆盖全部新增/改动 Swift 文件；
+  带 stub CryptoKit 的 Linux `swiftc -typecheck` 验证服务与两项测试的类型。
+  Linux Foundation Swift 架子 59 项中 58 过，唯一失败仍是既有
+  CoreSupervisor 预算测试（Linux Foundation 进程/主队列行为差异，macOS CI 全绿，
+  非本阶段引入）；新增 9 项 ReleaseVersion 测试全过。
+  本机 Linux 无 Xcode/SwiftUI/AppKit，界面编译、资源编译、签名、DMG 与
+  XCUITest 均留待 CI，不声称已在本机编译通过。
+- **扩展点**：渠道来自 `MelonARCUpdateChannel(infoValue:)` 与 Info.plist，
+  可扩展为 stable/preview 之外的值；manifest _schema_ 与平台字段使未来
+  新增架构、最低系统或资产格式只需扩展 `CandidateManifest` /
+  `ReleaseCatalog`；`ReleaseHTTPTransport` 可替换真实会话用于测试或企业镜像；
+  `UpdatePhase` / 状态文案键驱动 UI，菜单、设置与 alert 共用同一 `UpdateModel`；
+  面板注册表与 API 客户端分层未动，后续可接更多设置项。
+- **待验**：CI 需确认新增 17 项测试执行、SwiftUI/AppKit 编译、资源与字符串
+  编译、签名与 DMG 校验、Check and freeze 产出唯一候选 DMG；
+  macOS 真机需验证菜单与设置入口、空 Release 显示“此渠道尚未发布版本”、
+  同 build 正式发布显示已安装、旧 build 升级、403/429 文案、下载校验失败、
+  保存后 quarantine 保持、Gatekeeper 首开与正常退出恢复代理。
+  当前公开 Release 列表为空是真机预期场景，不代表更新失败。
+
+### M5.4：macOS 排版与视觉逐项优化（2026-11-22）
+
+- **基线**：本地 HEAD `964a2bc`（M5.3），远端基线 `aa80fb0e`。按用户附件
+  `.m54-brief.md` 与仓库外 GPT 排版答复 §5 的 8 个步骤逐项实施；方案审阅
+  基线为 build 41 反馈，方案存档只在
+  `/home/hatch/workspace/projects/melonarc-gpt-answers-layout-20261122.md`，
+  未复制进产品仓库。本阶段不回退 M5.3 自研更新检查，只改排版/视觉，
+  不碰业务逻辑、API、数据模型、签名、公证或 CI 工作流。
+- **完成内容**：
+  - 步骤 1：新增 `UI/LayoutMetrics.swift`，集中页面/分区/卡片/行/状态间距、
+    三列门槛、概览信息标签宽、侧栏与 sheet 尺寸令牌，并提供
+    `View.panelPageInsets()`；已登记进 `.xcodeproj` 的 UI 分组与 app Sources。
+  - 步骤 2：`RootView.swift` 改为从 `PanelRegistry.navigation()` 生成侧栏，
+    用 `GeometryReader` + `ScrollViewReader` 按行高/间距令牌计算可视范围，
+    选中项变化时滚动到可见；`SidebarPanelButton.swift` 删除负左缩进和旧双层样式，
+    改为单一 `SidebarPanelButtonStyle`，覆盖普通/hover/pressed/selected 四态、
+    焦点环、1 pt/2 pt 边界、减少透明度与高对比度分支。
+  - 步骤 3：`PanelViews.swift` 抽出 `PanelPage`、`PanelList`、`PanelRowInsets`
+    与短列表范围偏好键；`PanelStatus` 不再为缺失错误/更新时间留空行；
+    `RulesView` 实现 0/1/多条规则排法、1–3 条短列表、浅底与 1 pt 边界、
+    索引格式键和状态区 12 pt 间距；`PanelStateView.swift` 统一加载/空/失败
+    状态的 icon→title→desc→actions 节奏。
+  - 步骤 4：`PanelCard.swift` 去掉 GroupBox 外额外 16 pt，新增局部
+    `PanelCardBoxStyle`：16 pt 内容边距、12 pt 连续圆角、
+    `controlBackgroundColor`；`OverviewView.swift` 接入页面 inset、卡片间距、
+    872 pt 三列 `ViewThatFits`、`InfoRow` 默认 120 pt 标签与窄宽上下排、
+    本地化 pid/inbound 格式键，footer 仅在有 notice 时出现。
+  - 步骤 5：`PoliciesView`、`SubscriptionsView`、`ConnectionsView`、
+    `LogsView` 全部迁移到共用页面/列表/行内边距，删除重复水平 padding 和
+    底部 8 pt；策略短列表数量计入组头与成员，连接字节与日志时间用等宽数字，
+    日志图标列固定 20 pt。
+  - 步骤 6：`SubscriptionEditorView.swift` 去掉 `Form`/`NavigationStack`，
+    改为标题 + `ScrollView` + `Grid` + 固定页脚；最小/默认/展开/最大尺寸
+    448×240、520×248、520×288、640×480；`SheetSizing` 用
+    `NSViewRepresentable` 设置 `contentMinSize`/`contentMaxSize` 并只设置一次
+    初始 `setContentSize`。自定义间隔 5…10080、5 分钟步进、校验、创建接口、
+    错误文案和 macOS 26 `.glassProminent` 分支均保留。
+  - 步骤 7：`Localizable.xcstrings` 新增 `overview.subtitle.pid_format`、
+    `overview.inbound_format`、`rules.index_format` 三个中英键，动态值作参数，
+    不写死数字或状态。
+  - 步骤 8：`PanelNavigationUITests.swift` 保留原导航测试，新增边缘命中、
+    方向键首尾不绕回、短规则索引可见、订阅 sheet 几何边界四项回归；
+    对无键盘焦点/无 accessibility 暴露的环境使用 `XCTSkip`，不把环境差异
+    当成产品缺陷。
+- **关键决策及理由**：间距和设计常量集中在 `LayoutMetrics`，避免五个面板
+  各自硬编码导致继续漂移；侧栏只重做样式与几何，`PanelRegistry`、键盘上下键
+  首尾钳制和 `panel.<id>` 标识保持原样；五个面板共用容器/行组件，减少重复
+  padding；订阅 sheet 用原生 `Grid` 与 AppKit 窗口尺寸护栏替代 `Form`，同时
+  不触碰已验证的校验和创建逻辑；M5.3 的更新 UI/逻辑只在 `SettingsView.swift`
+  调间距，不做功能改写。
+- **原生接口与文档依据**：`ViewThatFits`
+  <https://developer.apple.com/documentation/swiftui/viewthatfits>；
+  `Grid` <https://developer.apple.com/documentation/swiftui/grid>；
+  `GroupBoxStyle`
+  <https://developer.apple.com/documentation/swiftui/groupboxstyle>；
+  `ScrollViewReader`
+  <https://developer.apple.com/documentation/swiftui/scrollviewreader>；
+  `NSViewRepresentable`
+  <https://developer.apple.com/documentation/appkit/nsviewrepresentable>；
+  `NSWindow.contentMinSize`
+  <https://developer.apple.com/documentation/appkit/nswindow/contentminsize>；
+  `NSWindow.contentMaxSize`
+  <https://developer.apple.com/documentation/appkit/nswindow/contentmaxsize>；
+  `NSWindow.setContentSize(_:)`
+  <https://developer.apple.com/documentation/appkit/nswindow/setcontentsize(_:)>。
+  实现按苹果官方文档约束在 macOS 13.0 部署目标内，不引入第三方库。
+- **本地验证**：`python3 apps/macos/scripts/check-project.py` 通过
+  （162 objects / 31 app sources / 25 test sources / 1 UI test source）；
+  `python3 apps/macos/scripts/check-strings.py` 通过
+  （220 keys / 144 literal references / 2 languages，仅有未直接引用说明键提示）；
+  `git diff --check` 干净；`~/sdks/swift/usr/bin/swiftc -parse` 覆盖 11 个新增/
+  改动 Swift 文件，结果 `ALL_PARSE_OK`；命名红线 grep 对提交文件无命中，
+  唯一命中是 `.m54-brief.md` 自述检查规则的那一行，简报在收尾时删除。
+  本机 Linux 无 Xcode/SwiftUI/AppKit，界面编译、资源编译、XCUITest、
+  签名与 DMG 均留待 CI，不声称本机已编译通过。
+- **扩展点**：`LayoutMetrics` 可按页面/组件继续细分；`PanelPage` 与
+  `PanelList` 是后续新面板的统一入口；`SidebarPanelButtonStyle` 的状态层可
+  继续扩展强调色/图标；`SheetSizing` 可复用给其他需要尺寸护栏的 sheet；
+  规则索引、pid 与入站格式均为字符串键，便于后续中英文案或格式调整。
+- **待验**：CI 重跑确认 SwiftUI/AppKit 编译、资源与字符串编译、35 项
+  现有 XCUITest 与单元测试执行、签名打包与冻结流程不受影响；用户虚拟机确认
+  macOS 13 与 26+ 下三列/窄宽切换、侧栏四态与焦点环、高对比度与暗色模式、
+  订阅 sheet 四档尺寸、中英文案、规则短列表、键盘上下键以及 M5.3 更新入口
+  仍正常工作。

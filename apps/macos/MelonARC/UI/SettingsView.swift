@@ -11,6 +11,7 @@ import SwiftUI
 /// the state back from the core.
 struct SettingsView: View {
     @ObservedObject var environment: AppEnvironment
+    @ObservedObject var update: UpdateModel
     @State private var proxyEnabled = false
     @State private var proxyState = SystemProxyStateView(state: .off)
     @State private var notice: String?
@@ -19,7 +20,7 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.headerGap) {
                 proxyGroup
                 capabilitiesGroup
                 if let settings = environment.settings {
@@ -44,7 +45,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(20)
+            .padding(LayoutMetrics.pageInset)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(width: 580, height: 480)
@@ -58,13 +59,13 @@ struct SettingsView: View {
 
     private var proxyGroup: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 Toggle(Localization.text("settings.system_proxy.enabled"), isOn: $proxyEnabled)
                     .disabled(busy || environment.apiClient == nil)
                 InfoRow(
                     titleKey: "settings.system_proxy.state",
                     value: Localization.text(proxyState.state.localizationKey),
-                    labelWidth: 132
+                    labelWidth: LayoutMetrics.infoLabelWidth
                 )
                 if !proxyState.detail.isEmpty {
                     Text(Localization.format("settings.system_proxy.detail", proxyState.detail))
@@ -108,11 +109,11 @@ struct SettingsView: View {
 
     private var capabilitiesGroup: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 InfoRow(
                     titleKey: "overview.field.tun",
                     value: Localization.text("common.not_implemented"),
-                    labelWidth: 132
+                    labelWidth: LayoutMetrics.infoLabelWidth
                 )
                 Text("settings.tun.note")
                     .font(.caption)
@@ -131,7 +132,7 @@ struct SettingsView: View {
 
     private func pathsGroup(_ settings: ShellSettings) -> some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 InfoRow(titleKey: "settings.field.data_dir", value: settings.dataDirectory.path, labelWidth: 120)
                 Text("settings.data_dir.note")
                     .font(.caption)
@@ -157,7 +158,7 @@ struct SettingsView: View {
 
     private var diagnosticsGroup: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 if let event = environment.bootstrapEvent {
                     InfoRow(titleKey: "settings.field.bootstrap", value: event.path, labelWidth: 120)
                     Text(event.detail)
@@ -193,12 +194,13 @@ struct SettingsView: View {
 
     private var aboutGroup: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 InfoRow(
                     titleKey: "settings.about.channel",
                     value: Localization.text("settings.about.channel_value"),
                     labelWidth: 120
                 )
+                UpdateView(model: update)
                 Text("settings.footer")
                     .font(.caption)
                     .foregroundStyle(.secondary)

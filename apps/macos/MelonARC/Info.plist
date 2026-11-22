@@ -28,6 +28,10 @@
 	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>LSFileQuarantineEnabled</key>
+	<true/>
+	<key>MelonARCUpdateChannel</key>
+	<string>$(MELONARC_UPDATE_CHANNEL)</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>NSHumanReadableCopyright</key>

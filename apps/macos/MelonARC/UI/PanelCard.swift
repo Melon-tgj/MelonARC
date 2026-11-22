@@ -1,5 +1,21 @@
 import SwiftUI
 
+private struct PanelCardBoxStyle: GroupBoxStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
+            configuration.label
+                .font(.headline)
+            configuration.content
+        }
+        .padding(LayoutMetrics.cardInset)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+    }
+}
+
 struct PanelCard<Content: View, Actions: View>: View {
     let titleKey: String
     let symbol: String?
@@ -20,20 +36,19 @@ struct PanelCard<Content: View, Actions: View>: View {
 
     var body: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 content
                 if !(actions is EmptyView) {
                     Divider()
-                    HStack(spacing: 8) {
+                    HStack(spacing: LayoutMetrics.actionGap) {
                         Spacer(minLength: 0)
                         actions
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 2)
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: LayoutMetrics.actionGap) {
                 if let symbol {
                     Image(systemName: symbol)
                 }
@@ -41,6 +56,6 @@ struct PanelCard<Content: View, Actions: View>: View {
                     .font(.headline)
             }
         }
-        .padding(16)
+        .groupBoxStyle(PanelCardBoxStyle())
     }
 }

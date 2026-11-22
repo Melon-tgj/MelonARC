@@ -3,32 +3,45 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var environment: AppEnvironment
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.sidebarRowSize) private var rowSize
     @State private var selection: String? = PanelRegistry.overview.id
     @State private var path = NavigationPath()
+
+    private let panels = PanelRegistry.navigation()
 
     var body: some View {
         NavigationSplitView {
             GeometryReader { geometry in
                 ScrollView {
-                    VStack(spacing: 8) {
-                        ForEach(PanelRegistry.navigation()) { panel in
-                            SidebarPanelButton(
-                                identifier: "panel.\(panel.id)",
-                                titleKey: panel.titleKey,
-                                symbol: panel.symbol,
-                                rowHeight: rowHeight(in: geometry.size.height),
-                                selected: panel.id == selection
-                            ) {
-                                selection = panel.id
+                    ScrollViewReader { proxy in
+                        VStack(spacing: sidebarLayout(in: geometry).gap) {
+                            ForEach(panels) { panel in
+                                SidebarPanelButton(
+                                    identifier: "panel.\(panel.id)",
+                                    titleKey: panel.titleKey,
+                                    symbol: panel.symbol,
+                                    rowHeight: sidebarLayout(in: geometry).row,
+                                    selected: panel.id == selection
+                                ) {
+                                    selection = panel.id
+                                }
+                                .id(panel.id)
                             }
                         }
+                        .padding(LayoutMetrics.Sidebar.inset)
+                        .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .center)
+                        .onChange(of: selection) { newValue in
+                            if let newValue { proxy.scrollTo(newValue) }
+                        }
                     }
-                    .padding(12)
-                    .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .top)
                 }
                 .scrollContentBackground(.hidden)
             }
-            .navigationSplitViewColumnWidth(min: 208, ideal: 236, max: 304)
+            .navigationSplitViewColumnWidth(
+                min: LayoutMetrics.Sidebar.minWidth,
+                ideal: LayoutMetrics.Sidebar.idealWidth,
+                max: LayoutMetrics.Sidebar.maxWidth
+            )
             .onMoveCommand { direction in
                 moveSelection(direction)
             }
@@ -56,6 +69,7 @@ struct RootView: View {
         .onDisappear {
             environment.stopAllPanels()
         }
+        .modifier(UpdateAlertModifier(model: environment.update))
     }
 
     @ViewBuilder
@@ -86,16 +100,28 @@ struct RootView: View {
         }
     }
 
-    private func rowHeight(in totalHeight: CGFloat) -> CGFloat {
-        let count = PanelRegistry.navigation().count
-        guard count > 0 else { return 56 }
-        let spacing: CGFloat = 8 * CGFloat(count - 1)
-        let available = (totalHeight - 24 - spacing) / CGFloat(count)
-        return max(56, available)
+    private func sidebarLayout(in geometry: GeometryProxy) -> (row: CGFloat, gap: CGFloat) {
+        let count = panels.count
+        guard count > 0 else { return (0, 0) }
+        let lastGap = count - 1
+        let height = geometry.size.height - geometry.safeAreaInsets.top - geometry.safeAreaInsets.bottom
+        let limits = LayoutMetrics.Sidebar.limits(for: rowSize)
+        let candidate = (height - 2 * LayoutMetrics.Sidebar.inset - LayoutMetrics.Sidebar.minimumGap * CGFloat(lastGap))
+            / CGFloat(count)
+        let row = min(max(candidate, limits.minimum), limits.maximum)
+        let gap = lastGap > 0
+            ? min(
+                max(
+                    (height - 2 * LayoutMetrics.Sidebar.inset - CGFloat(count) * row) / CGFloat(lastGap),
+                    LayoutMetrics.Sidebar.minimumGap
+                ),
+                LayoutMetrics.Sidebar.maximumGap
+            )
+            : 0
+        return (row, gap)
     }
 
     private func moveSelection(_ direction: MoveCommandDirection) {
-        let panels = PanelRegistry.navigation()
         guard !panels.isEmpty else { return }
         let current = panels.firstIndex { $0.id == selection } ?? 0
         let target: Int

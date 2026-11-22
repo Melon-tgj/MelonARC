@@ -17,6 +17,12 @@ MelonARC 是本地代理客户端。本文档说明 macOS 预览版原生壳及�
 - Proxy servers and rule providers you configure receive the connections you
   ask this application to carry. Their own privacy practices are theirs.
 - 用户配置的代理服务器与规则提供方会收到本程序按配置转发的连接，其隐私行为由其自身负责。
+- A manual "Check for Updates" is the only contact with a release service: the
+  shell queries the public release list of this repository and downloads the
+  release asset you confirm. The request carries no loopback API token,
+  subscription address, or diagnostic data.
+- 只有主动点击“检查更新”才会联系发布服务：壳查询本仓库的公开发布列表，并下载
+  用户确认的发布资产。请求中不包含回环 API 令牌、订阅地址或诊断数据。
 
 ## What stays on the machine / 什么留在本机
 

@@ -41,22 +41,29 @@ struct PanelStateView<Content: View, Actions: View>: View {
                     description: Localization.text(descriptionKey)
                 )
             case .failed(let error):
-                VStack(spacing: 10) {
+                VStack(spacing: 0) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 30))
                         .foregroundStyle(.orange)
-                    Text(Localization.format("panel.error", Localization.text("error.\(error.code)")))
-                        .font(.headline)
-                        .multilineTextAlignment(.center)
-                    Text(Localization.text("panel.state.retry_hint"))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                    Button(Localization.text("panel.state.retry"), action: retry)
-                    actions
+                        .padding(.bottom, LayoutMetrics.formGap)
+                    VStack(spacing: LayoutMetrics.detailGap) {
+                        Text(Localization.format("panel.error", Localization.text("error.\(error.code)")))
+                            .font(.headline)
+                            .multilineTextAlignment(.center)
+                        Text(Localization.text("panel.state.retry_hint"))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: LayoutMetrics.actionGap) {
+                        actions
+                        Button(Localization.text("panel.state.retry"), action: retry)
+                    }
+                    .padding(.top, LayoutMetrics.headerGap)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -70,21 +77,26 @@ struct PanelStateView<Content: View, Actions: View>: View {
                 actions
                 Button(Localization.text("panel.state.retry"), action: retry)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            VStack(spacing: 10) {
+            VStack(spacing: 0) {
                 Image(systemName: symbol)
                     .font(.system(size: 30))
                     .foregroundStyle(.secondary)
+                    .padding(.bottom, LayoutMetrics.formGap)
                 Text(title)
                     .font(.title3.weight(.semibold))
+                    .padding(.bottom, LayoutMetrics.detailGap)
                 Text(description)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                HStack(spacing: 12) {
+                    .frame(maxWidth: 360)
+                HStack(spacing: LayoutMetrics.actionGap) {
                     actions
                     Button(Localization.text("panel.state.retry"), action: retry)
                 }
+                .padding(.top, LayoutMetrics.headerGap)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

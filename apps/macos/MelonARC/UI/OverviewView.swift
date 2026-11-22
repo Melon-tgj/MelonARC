@@ -3,16 +3,25 @@ import SwiftUI
 struct InfoRow: View {
     let titleKey: String
     let value: String
-    var labelWidth: CGFloat = 132
+    var labelWidth: CGFloat = LayoutMetrics.infoLabelWidth
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(Localization.text(titleKey))
-                .foregroundStyle(.secondary)
-                .frame(width: labelWidth, alignment: .leading)
-            Text(value)
-                .textSelection(.enabled)
-            Spacer(minLength: 0)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: LayoutMetrics.formGap) {
+                Text(Localization.text(titleKey))
+                    .foregroundStyle(.secondary)
+                    .frame(width: labelWidth, alignment: .leading)
+                Text(value)
+                    .textSelection(.enabled)
+                Spacer(minLength: 0)
+            }
+            .frame(minWidth: labelWidth + LayoutMetrics.formGap + 80)
+            VStack(alignment: .leading, spacing: LayoutMetrics.detailGap) {
+                Text(Localization.text(titleKey))
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .textSelection(.enabled)
+            }
         }
     }
 }
@@ -23,15 +32,16 @@ struct OverviewView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.cardGap) {
                 header
                 ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 14) {
+                    HStack(alignment: .top, spacing: LayoutMetrics.cardGap) {
                         runtimeCard
                         takeoverCard
                         routingCard
                     }
-                    VStack(alignment: .leading, spacing: 14) {
+                    .frame(minWidth: LayoutMetrics.threeColumnThreshold)
+                    VStack(alignment: .leading, spacing: LayoutMetrics.cardGap) {
                         runtimeCard
                         takeoverCard
                         routingCard
@@ -42,29 +52,45 @@ struct OverviewView: View {
                 }
                 footer
             }
-            .padding(22)
+            .panelPageInsets()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle(Text("panel.overview.title"))
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(stateColor)
-                        .frame(width: 9, height: 9)
-                    Text(Localization.text(environment.snapshot.state.localizationKey))
-                        .font(.title2.weight(.semibold))
-                }
-                Text(subtitle)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: LayoutMetrics.formGap) {
+                stateSummary
+                Spacer(minLength: LayoutMetrics.actionGap)
+                headerActions
             }
-            Spacer()
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
+                stateSummary
+                headerActions
+            }
+        }
+    }
+
+    private var stateSummary: some View {
+        VStack(alignment: .leading, spacing: LayoutMetrics.detailGap) {
+            HStack(spacing: LayoutMetrics.fieldGap) {
+                Circle()
+                    .fill(stateColor)
+                    .frame(width: 9, height: 9)
+                Text(Localization.text(environment.snapshot.state.localizationKey))
+                    .font(.title2.weight(.semibold))
+            }
+            Text(subtitle)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var headerActions: some View {
+        HStack(spacing: LayoutMetrics.formGap) {
             NavigationLink(Localization.text("overview.action.details"), value: PanelDetailRoute.overview)
-            .buttonStyle(.bordered)
+                .buttonStyle(.bordered)
             Button(Localization.text("overview.action.restart")) {
                 environment.restartCore()
             }
@@ -78,7 +104,7 @@ struct OverviewView: View {
             symbol: "gauge",
             actions: { EmptyView() }
         ) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 InfoRow(titleKey: "overview.field.version", value: model.status?.version ?? unknownValue)
                 InfoRow(
                     titleKey: "overview.field.uptime",
@@ -104,7 +130,7 @@ struct OverviewView: View {
             symbol: "network",
             actions: { EmptyView() }
         ) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 InfoRow(titleKey: "overview.field.system_proxy_state", value: proxyStateText)
                 InfoRow(titleKey: "overview.field.inbound", value: inboundText)
                 InfoRow(titleKey: "overview.field.tun", value: Localization.text("common.not_implemented"))
@@ -131,7 +157,7 @@ struct OverviewView: View {
             symbol: "arrow.triangle.branch",
             actions: { EmptyView() }
         ) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 InfoRow(
                     titleKey: "overview.field.rules",
                     value: model.status.map { String($0.ruleCount) } ?? unknownValue
@@ -154,7 +180,7 @@ struct OverviewView: View {
             symbol: "exclamationmark.triangle",
             actions: { EmptyView() }
         ) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: LayoutMetrics.fieldGap) {
                 if let statusFailure = model.statusFailure {
                     Text(Localization.format("overview.status.error", Localization.text("error.\(statusFailure.code)")))
                         .foregroundStyle(.red)
@@ -175,15 +201,13 @@ struct OverviewView: View {
         }
     }
 
+    @ViewBuilder
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let notice = environment.bootstrapNotice {
-                Text(notice)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+        if let notice = environment.bootstrapNotice {
+            Text(notice)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
-        .padding(.top, 2)
     }
 
     private var unknownValue: String {
@@ -193,7 +217,7 @@ struct OverviewView: View {
     private var subtitle: String {
         var parts: [String] = []
         if let pid = environment.snapshot.pid {
-            parts.append("pid \(pid)")
+            parts.append(Localization.format("overview.subtitle.pid_format", String(pid)))
         }
         if environment.snapshot.restarts > 0 {
             parts.append(Localization.format("overview.restarts", String(environment.snapshot.restarts)))
@@ -238,7 +262,7 @@ struct OverviewView: View {
         guard let configuration = model.configuration else { return Localization.text("overview.state.unknown") }
         let http = configuration.httpListen ?? Localization.text("common.off")
         let socks = configuration.socks5Listen ?? Localization.text("common.off")
-        return "HTTP \(http) · SOCKS5 \(socks)"
+        return Localization.format("overview.inbound_format", http, socks)
     }
 
     private func environmentFailureText(_ failure: CoreFailure) -> String {

@@ -24,13 +24,17 @@ struct MelonARCApp: App {
                 Button("menu.open") {
                     environment.showMainWindow()
                 }
+                Button("updates.menu.check") {
+                    environment.showMainWindow()
+                    environment.update.check()
+                }
             }
         }
 
         // A Settings scene is what makes the app menu carry the native "Settings…"
         // item and ⌘, on macOS 13, where `SettingsLink` does not exist yet.
         Settings {
-            SettingsView(environment: environment)
+            SettingsView(environment: environment, update: environment.update)
         }
 
         // Closing the window leaves this behind, and the core running with it: the

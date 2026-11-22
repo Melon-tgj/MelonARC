@@ -2206,6 +2206,210 @@
           }
         }
       }
+    },
+    "updates.menu.check": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Check for Updates…" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "检查更新…" } }
+      }
+    },
+    "updates.section.title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Updates" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "更新" } }
+      }
+    },
+    "updates.field.status": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Status" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "状态" } }
+      }
+    },
+    "updates.state.idle": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Updates have not been checked" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "尚未检查更新" } }
+      }
+    },
+    "updates.state.checking": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Checking for updates…" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在检查更新…" } }
+      }
+    },
+    "updates.state.available": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "An update is available" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "发现可用更新" } }
+      }
+    },
+    "updates.state.up_to_date": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "You are up to date" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已是最新版本" } }
+      }
+    },
+    "updates.no_release": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "No releases in this channel yet" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "此渠道尚未发布版本" } }
+      }
+    },
+    "updates.state.no_compatible": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "No compatible release for this Mac" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "没有适用于本机的版本" } }
+      }
+    },
+    "updates.state.incomplete": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Release files are incomplete" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "发布文件不完整" } }
+      }
+    },
+    "updates.state.offline": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "No network connection" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "无法连接网络" } }
+      }
+    },
+    "updates.state.timeout": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "The update check timed out" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "检查更新超时" } }
+      }
+    },
+    "updates.state.malformed": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "The check could not be completed" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "无法完成检查" } }
+      }
+    },
+    "updates.state.rate_limited": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Too many requests, try again later" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "检查过于频繁，请稍后再试" } }
+      }
+    },
+    "updates.state.rate_limited_until": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Too many requests, try again after %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "检查过于频繁，请在 %@ 后重试" } }
+      }
+    },
+    "updates.state.downloading": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Downloading the update…" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在下载更新…" } }
+      }
+    },
+    "updates.state.verifying": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Verifying the download…" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在核对下载文件…" } }
+      }
+    },
+    "updates.state.checksum_mismatch": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Download checksum mismatch" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "下载文件校验失败" } }
+      }
+    },
+    "updates.state.unsafe_asset": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "The release asset is not trusted" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "发布资产不可信" } }
+      }
+    },
+    "updates.state.ready": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Download verified, waiting to save" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "下载已校验，等待保存" } }
+      }
+    },
+    "updates.state.saved": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Update image saved" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已保存更新镜像" } }
+      }
+    },
+    "updates.state.save_failed": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "The update image could not be saved" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "无法保存更新镜像" } }
+      }
+    },
+    "updates.state.cancelled": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cancelled" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已取消" } }
+      }
+    },
+    "updates.alert.title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Update Check" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "检查结果" } }
+      }
+    },
+    "updates.alert.available": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Version %@ (build %@) is available. Download it?" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "发现新版本 %@（build %@）。是否下载？" } }
+      }
+    },
+    "updates.action.check": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Check for Updates" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "检查更新" } }
+      }
+    },
+    "updates.action.cancel": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cancel" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "取消" } }
+      }
+    },
+    "updates.action.download": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Download" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "下载" } }
+      }
+    },
+    "updates.action.save": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Save Image" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "保存镜像" } }
+      }
+    },
+    "updates.note.manual_install": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "After saving the verified image, quit with ⌘Q so the proxy is restored, then drag the new app into Applications." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "保存已校验的镜像后，请用 ⌘Q 正常退出以恢复系统代理，再把新应用拖入“应用程序”。" } }
+      }
+    },
+    "common.close": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Close" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "关闭" } }
+      }
+    },
+    "overview.subtitle.pid_format": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "pid %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "进程号 %@" } }
+      }
+    },
+    "overview.inbound_format": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "HTTP %@ · SOCKS5 %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "HTTP %@ · SOCKS5 %@" } }
+      }
+    },
+    "rules.index_format": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "#%@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "#%@" } }
+      }
     }
   },
   "version": "1.0"

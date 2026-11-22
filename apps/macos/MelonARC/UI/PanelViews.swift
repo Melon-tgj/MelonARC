@@ -1,23 +1,112 @@
 import SwiftUI
 
+private struct ShortListRange: PreferenceKey {
+    static var defaultValue: ClosedRange<CGFloat>? { nil }
+
+    static func reduce(
+        value: inout ClosedRange<CGFloat>?,
+        nextValue: () -> ClosedRange<CGFloat>?
+    ) {
+        guard let next = nextValue() else { return }
+        if let current = value {
+            value = min(current.lowerBound, next.lowerBound)...max(current.upperBound, next.upperBound)
+        } else {
+            value = next
+        }
+    }
+}
+
+private struct PanelRowInsets: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .listRowInsets(
+                EdgeInsets(
+                    top: LayoutMetrics.rowInsetY,
+                    leading: LayoutMetrics.rowInsetX,
+                    bottom: LayoutMetrics.rowInsetY,
+                    trailing: LayoutMetrics.rowInsetX
+                )
+            )
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: ShortListRange.self,
+                        value: proxy.frame(in: .global).minY...proxy.frame(in: .global).maxY
+                    )
+                }
+            }
+    }
+}
+
+private struct PanelList<Content: View>: View {
+    let short: Bool
+    let content: Content
+
+    @State private var groupRange: ClosedRange<CGFloat>?
+
+    init(short: Bool, @ViewBuilder content: () -> Content) {
+        self.short = short
+        self.content = content()
+    }
+
+    var body: some View {
+        GeometryReader { viewport in
+            List {
+                content
+            }
+            .listStyle(.plain)
+            .environment(\.defaultMinListRowHeight, 0)
+            .padding(.top, extraTop(height: viewport.size.height))
+            .onPreferenceChange(ShortListRange.self) { groupRange = $0 }
+        }
+    }
+
+    private func extraTop(height: CGFloat) -> CGFloat {
+        guard short, let range = groupRange else { return 0 }
+        let span = range.upperBound - range.lowerBound
+        guard span > 0 else { return 0 }
+        return max(0, (height - span) / 3)
+    }
+}
+
+private struct PanelPage<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .panelPageInsets()
+    }
+}
+
 struct PanelStatus: View {
     let failure: APIError?
     let writeFailure: APIError?
     let lastUpdated: Date?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let writeFailure {
-                Text(Localization.format("panel.write_error", Localization.text("error.\(writeFailure.code)")))
-                    .foregroundStyle(.orange)
-            }
-            if let failure {
-                Text(Localization.format("panel.error", Localization.text("error.\(failure.code)")))
-                    .foregroundStyle(.red)
-                Text(failure.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: LayoutMetrics.statusGap) {
+            if writeFailure != nil || failure != nil {
+                VStack(alignment: .leading, spacing: LayoutMetrics.detailGap) {
+                    if let writeFailure {
+                        Text(Localization.format("panel.write_error", Localization.text("error.\(writeFailure.code)")))
+                            .foregroundStyle(.orange)
+                    }
+                    if let failure {
+                        Text(Localization.format("panel.error", Localization.text("error.\(failure.code)")))
+                            .foregroundStyle(.red)
+                        Text(failure.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
             }
             if let lastUpdated {
                 Text(Localization.format("panel.updated", timeString(lastUpdated)))
@@ -45,8 +134,14 @@ struct PoliciesView: View {
         return false
     }
 
+    private var shortList: Bool {
+        guard case .loaded = model.phase else { return false }
+        let entries = model.policies.reduce(0) { $0 + 1 + $1.members.count }
+        return (1...3).contains(entries)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelPage {
             PanelStateView(
                 phase: model.phase,
                 titleKey: "policies.empty.title",
@@ -54,50 +149,53 @@ struct PoliciesView: View {
                 symbol: "arrow.triangle.branch",
                 retry: { model.refresh(force: true) },
                 content: {
-                    List(model.policies) { group in
-                        Section {
-                            ForEach(group.members) { member in
-                                HStack {
-                                    Image(systemName: member.healthy ? "checkmark.circle" : "xmark.circle")
-                                        .foregroundStyle(member.healthy ? .green : .red)
-                                    Text(member.name)
-                                    Spacer()
-                                    if member.name == group.active {
-                                        Text(Localization.text("policies.active"))
-                                            .foregroundStyle(.secondary)
-                                    } else {
-                                        Button(Localization.text("policies.use")) {
-                                            Task {
-                                                do {
-                                                    try await model.select(group: group.name, member: member.name)
-                                                } catch {
-                                                    model.recordWriteFailure(error)
+                    PanelList(short: shortList) {
+                        ForEach(model.policies) { group in
+                            Section {
+                                ForEach(group.members) { member in
+                                    HStack(spacing: LayoutMetrics.actionGap) {
+                                        Image(systemName: member.healthy ? "checkmark.circle" : "xmark.circle")
+                                            .foregroundStyle(member.healthy ? .green : .red)
+                                        Text(member.name)
+                                        Spacer()
+                                        if member.name == group.active {
+                                            Text(Localization.text("policies.active"))
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Button(Localization.text("policies.use")) {
+                                                Task {
+                                                    do {
+                                                        try await model.select(group: group.name, member: member.name)
+                                                    } catch {
+                                                        model.recordWriteFailure(error)
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+                                    .modifier(PanelRowInsets())
                                 }
-                            }
-                        } header: {
-                            NavigationLink(value: PanelDetailRoute.policyGroup(group.name)) {
-                                HStack {
-                                    Text(group.name)
-                                        .font(.headline)
-                                    Text(group.type)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text(Localization.format(
-                                        "policies.health",
-                                        String(group.healthyMembers),
-                                        String(group.members.count)
-                                    ))
-                                    .foregroundStyle(group.allUnhealthy ? .red : .secondary)
+                            } header: {
+                                NavigationLink(value: PanelDetailRoute.policyGroup(group.name)) {
+                                    HStack(spacing: LayoutMetrics.actionGap) {
+                                        Text(group.name)
+                                            .font(.headline)
+                                        Text(group.type)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        Text(Localization.format(
+                                            "policies.health",
+                                            String(group.healthyMembers),
+                                            String(group.members.count)
+                                        ))
+                                        .foregroundStyle(group.allUnhealthy ? .red : .secondary)
+                                    }
                                 }
+                                .modifier(PanelRowInsets())
                             }
                         }
                     }
-                    .listStyle(.inset)
                 },
                 actions: {
                     Button(Localization.text("policies.action.subscriptions")) {
@@ -107,8 +205,7 @@ struct PoliciesView: View {
             )
             if !isInitialFailure {
                 PanelStatus(failure: model.failure, writeFailure: model.writeFailure, lastUpdated: model.lastUpdated)
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
+                    .padding(.top, LayoutMetrics.statusGap)
             }
         }
         .navigationTitle(Text("panel.policies.title"))
@@ -121,8 +218,13 @@ struct SubscriptionsView: View {
 
     @State private var showingEditor = false
 
+    private var shortList: Bool {
+        guard case .loaded = model.phase else { return false }
+        return (1...3).contains(model.subscriptions.count)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelPage {
             PanelStateView(
                 phase: model.phase,
                 titleKey: "subscriptions.empty.title",
@@ -130,68 +232,68 @@ struct SubscriptionsView: View {
                 symbol: "arrow.triangle.2.circlepath",
                 retry: { model.refresh(force: true) },
                 content: {
-                    List(model.subscriptions) { subscription in
-                        HStack(alignment: .top, spacing: 8) {
-                            NavigationLink(value: PanelDetailRoute.subscription(subscription.name)) {
-                                VStack(alignment: .leading, spacing: 5) {
-                                    HStack {
-                                        Text(subscription.name)
-                                            .font(.headline)
-                                        if model.lastCreatedName == subscription.name {
-                                            Text(Localization.text("subscriptions.new"))
+                    PanelList(short: shortList) {
+                        ForEach(model.subscriptions) { subscription in
+                            HStack(alignment: .top, spacing: LayoutMetrics.formGap) {
+                                NavigationLink(value: PanelDetailRoute.subscription(subscription.name)) {
+                                    VStack(alignment: .leading, spacing: LayoutMetrics.detailGap) {
+                                        HStack(spacing: LayoutMetrics.actionGap) {
+                                            Text(subscription.name)
+                                                .font(.headline)
+                                            if model.lastCreatedName == subscription.name {
+                                                Text(Localization.text("subscriptions.new"))
+                                                    .font(.caption)
+                                                    .foregroundStyle(.green)
+                                            }
+                                        }
+                                        Text(Localization.format(
+                                            "subscriptions.summary",
+                                            String(subscription.nodes),
+                                            String(subscription.skipped)
+                                        ))
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                        if let error = subscription.error, !error.isEmpty {
+                                            Text(Localization.format("subscriptions.last_error", error))
                                                 .font(.caption)
-                                                .foregroundStyle(.green)
+                                                .foregroundStyle(.orange)
+                                        }
+                                        if let result = model.lastResult, result.subscription == subscription.name {
+                                            Text(Localization.format(
+                                                result.error == nil ? "subscriptions.result" : "subscriptions.result_failed",
+                                                result.error ?? String(result.nodes)
+                                            ))
+                                            .font(.caption)
+                                            .foregroundStyle(result.error == nil ? Color.secondary : Color.orange)
                                         }
                                     }
-                                    Text(Localization.format(
-                                        "subscriptions.summary",
-                                        String(subscription.nodes),
-                                        String(subscription.skipped)
-                                    ))
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                                    if let error = subscription.error, !error.isEmpty {
-                                        Text(Localization.format("subscriptions.last_error", error))
-                                            .font(.caption)
-                                            .foregroundStyle(.orange)
-                                    }
-                                    if let result = model.lastResult, result.subscription == subscription.name {
-                                        Text(Localization.format(
-                                            result.error == nil ? "subscriptions.result" : "subscriptions.result_failed",
-                                            result.error ?? String(result.nodes)
-                                        ))
-                                        .font(.caption)
-                                        .foregroundStyle(result.error == nil ? Color.secondary : Color.orange)
+                                }
+                                Spacer(minLength: 0)
+                                if model.refreshing.contains(subscription.name) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                                Button(Localization.text("subscriptions.refresh")) {
+                                    Task {
+                                        do {
+                                            try await model.refreshNow(subscription.name)
+                                        } catch {
+                                            model.recordWriteFailure(error)
+                                        }
                                     }
                                 }
+                                .disabled(model.refreshing.contains(subscription.name))
                             }
-                            Spacer(minLength: 0)
-                            if model.refreshing.contains(subscription.name) {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-                            Button(Localization.text("subscriptions.refresh")) {
-                                Task {
-                                    do {
-                                        try await model.refreshNow(subscription.name)
-                                    } catch {
-                                        model.recordWriteFailure(error)
-                                    }
-                                }
-                            }
-                            .disabled(model.refreshing.contains(subscription.name))
+                            .modifier(PanelRowInsets())
                         }
-                        .padding(.vertical, 4)
                     }
-                    .listStyle(.inset)
                 },
                 actions: {
                     Button(Localization.text("subscriptions.action.add")) { showingEditor = true }
                 }
             )
             PanelStatus(failure: model.failure, writeFailure: model.writeFailure, lastUpdated: model.lastUpdated)
-                .padding(.horizontal)
-                .padding(.bottom, 8)
+                .padding(.top, LayoutMetrics.statusGap)
         }
         .navigationTitle(Text("panel.subscriptions.title"))
         .toolbar {
@@ -209,9 +311,14 @@ struct SubscriptionsView: View {
 struct RulesView: View {
     @ObservedObject var model: RulesModel
 
+    private var shortList: Bool {
+        guard case .loaded = model.phase else { return false }
+        return (1...3).contains(model.rules.count)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
+        PanelPage {
+            HStack(alignment: .firstTextBaseline) {
                 Text(Localization.format("rules.total", String(model.total)))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -221,7 +328,7 @@ struct RulesView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .padding(.horizontal)
+            .padding(.bottom, LayoutMetrics.headerGap)
             PanelStateView(
                 phase: model.phase,
                 titleKey: "rules.empty.title",
@@ -229,41 +336,52 @@ struct RulesView: View {
                 symbol: "list.bullet",
                 retry: { model.refresh(force: true) },
                 content: {
-                    List(model.rules) { rule in
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 8) {
-                                Text("#\(rule.index)")
-                                    .foregroundStyle(.tertiary)
-                                if rule.type.lowercased() == "final" {
-                                    Text(Localization.format("rules.final", rule.type.uppercased(), rule.target))
-                                        .font(.headline)
-                                } else {
-                                    Text(rule.type)
-                                        .font(.headline)
-                                    Spacer()
-                                    Text(rule.target)
+                    PanelList(short: shortList) {
+                        ForEach(model.rules) { rule in
+                            VStack(alignment: .leading, spacing: LayoutMetrics.detailGap) {
+                                HStack(spacing: LayoutMetrics.formGap) {
+                                    Text(Localization.format("rules.index_format", String(rule.index)))
+                                        .foregroundStyle(.tertiary)
+                                    if rule.type.lowercased() == "final" {
+                                        Text(Localization.format("rules.final", rule.type.uppercased(), rule.target))
+                                            .font(.headline)
+                                    } else {
+                                        Text(rule.type)
+                                            .font(.headline)
+                                        Spacer()
+                                        Text(rule.target)
+                                    }
+                                }
+                                if let payload = rule.payload, !payload.isEmpty {
+                                    Text(payload)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                                if let source = rule.source, !source.isEmpty {
+                                    Text(Localization.format("rules.source", source, String(rule.line ?? 0)))
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
                                 }
                             }
-                            if let payload = rule.payload, !payload.isEmpty {
-                                Text(payload)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
+                            .background {
+                                if shortList {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(Color(nsColor: .controlBackgroundColor))
+                                        .overlay {
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+                                        }
+                                }
                             }
-                            if let source = rule.source, !source.isEmpty {
-                                Text(Localization.format("rules.source", source, String(rule.line ?? 0)))
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
-                            }
+                            .modifier(PanelRowInsets())
                         }
                     }
-                    .listStyle(.inset)
                 },
                 actions: { EmptyView() }
             )
             PanelStatus(failure: model.failure, writeFailure: nil, lastUpdated: model.lastUpdated)
-                .padding(.horizontal)
-                .padding(.bottom, 8)
+                .padding(.top, LayoutMetrics.statusGap)
         }
         .navigationTitle(Text("panel.rules.title"))
     }
@@ -273,8 +391,13 @@ struct ConnectionsView: View {
     @ObservedObject var model: ConnectionsModel
     @Binding var path: NavigationPath
 
+    private var shortList: Bool {
+        guard case .loaded = model.phase else { return false }
+        return (1...3).contains(model.connections.count)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelPage {
             PanelStateView(
                 phase: model.phase,
                 titleKey: "connections.empty.title",
@@ -282,37 +405,42 @@ struct ConnectionsView: View {
                 symbol: "network",
                 retry: { model.refresh(force: true) },
                 content: {
-                    List(model.connections) { connection in
-                        NavigationLink(value: PanelDetailRoute.connection(connection.id)) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Text(connection.protocolName)
-                                        .font(.headline)
-                                    Text(connection.network)
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text(Localization.format("connections.bytes", Formatting.bytes(connection.up), Formatting.bytes(connection.down)))
+                    PanelList(short: shortList) {
+                        ForEach(model.connections) { connection in
+                            NavigationLink(value: PanelDetailRoute.connection(connection.id)) {
+                                VStack(alignment: .leading, spacing: LayoutMetrics.detailGap) {
+                                    HStack(spacing: LayoutMetrics.actionGap) {
+                                        Text(connection.protocolName)
+                                            .font(.headline)
+                                        Text(connection.network)
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        Text(Localization.format(
+                                            "connections.bytes",
+                                            Formatting.bytes(connection.up),
+                                            Formatting.bytes(connection.down)
+                                        ))
                                         .font(.caption)
-                                }
-                                Text(connection.target)
-                                    .font(.callout)
-                                    .textSelection(.enabled)
-                                if let policy = connection.policy, !policy.isEmpty {
-                                    Text(Localization.format("connections.policy", policy))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .monospacedDigit()
+                                    }
+                                    Text(connection.target)
+                                        .font(.callout)
+                                        .textSelection(.enabled)
+                                    if let policy = connection.policy, !policy.isEmpty {
+                                        Text(Localization.format("connections.policy", policy))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
                                 }
                             }
-                            .padding(.vertical, 3)
+                            .modifier(PanelRowInsets())
                         }
                     }
-                    .listStyle(.inset)
                 },
                 actions: { EmptyView() }
             )
             PanelStatus(failure: model.failure, writeFailure: nil, lastUpdated: model.lastUpdated)
-                .padding(.horizontal)
-                .padding(.bottom, 8)
+                .padding(.top, LayoutMetrics.statusGap)
         }
         .navigationTitle(Text("panel.connections.title"))
     }
@@ -321,8 +449,13 @@ struct ConnectionsView: View {
 struct LogsView: View {
     @ObservedObject var model: LogsModel
 
+    private var shortList: Bool {
+        guard case .loaded = model.phase else { return false }
+        return (1...3).contains(model.events.count)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelPage {
             PanelStateView(
                 phase: model.phase,
                 titleKey: "logs.empty.title",
@@ -330,33 +463,36 @@ struct LogsView: View {
                 symbol: "text.alignleft",
                 retry: { model.refresh(force: true) },
                 content: {
-                    List(model.events) { event in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Image(systemName: event.ok ? "checkmark.circle" : "exclamationmark.triangle")
-                                .foregroundStyle(event.ok ? .green : .orange)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(event.kind)
-                                    .font(.callout.weight(.semibold))
-                                if let detail = event.detail, !detail.isEmpty {
-                                    Text(detail)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .textSelection(.enabled)
+                    PanelList(short: shortList) {
+                        ForEach(model.events) { event in
+                            HStack(alignment: .firstTextBaseline, spacing: LayoutMetrics.formGap) {
+                                Image(systemName: event.ok ? "checkmark.circle" : "exclamationmark.triangle")
+                                    .foregroundStyle(event.ok ? .green : .orange)
+                                    .frame(width: 20)
+                                VStack(alignment: .leading, spacing: LayoutMetrics.detailGap) {
+                                    Text(event.kind)
+                                        .font(.callout.weight(.semibold))
+                                    if let detail = event.detail, !detail.isEmpty {
+                                        Text(detail)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .textSelection(.enabled)
+                                    }
                                 }
+                                Spacer()
+                                Text(event.time)
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                                    .monospacedDigit()
                             }
-                            Spacer()
-                            Text(event.time)
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
+                            .modifier(PanelRowInsets())
                         }
                     }
-                    .listStyle(.inset)
                 },
                 actions: { EmptyView() }
             )
             PanelStatus(failure: model.failure, writeFailure: nil, lastUpdated: model.lastUpdated)
-                .padding(.horizontal)
-                .padding(.bottom, 8)
+                .padding(.top, LayoutMetrics.statusGap)
         }
         .navigationTitle(Text("panel.logs.title"))
     }

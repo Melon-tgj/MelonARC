@@ -63,6 +63,15 @@
 		1A0000000000000000000243 /* PanelCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000133 /* PanelCard.swift */; };
 		1A0000000000000000000244 /* PanelDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000134 /* PanelDetailView.swift */; };
 		1A0000000000000000000245 /* PanelStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000135 /* PanelStateTests.swift */; };
+		1A0000000000000000000246 /* ReleaseVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000136 /* ReleaseVersion.swift */; };
+		1A0000000000000000000247 /* ReleaseUpdateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000137 /* ReleaseUpdateService.swift */; };
+		1A0000000000000000000248 /* UpdateModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000138 /* UpdateModel.swift */; };
+		1A0000000000000000000249 /* UpdateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000139 /* UpdateView.swift */; };
+		1A000000000000000000024A /* ReleaseVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000136 /* ReleaseVersion.swift */; };
+		1A000000000000000000024B /* ReleaseUpdateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000137 /* ReleaseUpdateService.swift */; };
+		1A000000000000000000024C /* ReleaseVersionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000013A /* ReleaseVersionTests.swift */; };
+		1A000000000000000000024D /* ReleaseUpdateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000013B /* ReleaseUpdateTests.swift */; };
+		1A000000000000000000024E /* LayoutMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000013C /* LayoutMetrics.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -147,6 +156,13 @@
 		1A0000000000000000000133 /* PanelCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelCard.swift; sourceTree = "<group>"; };
 		1A0000000000000000000134 /* PanelDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelDetailView.swift; sourceTree = "<group>"; };
 		1A0000000000000000000135 /* PanelStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelStateTests.swift; sourceTree = "<group>"; };
+		1A0000000000000000000136 /* ReleaseVersion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseVersion.swift; sourceTree = "<group>"; };
+		1A0000000000000000000137 /* ReleaseUpdateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseUpdateService.swift; sourceTree = "<group>"; };
+		1A0000000000000000000138 /* UpdateModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateModel.swift; sourceTree = "<group>"; };
+		1A0000000000000000000139 /* UpdateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateView.swift; sourceTree = "<group>"; };
+		1A000000000000000000013A /* ReleaseVersionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseVersionTests.swift; sourceTree = "<group>"; };
+		1A000000000000000000013B /* ReleaseUpdateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReleaseUpdateTests.swift; sourceTree = "<group>"; };
+		1A000000000000000000013C /* LayoutMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayoutMetrics.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -234,6 +250,8 @@
 				1A000000000000000000010A /* FirstRunConfig.swift */,
 				1A000000000000000000010B /* SingleInstanceLock.swift */,
 				1A0000000000000000000120 /* PanelModels.swift */,
+				1A0000000000000000000136 /* ReleaseVersion.swift */,
+				1A0000000000000000000137 /* ReleaseUpdateService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -255,6 +273,9 @@
 				1A0000000000000000000132 /* SubscriptionEditorView.swift */,
 				1A0000000000000000000133 /* PanelCard.swift */,
 				1A0000000000000000000134 /* PanelDetailView.swift */,
+				1A0000000000000000000138 /* UpdateModel.swift */,
+				1A0000000000000000000139 /* UpdateView.swift */,
+				1A000000000000000000013C /* LayoutMetrics.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -290,6 +311,8 @@
 				1A0000000000000000000122 /* APIModelsTests.swift */,
 				1A0000000000000000000123 /* LocalizationTests.swift */,
 				1A0000000000000000000135 /* PanelStateTests.swift */,
+				1A000000000000000000013A /* ReleaseVersionTests.swift */,
+				1A000000000000000000013B /* ReleaseUpdateTests.swift */,
 			);
 			path = MelonARCTests;
 			sourceTree = "<group>";
@@ -460,6 +483,11 @@
 				1A0000000000000000000242 /* SubscriptionEditorView.swift in Sources */,
 				1A0000000000000000000243 /* PanelCard.swift in Sources */,
 				1A0000000000000000000244 /* PanelDetailView.swift in Sources */,
+				1A0000000000000000000246 /* ReleaseVersion.swift in Sources */,
+				1A0000000000000000000247 /* ReleaseUpdateService.swift in Sources */,
+				1A0000000000000000000248 /* UpdateModel.swift in Sources */,
+				1A0000000000000000000249 /* UpdateView.swift in Sources */,
+				1A000000000000000000024E /* LayoutMetrics.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -488,6 +516,10 @@
 				1A0000000000000000000234 /* APIModelsTests.swift in Sources */,
 				1A0000000000000000000235 /* LocalizationTests.swift in Sources */,
 				1A0000000000000000000245 /* PanelStateTests.swift in Sources */,
+				1A000000000000000000024A /* ReleaseVersion.swift in Sources */,
+				1A000000000000000000024B /* ReleaseUpdateService.swift in Sources */,
+				1A000000000000000000024C /* ReleaseVersionTests.swift in Sources */,
+				1A000000000000000000024D /* ReleaseUpdateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -586,6 +618,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
+				MELONARC_UPDATE_CHANNEL = preview;
 				PRODUCT_BUNDLE_IDENTIFIER = org.melonarc.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
@@ -612,6 +645,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
+				MELONARC_UPDATE_CHANNEL = preview;
 				PRODUCT_BUNDLE_IDENTIFIER = org.melonarc.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;

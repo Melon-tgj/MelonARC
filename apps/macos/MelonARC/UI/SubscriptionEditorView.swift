@@ -1,4 +1,48 @@
+import AppKit
 import SwiftUI
+
+private struct SheetSizing: NSViewRepresentable {
+    let idealHeight: CGFloat
+
+    func makeNSView(context: Context) -> SheetSizingNSView {
+        SheetSizingNSView(idealHeight: idealHeight)
+    }
+
+    func updateNSView(_ nsView: SheetSizingNSView, context: Context) {
+        nsView.idealHeight = idealHeight
+        nsView.applyIfNeeded()
+    }
+}
+
+private final class SheetSizingNSView: NSView {
+    var idealHeight: CGFloat = LayoutMetrics.Sheet.defaultHeight
+    private var applied = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyIfNeeded()
+    }
+
+    func applyIfNeeded() {
+        guard !applied, let window else { return }
+        applied = true
+        window.contentMinSize = NSSize(
+            width: LayoutMetrics.Sheet.minWidth,
+            height: LayoutMetrics.Sheet.minHeight
+        )
+        window.contentMaxSize = NSSize(
+            width: LayoutMetrics.Sheet.maxWidth,
+            height: LayoutMetrics.Sheet.maxHeight
+        )
+        var size = window.contentSize
+        size.width = LayoutMetrics.Sheet.defaultWidth
+        size.height = min(
+            max(idealHeight, LayoutMetrics.Sheet.minHeight),
+            LayoutMetrics.Sheet.maxHeight
+        )
+        window.setContentSize(size)
+    }
+}
 
 struct SubscriptionEditorView: View {
     @Environment(\.dismiss) private var dismiss
@@ -11,43 +55,92 @@ struct SubscriptionEditorView: View {
     @State private var localError: String?
     @State private var submitting = false
 
+    private var idealHeight: CGFloat {
+        usesCustomInterval
+            ? LayoutMetrics.Sheet.expandedHeight
+            : LayoutMetrics.Sheet.defaultHeight
+    }
+
     var body: some View {
-        NavigationStack {
-            Form {
-                Section(Localization.text("subscriptions.form.title")) {
-                    TextField(Localization.text("subscriptions.field.name"), text: $name)
-                    TextField(Localization.text("subscriptions.field.url"), text: $url)
-                        .autocorrectionDisabled()
-                    Toggle(Localization.text("subscriptions.field.custom_interval"), isOn: $usesCustomInterval)
+        VStack(alignment: .leading, spacing: LayoutMetrics.headerGap) {
+            Text(Localization.text("subscriptions.action.add"))
+                .font(.title2.weight(.semibold))
+                .frame(minHeight: 24)
+            ScrollView {
+                Grid(horizontalSpacing: LayoutMetrics.formGap, verticalSpacing: LayoutMetrics.formGap) {
+                    GridRow {
+                        Text(Localization.text("subscriptions.field.name"))
+                            .gridColumnAlignment(.trailing)
+                            .frame(width: LayoutMetrics.Sheet.labelColumn, alignment: .trailing)
+                        TextField(Localization.text("subscriptions.field.name"), text: $name)
+                            .frame(minWidth: LayoutMetrics.Sheet.minimumInputWidth)
+                            .frame(minHeight: LayoutMetrics.Sheet.controlHeight)
+                            .onSubmit { save() }
+                    }
+                    GridRow {
+                        Text(Localization.text("subscriptions.field.url"))
+                            .gridColumnAlignment(.trailing)
+                            .frame(width: LayoutMetrics.Sheet.labelColumn, alignment: .trailing)
+                        TextField(Localization.text("subscriptions.field.url"), text: $url)
+                            .autocorrectionDisabled()
+                            .frame(minWidth: LayoutMetrics.Sheet.minimumInputWidth)
+                            .frame(minHeight: LayoutMetrics.Sheet.controlHeight)
+                            .onSubmit { save() }
+                    }
+                    GridRow {
+                        Color.clear
+                            .frame(width: LayoutMetrics.Sheet.labelColumn)
+                            .accessibilityHidden(true)
+                        Toggle(Localization.text("subscriptions.field.custom_interval"), isOn: $usesCustomInterval)
+                            .frame(minHeight: LayoutMetrics.Sheet.controlHeight)
+                    }
                     if usesCustomInterval {
-                        Stepper(
-                            value: $intervalMinutes,
-                            in: 5...10080,
-                            step: 5
-                        ) {
-                            Text(Localization.format("subscriptions.field.interval_minutes", String(intervalMinutes)))
+                        GridRow {
+                            Color.clear
+                                .frame(width: LayoutMetrics.Sheet.labelColumn)
+                                .accessibilityHidden(true)
+                            Stepper(
+                                value: $intervalMinutes,
+                                in: 5...10080,
+                                step: 5
+                            ) {
+                                Text(Localization.format(
+                                    "subscriptions.field.interval_minutes",
+                                    String(intervalMinutes)
+                                ))
+                            }
+                            .frame(minHeight: LayoutMetrics.Sheet.controlHeight)
+                        }
+                    }
+                    if let localError {
+                        GridRow {
+                            Text(localError)
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                                .gridCellColumns(2)
                         }
                     }
                 }
-                if let localError {
-                    Section {
-                        Text(localError)
-                            .foregroundStyle(.red)
-                            .textSelection(.enabled)
-                    }
-                }
+                .padding(.vertical, LayoutMetrics.detailGap)
             }
-            .navigationTitle(Localization.text("subscriptions.action.add"))
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(Localization.text("subscriptions.action.cancel")) { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    saveButton
-                }
+            HStack(spacing: LayoutMetrics.actionGap) {
+                Spacer(minLength: 0)
+                Button(Localization.text("subscriptions.action.cancel")) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                saveButton
             }
+            .frame(minHeight: LayoutMetrics.Sheet.controlHeight)
         }
-        .frame(minWidth: 420, minHeight: 300)
+        .padding(LayoutMetrics.sheetInset)
+        .frame(
+            minWidth: LayoutMetrics.Sheet.minWidth,
+            idealWidth: LayoutMetrics.Sheet.defaultWidth,
+            maxWidth: LayoutMetrics.Sheet.maxWidth,
+            minHeight: LayoutMetrics.Sheet.minHeight,
+            idealHeight: idealHeight,
+            maxHeight: LayoutMetrics.Sheet.maxHeight
+        )
+        .background(SheetSizing(idealHeight: idealHeight))
     }
 
     @ViewBuilder
@@ -55,10 +148,12 @@ struct SubscriptionEditorView: View {
         if #available(macOS 26.0, *) {
             Button(Localization.text("subscriptions.action.save"), action: save)
                 .buttonStyle(.glassProminent)
+                .keyboardShortcut(.defaultAction)
                 .disabled(submitting || !isValid)
         } else {
             Button(Localization.text("subscriptions.action.save"), action: save)
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
                 .disabled(submitting || !isValid)
         }
     }

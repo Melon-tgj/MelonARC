@@ -40,6 +40,7 @@ final class AppEnvironment: ObservableObject {
     let instance: InstanceState
     let apiClient: APIClient?
     let supervisor: CoreSupervisor?
+    let update: UpdateModel
     let overview: OverviewModel
     let policies: PoliciesModel
     let subscriptions: SubscriptionsModel
@@ -77,6 +78,7 @@ final class AppEnvironment: ObservableObject {
             instance = .owner
             apiClient = nil
             supervisor = nil
+            update = UpdateModel()
             overview = OverviewModel(client: nil)
             policies = PoliciesModel(client: nil)
             subscriptions = SubscriptionsModel(client: nil)
@@ -94,6 +96,7 @@ final class AppEnvironment: ObservableObject {
         rules = RulesModel(client: client)
         connections = ConnectionsModel(client: client)
         logs = LogsModel(client: client)
+        update = UpdateModel()
         supervisor = CoreSupervisor(settings: loaded)
 
         switch SingleInstanceLock.acquire(at: loaded.lockPath) {
