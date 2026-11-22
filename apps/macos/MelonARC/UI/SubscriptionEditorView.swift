@@ -18,6 +18,15 @@ private final class SheetSizingNSView: NSView {
     var idealHeight: CGFloat = LayoutMetrics.Sheet.defaultHeight
     private var applied = false
 
+    init(idealHeight: CGFloat) {
+        self.idealHeight = idealHeight
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         applyIfNeeded()
@@ -34,11 +43,9 @@ private final class SheetSizingNSView: NSView {
             width: LayoutMetrics.Sheet.maxWidth,
             height: LayoutMetrics.Sheet.maxHeight
         )
-        var size = window.contentSize
-        size.width = LayoutMetrics.Sheet.defaultWidth
-        size.height = min(
-            max(idealHeight, LayoutMetrics.Sheet.minHeight),
-            LayoutMetrics.Sheet.maxHeight
+        let size = NSSize(
+            width: LayoutMetrics.Sheet.defaultWidth,
+            height: min(max(idealHeight, LayoutMetrics.Sheet.minHeight), LayoutMetrics.Sheet.maxHeight)
         )
         window.setContentSize(size)
     }

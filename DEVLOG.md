@@ -7535,3 +7535,53 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
   macOS 13 与 26+ 下三列/窄宽切换、侧栏四态与焦点环、高对比度与暗色模式、
   订阅 sheet 四档尺寸、中英文案、规则短列表、键盘上下键以及 M5.3 更新入口
   仍正常工作。
+
+### M5.3+M5.4 修复：CI #42 五条 Swift 编译错误（2026-11-22）
+
+- **基线**：CI #42（远端提交 `f2a5c490`，运行页
+  https://github.com/Melon-tgj/MelonARC/actions/runs/44989943155）失败。
+  Go、Frontend、Interop 三个 job 全绿；macOS 与 macOS 26 UI (glass)
+  两个 job 报同一组 5 条 Swift 编译错误。按用户附件 `.m53m54f-brief.md`
+  只修这 5 条错误，不回退 M5.3 自研更新检查与 M5.4 排版优化，
+  不碰业务逻辑、API、数据模型、签名、公证与 CI 工作流。
+- **完成内容**（5 条错误、4 个根因）：
+  - `UI/SubscriptionEditorView.swift:8`「argument passed to call that takes
+    no arguments」：类没有逐成员初始化器，`SheetSizingNSView` 未自定义初始化器，
+    继承来的只有无参 `init()`；在 `viewDidMoveToWindow` 之前补
+    `init(idealHeight:)`（先赋值再 `super.init(frame: .zero)`）与
+    子类化必需的 `required init?(coder:)`。
+  - `UI/SubscriptionEditorView.swift:37`「value of type 'NSWindow' has no
+    member 'contentSize'」：`NSWindow` 没有 `contentSize` 读属性，尺寸只通过
+    `setContentSize(_:)` 写入；且读出的宽高随后都被重写，读取本身多余。
+    删掉读取与两项赋值，直接构造 `NSSize` 再 `setContentSize`。
+  - `UI/UpdateModel.swift:246` 与 `:257`（两处同错）「type 'URLResourceKey'
+    has no member 'quarantineProperties'」：键名与值属性名混用；
+    `URLResourceKey` 上是 `quarantinePropertiesKey`，`URLResourceValues`
+    上才是 `quarantineProperties`。两处 `forKeys` 改用
+    `.quarantinePropertiesKey`，`values.quarantineProperties` 读写不动。
+  - `UI/UpdateModel.swift:255`「cannot use mutating member on immutable value:
+    'file' is a 'let' constant」：`URL` 是结构体，`setResourceValues(_:)`
+    是变异方法，`file` 为 let 参数不可调用；先复制到 `var mutableFile`
+    再调用。
+  - 改动文件仅 `UI/SubscriptionEditorView.swift`、`UI/UpdateModel.swift`
+    与本文档。
+- **关键决策及理由**：按苹果官方文档区分 `URLResourceKey.quarantinePropertiesKey`
+  与 `URLResourceValues.quarantineProperties`、`NSWindow.setContentSize(_:)`
+  单向写入、`NSView` 子类的指定初始化器与 `required init?(coder:)` 要求；
+  只做最小修复，不动 `await panel.begin()`（不在 5 条错误内，当前 SDK 可编译）、
+  不处理 `UpdateModel.swift:191` 的 `allowedFileTypes` 废弃警告（仅警告）、
+  不给 NSWindow 加 extension、不改函数签名、不升工具链。
+- **本地验证**：`python3 apps/macos/scripts/check-project.py` 通过
+  （162 objects / 31 app sources / 25 test sources / 1 UI test source）；
+  `python3 apps/macos/scripts/check-strings.py` 通过（220 keys / 144 literal
+  references / 2 languages，仅有未直接引用说明键提示）；
+  `~/sdks/swift/usr/bin/swiftc -parse` 覆盖两个改动文件，结果 `ALL_PARSE_OK`；
+  `git diff --check` 干净；命名红线 grep 对改动文件无命中（DEVLOG 既有两行
+  是历史 grep 模式说明，非产品引用）。`swiftc -parse` 只查语法，本机 Linux
+  无 Xcode/SwiftUI/AppKit，类型错误本地查不出，不声称已编译通过，
+  最终验证靠 CI 重跑。
+- **扩展点**：本阶段只修编译错误，未新增或改动扩展点；`SheetSizing` 与
+  `ensureQuarantine` 的接口和调用方保持原样。
+- **待验**：CI 重跑确认两条 macOS job 的 5 条错误全消、SwiftUI/AppKit 编译与
+  资源/字符串编译通过、UI 测试与单元测试执行、签名打包与 Check and freeze
+  通过并产出候选 DMG；无新的编译错误出现。

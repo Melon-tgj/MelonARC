@@ -243,7 +243,7 @@ final class UpdateModel: ObservableObject {
     }
 
     private func ensureQuarantine(_ file: URL, origin: String) throws {
-        var values = try file.resourceValues(forKeys: [.quarantineProperties])
+        var values = try file.resourceValues(forKeys: [.quarantinePropertiesKey])
         if values.quarantineProperties?.isEmpty != false {
             var properties: [String: Any] = [
                 QuarantineKey.type: QuarantineKey.webDownload,
@@ -252,9 +252,10 @@ final class UpdateModel: ObservableObject {
             ]
             if !origin.isEmpty { properties[QuarantineKey.origin] = origin }
             values.quarantineProperties = properties
-            try file.setResourceValues(values)
+            var mutableFile = file
+            try mutableFile.setResourceValues(values)
         }
-        let verified = try file.resourceValues(forKeys: [.quarantineProperties])
+        let verified = try file.resourceValues(forKeys: [.quarantinePropertiesKey])
         guard let final = verified.quarantineProperties, !final.isEmpty else {
             throw UpdateSaveError.quarantine
         }
