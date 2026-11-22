@@ -353,13 +353,8 @@ final class CoreSupervisor {
         process.terminationHandler = { [weak self] finished in
             self?.queue.async { self?.childExited(finished) }
         }
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
-            self?.queue.async { self?.ingest(data) }
+        output.fileHandleForReading.readabilityHandler = { [weak self] _ in
+            self?.queue.async { [weak self] in self?.ingestAvailable() }
         }
 
         do {
@@ -400,6 +395,16 @@ final class CoreSupervisor {
         if !announced, text.contains("api: http://") {
             announced = true
         }
+    }
+
+    private func ingestAvailable() {
+        guard let output = outputPipe else { return }
+        let data = output.fileHandleForReading.availableData
+        guard !data.isEmpty else {
+            output.fileHandleForReading.readabilityHandler = nil
+            return
+        }
+        ingest(data)
     }
 
     /// Reads what is still buffered after the child is gone.

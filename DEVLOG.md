@@ -7734,3 +7734,61 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
   其余 4 项 UI 测试、74 项单元测试与 4 项 sidecar 测试保持通过；
   签名打包、Check and freeze 产出 build 45 候选 DMG；用户虚拟机按 M5
   清单验收真实 sheet 尺寸、展开态 520×288 与窗口可调整范围。
+
+### M5.6: fix port-conflict classification race (CI #46)（2026-11-22）
+
+- **基线/失败证据**：CI #46（远端 `b5d43997`，本地 `ba54a5f`）总体 Failure；
+  Go、Frontend、Interop、macOS 四个 job 全绿，唯一失败在 macOS 26 UI
+  (glass) job 的 `SidecarTests.testAPortThatIsAlreadyBoundIsReportedAsAConflict`
+  （SidecarTests.swift:200）。同一测试在同轮 macOS 15 job 上 0.774 秒通过，
+  #44/#45 两条 job 也都通过。争夺端口的子进程快照恰好两条：
+  `starting, pid: 12089, failures: 0, failure: nil`，随后
+  `starting, pid: nil, failures: 1, failure: CoreFailure(reason: .exited,
+  detail: "the core exited with status 1")`。核心确实因端口占用以状态 1
+  退出，但监管器把它归类为通用 `.exited` 而非 `.portInUse`，测试等满
+  30 秒（31.414 秒）后失败。
+- **定因**：`apps/macos/MelonARC/Services/CoreSupervisor.swift` 的
+  `makeChild` 装了两个回调：结束处理把 `childExited(finished)` 投递到串行
+  `queue`，可读性处理则在回调线程直接执行 `handle.availableData`
+  （把字节从管道取走），再把 `ingest(data)` 投递到同一 `queue`。两者从不同
+  线程入队，顺序是竞态：若 `childExited` 先入队，`drainOutput()` 面对已被
+  取空的管道，`describeExit` 用的 `captured` 里没有
+  `address already in use` 那行，于是判成 `.exited`；随后入队的 `ingest`
+  才把文本追加进去，为时已晚——失败已经记录并发布。核心打印的文本本身
+  正确，问题纯粹在监管器侧的读取时序。不改测试（30 秒退避把一次误判放大
+  成失败），只修根因。
+- **完成内容**（只改 `CoreSupervisor.swift` 与本节 DEVLOG）：可读性处理
+  改为只向 `queue` 投递一个块，块内在队列上调用新增的 `ingestAvailable()`；
+  该方法在队列上执行 `availableData` 读取，空数据时置
+  `readabilityHandler = nil`，非空时调用 `ingest(data)`。这样所有管道读取
+  （`ingestAvailable` 与 `drainOutput`）都序列化在同一队列上，且合起来
+  恰好覆盖每个字节一次：谁先跑谁拿到数据，另一个读到空。新增的
+  `guard let output = outputPipe` 保证在 `childExited` 清空 `outputPipe`
+  之后才执行的入队块安全空转而不是崩溃。`ingest`、`drainOutput`、
+  `describeExit`、重试/退避逻辑与 `childExited` 其余部分保持不变；测试、
+  Go 核心与其他文件未动。
+- **本地验证**：
+  `python3 apps/macos/scripts/check-project.py` 通过（162 objects /
+  31 app sources / 25 test sources / 1 UI test source）；
+  `python3 apps/macos/scripts/check-strings.py` 通过（220 keys /
+  144 literal references / 2 languages，仅有既有说明键提示）；
+  `~/sdks/swift/usr/bin/swiftc -parse` 对改动文件为 `PARSE_OK`
+  （本机 Linux 无 Xcode/SwiftUI/AppKit，仅语法检查，不声称已编译通过，
+  代码按 CI 的 Swift 6.2.4 语言级别写，未用 6.4 专有语法）；
+  `git diff --check` 干净；读取路径 grep 确认文件内仅两处读管道：
+  `availableData` 在 `ingestAvailable()`（只由入队块调用），`read(...)` 在
+  `drainOutput()`（只由 `childExited()` 调用，且在 `queue` 上），
+  调用方 grep 确认 `childExited` 两处调用（`tick()` 与结束处理入队块）
+  均在 `queue` 上，无队列外读路径；Linux 测试架子
+  `~/workspace/projects/melonarc-linux-tests/run.sh` 跑完 59 项，58 过 /
+  1 败，唯一失败是既有的 `testACoreThatNeverAnswersFailsAtTheEndOfTheBudget`
+  （Linux Foundation 的 Process/主队列行为差异，macOS CI 全绿，
+  非产品缺陷，main 上同样失败），未追查。
+- **关键决策及理由**：把读字节的动作从回调线程搬进串行队列，而不是在
+  `describeExit` 侧加等待/重试或改测试超时；后者只掩盖竞态。保留
+  `drainOutput` 的空管道尾部兜底，两者在同一队列上互不重叠。
+- **扩展点**：本阶段只改读取时序，未新增或改动扩展点。
+- **待验**：CI #47 是真正的验证者——竞态修复一次绿灯证据偏弱，
+  需继续观察后续多次 CI 运行中 `SidecarTests` 的四项真实 sidecar 测试
+  与两条 macOS job 是否稳定通过；同时确认其余测试、签名打包与
+  Check and freeze 不受影响。
