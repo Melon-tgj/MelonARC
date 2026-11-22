@@ -14,6 +14,17 @@ private struct SheetSizing: NSViewRepresentable {
     }
 }
 
+private extension View {
+    @ViewBuilder
+    func fittedSheetSizing() -> some View {
+        if #available(macOS 15.0, *) {
+            presentationSizing(.fitted)
+        } else {
+            self
+        }
+    }
+}
+
 private final class SheetSizingNSView: NSView {
     var idealHeight: CGFloat = LayoutMetrics.Sheet.defaultHeight
     private var applied = false
@@ -148,6 +159,9 @@ struct SubscriptionEditorView: View {
             maxHeight: LayoutMetrics.Sheet.maxHeight
         )
         .background(SheetSizing(idealHeight: idealHeight))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("subscription.editor.root")
+        .fittedSheetSizing()
     }
 
     @ViewBuilder

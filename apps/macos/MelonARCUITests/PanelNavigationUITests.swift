@@ -125,9 +125,17 @@ final class PanelNavigationUITests: XCTestCase {
         add.click()
 
         let sheet = app.sheets.firstMatch
-        let container = sheet.exists ? sheet : app.windows.allElementsBoundByIndex.last
-        guard let container, container.waitForExistence(timeout: 5) else {
-            throw XCTSkip("no sheet window is exposed to accessibility")
+        let container: XCUIElement
+        if sheet.waitForExistence(timeout: 5) {
+            container = sheet
+        } else {
+            let editor = app.descendants(matching: .any)
+                .matching(identifier: "subscription.editor.root")
+                .firstMatch
+            guard editor.waitForExistence(timeout: 5) else {
+                throw XCTSkip("no sheet window is exposed to accessibility")
+            }
+            container = editor
         }
         let frame = container.frame
         XCTAssertGreaterThanOrEqual(frame.width, 447)

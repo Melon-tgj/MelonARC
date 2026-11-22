@@ -7663,3 +7663,74 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
 - **待验**：CI 重跑确认 74 个单元测试 0 失败、UI 测试通过、4 项真实
   sidecar 测试执行、签名打包与 Check and freeze 通过并产出候选 DMG
   （build 45）。
+
+### M5.5：修复 CI #45 订阅 sheet 几何越界（2026-11-22）
+
+- **基线**：本地 HEAD `cb1fef0`，工作区除任务简报外干净；CI #45
+  （https://github.com/Melon-tgj/MelonARC/actions/runs/45002371663）中 Go、
+  Frontend、Interop 与 macOS 26 UI (glass) 四个 job 全绿，macOS job 只在
+  「Test the app and the real sidecar」步骤 exit 65：`MelonARCTests` 74/74
+  通过，UI 测试 2 通过 / 2 跳过 / 1 失败，唯一失败是
+  `testSubscriptionSheetGeometryStaysInsideTheDeclaredBounds` 的
+  `980.0 > 641.0`。候选 DMG（build 45）未产出，当前仍是 #41 的 build 41。
+- **定因**：实测 980 恰是 `App/MelonARCApp.swift:19` 的主窗口
+  `.defaultSize(width: 980, height: 620)` 宽度。苹果文档说明
+  `View.presentationSizing(_:)` 默认值为 `.automatic`，而 `.fitted` 的
+  呈现尺寸由内容理想尺寸决定；M5.4 虽给 sheet 内容写了
+  `frame(minWidth: 448, idealWidth: 520, maxWidth: 640, …)` 与 AppKit
+  `contentMinSize/contentMaxSize/setContentSize` 护栏，但未声明 fitted，
+  macOS 15 的默认呈现尺寸仍取父窗口宽度，导致 sheet 宽 980。
+  另，测试在 `app.sheets` 不存在时回退到 `app.windows` 最后一个窗口，
+  该回退在 macOS 15 上可能取到主窗口，同样会得到 980；macOS 26 glass job
+  通过，属于系统默认呈现/AX 暴露差异，不是测试边界与产品设计冲突。
+- **完成内容**（只改两个必要文件）：
+  - `UI/SubscriptionEditorView.swift` 新增私有 `View.fittedSheetSizing()`，
+    用 `if #available(macOS 15.0, *)` 包裹 `.presentationSizing(.fitted)`，
+    部署下限仍为 macOS 13；在 sheet 内容 outermost 应用该修饰符，让
+    呈现尺寸按内容的 idealWidth/idealHeight（520×248 或展开 520×288）落盘。
+    保留 M5.4 的 `LayoutMetrics.Sheet` 尺寸令牌与 `SheetSizingNSView`
+    AppKit 护栏，供 macOS 13/14 使用且两处数值一致。
+  - 同一视图根加 `.accessibilityElement(children: .contain)` 与
+    `.accessibilityIdentifier("subscription.editor.root")`，作为稳定的
+    sheet 锚点；不覆盖子控件的标识。
+  - `MelonARCUITests/PanelNavigationUITests.swift` 的几何测试改为：
+    `app.sheets.firstMatch` 存在时继续量 sheet 窗口；不存在时改量带上述
+    标识的 sheet 内容根，彻底移除会误取主窗口的 `app.windows.last` 回退。
+    断言边界 447–641 / 239–481 原样保留，未改测试去迁就实现。
+- **关键决策及理由**：按苹果官方文档把「内容理想尺寸驱动呈现尺寸」显式
+  声明为 `.fitted`，而不是继续靠 AppKit 在 `viewDidMoveToWindow` 单次
+  `setContentSize` 与 SwiftUI 布局抢时序；`presentationSizing` 自 macOS 15
+  起可用，故按部署下限 13.0 做可用性分支，13/14 仍由既有 AppKit 护栏负责。
+  测试只在 AX 未暴露 sheet 时换用显式的 sheet 内容锚点，不再把任意最后一个
+  窗口当 sheet；若锚点也未暴露仍按既有约定 XCTSkip，不把环境差异当产品缺陷。
+  不改 `candidate(for:)`、业务逻辑、API、数据模型、签名、公证与 ci.yml。
+- **原生接口与文档依据**：`View.presentationSizing(_:)`
+  <https://developer.apple.com/documentation/swiftui/view/presentationsizing(_:)>
+  （默认 `.automatic`，定义呈现尺寸并让呈现采用返回尺寸）；
+  `PresentationSizing.fitted`
+  <https://developer.apple.com/documentation/swiftui/presentationsizing/fitted>
+  （尺寸由内容理想尺寸决定；macOS 15+）；`sheet(isPresented:onDismiss:content:)`
+  <https://developer.apple.com/documentation/swiftui/view/sheet(ispresented:ondismiss:content:)>；
+  `NSWindow.setContentSize(_:)`
+  <https://developer.apple.com/documentation/appkit/nswindow/setcontentsize(_:)>；
+  `NSWindow.contentMaxSize`
+  <https://developer.apple.com/documentation/appkit/nswindow/contentmaxsize>；
+  `XCUIElementQuery.matching(identifier:)`
+  <https://developer.apple.com/documentation/xcuiautomation/xcuielementquery/matching(identifier:)>。
+- **本地验证**：`python3 apps/macos/scripts/check-project.py` 通过
+  （162 objects / 31 app sources / 25 test sources / 1 UI test source）；
+  `python3 apps/macos/scripts/check-strings.py` 通过（220 keys /
+  144 literal references / 2 languages，仅有既有说明键提示）；
+  `~/sdks/swift/usr/bin/swiftc -parse` 覆盖两个改动文件，结果通过；
+  `git diff --check` 干净；命名红线 grep 对两个改动文件零命中
+  （DEVLOG 既有 4 行是历史检查模式说明，本阶段未新增）。
+  本机 Linux 无 Xcode/SwiftUI/AppKit，`swiftc -parse` 仅查语法，
+  类型检查、界面编译与 XCUITest 均留待 CI，不声称本机已编译通过。
+- **扩展点**：`fittedSheetSizing()` 是可复用修饰符，后续新 sheet 只需一行
+  接入；`subscription.editor.root` 是可复用的稳定标识，后续几何/交互回归
+  不必依赖窗口顺序；`LayoutMetrics.Sheet` 仍是尺寸唯一来源，面板注册表、
+  API 客户端分层、出站/规则/策略组扩展点与文案键值化均未改动。
+- **待验**：CI 重跑确认 macOS 15 与 macOS 26 两条 job 的该 UI 测试通过，
+  其余 4 项 UI 测试、74 项单元测试与 4 项 sidecar 测试保持通过；
+  签名打包、Check and freeze 产出 build 45 候选 DMG；用户虚拟机按 M5
+  清单验收真实 sheet 尺寸、展开态 520×288 与窗口可调整范围。
