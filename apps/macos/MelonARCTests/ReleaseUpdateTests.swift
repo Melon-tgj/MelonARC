@@ -92,19 +92,24 @@ private func hexDigest(_ data: Data) -> String {
 
 private func candidate(for data: Data, digest: String? = nil) throws -> ReleaseCandidate {
     let decoder = JSONDecoder()
-    let decoded = try decoder.decode(
-        ReleaseRecord.self,
+    let records = try decoder.decode(
+        [ReleaseRecord].self,
         from: releaseList([releaseRecordJSON(tag: "v42", assets: [asset(digest: digest)])])
     )
+    let record = try XCTUnwrap(records.first, "expected a fixture release")
     let manifest = try decoder.decode(
         CandidateManifest.self,
         from: manifestData(digest: hexDigest(data))
     )
+    let dmg = try XCTUnwrap(
+        record.assets.first { $0.name == manifest.candidate },
+        "expected the DMG named by the fixture manifest"
+    )
     return ReleaseCandidate(
-        record: decoded,
+        record: record,
         manifest: manifest,
-        dmg: decoded.assets[0],
-        version: manifest.releaseVersion!
+        dmg: dmg,
+        version: try XCTUnwrap(manifest.releaseVersion, "invalid fixture version")
     )
 }
 

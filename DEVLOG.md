@@ -7621,3 +7621,45 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
 - **待验**：CI 重跑确认两条 macOS job 的 3 处名字冲突全消、测试 target
    正常编译并执行 ReleaseUpdateTests 等单元测试，签名打包与 Check and
    freeze 不受影响。
+
+### M5.3+M5.4 修复：CI #44 测试夹具解码类型不匹配（GPT 决策，2026-11-22）
+
+- **基线**：CI #44（远端提交 `b38b2729`，运行页
+  https://github.com/Melon-tgj/MelonARC/actions/runs/44995924355）失败。
+  Go、Frontend、Interop 三个 job 全绿；macOS 与 macOS 26 UI (glass)
+  两个 job 的单元测试 74 项中 3 项失败，exit 65。3 个失败都在
+  ReleaseUpdateTests，错误原文完全相同（ReleaseUpdateTests.swift:95）：
+  `typeMismatch(Swift.Dictionary<Swift.String, Any>, ... "Expected to decode
+  Dictionary<String, Any> but found an array instead.")`。#42→#43→#44
+  连续三轮红，按用户在 CI #38 立的规矩停修，问题交 GPT 最强模型决策；
+  本节按 GPT 方案执行，补丁原文照用（GPT 答复存档于仓库外
+  ~/workspace/projects/melonarc-gpt-answers-ci44-20261122.md）。
+- **完成内容**：只改 `apps/macos/MelonARCTests/ReleaseUpdateTests.swift`
+  的文件级辅助函数 `candidate(for:)`（93–109 行）：`ReleaseRecord.self`
+  解码改 `[ReleaseRecord].self`，与生产代码 `fetchReleases()`
+  （ReleaseUpdateService.swift:252）的列表解码一致；取首条记录时用
+  `XCTUnwrap(records.first)`；`decoded.assets[0]` 改按清单
+  `manifest.candidate` 指定的文件名匹配 DMG 并用 `XCTUnwrap`；
+  `manifest.releaseVersion!` 改 `try XCTUnwrap(...)`。其余测试代码、
+  应用代码、行为、架构、工具链不动。
+- **关键决策及理由**：`releaseList` 序列化的是 `[[String: Any]]`，
+  顶层为数组，而原代码按单个对象解码，顶层类型不匹配（codingPath
+  为空）；改数组解码而非绕开 releaseList 直接序列化单个对象，是为
+  了让夹具继续覆盖生产接口的列表格式契约。`transport.requests[1]`
+  的潜在越界（分页测试，202 行）GPT 明确留给以后处理，本轮分页测
+  试已通过；`httpResponse`、`currentVersion` 的强制解包与
+  `ReleaseVersionTests.record` 保留，理由见 GPT 方案存档。
+- **本地验证**：补丁由 `git apply --check` 先验可干净应用，再原样打入；
+  `python3 apps/macos/scripts/check-project.py` 通过（162 objects /
+  31 app sources / 25 test sources / 1 UI test source）；
+  `python3 apps/macos/scripts/check-strings.py` 通过（220 keys /
+  144 literal references / 2 languages，仅有未直接引用说明键提示）；
+  `~/sdks/swift/usr/bin/swiftc -parse` 覆盖改动文件，结果 `PARSE_OK`
+  （仅语法检查；本机 Linux 无 Xcode/SwiftUI/AppKit，类型错误本地查不出，
+  不声称已编译通过）；`git diff --check` 干净；命名红线 grep 无命中。
+  GPT 称已在其本机复现原失败并验证补丁后 74/74 通过，本机无 Xcode
+  无法复核该说法，最终验证靠 CI 重跑。
+- **扩展点**：本阶段只改测试辅助函数，未新增或改动扩展点。
+- **待验**：CI 重跑确认 74 个单元测试 0 失败、UI 测试通过、4 项真实
+  sidecar 测试执行、签名打包与 Check and freeze 通过并产出候选 DMG
+  （build 45）。
