@@ -101,12 +101,13 @@ final class CoreSupervisor {
     private let budget: TimeInterval
     private let backoff: (Int) -> TimeInterval
     private let queue = DispatchQueue(label: "org.melonarc.core-supervisor")
+    private static let outputBatchSize = 64 * 1024
 
     private var timer: DispatchSourceTimer?
     private var state: CoreState = .stopped
     private var child: Process?
     private var inputPipe: Pipe?
-    private var outputPipe: Pipe?
+    private var outputSource: DispatchSourceRead?
     private var logHandle: FileHandle?
     private var spawnedAt: Date?
     private var restartAt: Date?
@@ -118,7 +119,7 @@ final class CoreSupervisor {
     private var announced = false
     /// A bounded tail of the child's output, used to recognise a known failure
     /// from the sentence the core printed.
-    private var captured = ""
+    private var captured = Data()
     /// Set when the shell stops the child itself, so the exit is reported with the
     /// reason the shell knows instead of "exited with status".
     private var pendingFailure: CoreFailure?
@@ -260,7 +261,7 @@ final class CoreSupervisor {
         restartAt = nil
         announced = false
         probeRunning = false
-        captured = ""
+        captured.removeAll(keepingCapacity: true)
         failure = nil
 
         guard let core = settings.corePath else {
@@ -353,16 +354,13 @@ final class CoreSupervisor {
         process.terminationHandler = { [weak self] finished in
             self?.queue.async { self?.childExited(finished) }
         }
-        output.fileHandleForReading.readabilityHandler = { [weak self] _ in
-            self?.queue.async { [weak self] in self?.ingestAvailable() }
+        let reader = output.fileHandleForReading
+        let descriptor = reader.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
-
-        do {
-            try process.run()
-        } catch {
-            output.fileHandleForReading.readabilityHandler = nil
-            throw error
-        }
+        try process.run()
 
         // The child has its own copies now. Ours would keep the pipe open and hide
         // both the child's end of file and the shell's death from the other side.
@@ -370,7 +368,14 @@ final class CoreSupervisor {
         try? input.fileHandleForReading.close()
 
         inputPipe = input
-        outputPipe = output
+        let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
+        source.setEventHandler { [weak self] in
+            guard let self, self.child === process else { return }
+            self.readOutput(upTo: Self.outputBatchSize)
+        }
+        source.setCancelHandler { try? reader.close() }
+        outputSource = source
+        source.resume()
         return process
     }
 
@@ -387,49 +392,49 @@ final class CoreSupervisor {
         if let log = logHandle {
             try? log.write(contentsOf: data)
         }
-        guard let text = String(data: data, encoding: .utf8) else { return }
-        captured.append(text)
-        if captured.count > 8192 {
-            captured = String(captured.suffix(8192))
-        }
-        if !announced, text.contains("api: http://") {
+        captured.append(data)
+        if !announced, captured.range(of: Data("api: http://".utf8)) != nil {
             announced = true
         }
+        if captured.count > 8192 {
+            captured = Data(captured.suffix(8192))
+        }
     }
 
-    private func ingestAvailable() {
-        guard let output = outputPipe else { return }
-        let data = output.fileHandleForReading.availableData
-        guard !data.isEmpty else {
-            output.fileHandleForReading.readabilityHandler = nil
+    /// A busy writer gets a bounded turn on the same queue that supervises it.
+    private func readOutput(upTo limit: Int) {
+        guard let source = outputSource else { return }
+        let descriptor = Int32(source.handle)
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        var remaining = limit
+        while remaining > 0 {
+            let count = read(descriptor, &buffer, min(remaining, buffer.count))
+            if count > 0 {
+                ingest(Data(buffer.prefix(count)))
+                remaining -= count
+                continue
+            }
+            if count < 0 && errno == EINTR { continue }
+            if count == 0 || (errno != EAGAIN && errno != EWOULDBLOCK) {
+                cancelOutput()
+            }
             return
         }
-        ingest(data)
     }
 
-    /// Reads what is still buffered after the child is gone.
-    ///
-    /// The read end is switched to non-blocking first: a child that left a
-    /// grandchild holding the same pipe would otherwise block the supervisor queue
-    /// in `read`, and the whole supervision would stop with it. The tail is
-    /// best-effort — the lines that matter (the handshake and a busy port) are also
-    /// seen by the readability handler while the child is still alive.
-    private func drainOutput() {
-        guard let output = outputPipe else { return }
-        let descriptor = output.fileHandleForReading.fileDescriptor
-        let flags = fcntl(descriptor, F_GETFL)
-        guard flags >= 0 else { return }
-        _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
-        defer { _ = fcntl(descriptor, F_SETFL, flags) }
+    /// Darwin reports the unread pipe bytes in st_size. Drain that snapshot before
+    /// classification even if a descendant keeps the write end open or keeps logging.
+    private func finishOutput() {
+        guard let source = outputSource else { return }
+        var info = stat()
+        let limit = fstat(Int32(source.handle), &info) == 0 ? Int(info.st_size) : Self.outputBatchSize
+        readOutput(upTo: limit)
+        cancelOutput()
+    }
 
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        var total = 0
-        while total < 65536 {
-            let count = read(descriptor, &buffer, buffer.count)
-            guard count > 0 else { break }
-            ingest(Data(buffer[0..<count]))
-            total += count
-        }
+    private func cancelOutput() {
+        outputSource?.cancel()
+        outputSource = nil
     }
 
     private func probe() {
@@ -465,9 +470,7 @@ final class CoreSupervisor {
 
     private func childExited(_ process: Process) {
         guard process === child else { return }
-        drainOutput()
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        outputPipe = nil
+        finishOutput()
         closeLog()
         closeLivenessPipe()
         child = nil
@@ -536,8 +539,7 @@ final class CoreSupervisor {
         if let running = child, running.isRunning {
             kill(running.processIdentifier, SIGKILL)
         }
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        outputPipe = nil
+        finishOutput()
         closeLog()
         closeLivenessPipe()
         child = nil
@@ -587,7 +589,7 @@ final class CoreSupervisor {
         }
 
         let reason: CoreFailure.Reason
-        if captured.contains("address already in use") {
+        if captured.range(of: Data("address already in use".utf8)) != nil {
             reason = .portInUse
         } else if process.terminationReason == .uncaughtSignal {
             reason = .signalled

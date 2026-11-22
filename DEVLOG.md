@@ -7792,3 +7792,59 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
   需继续观察后续多次 CI 运行中 `SidecarTests` 的四项真实 sidecar 测试
   与两条 macOS job 是否稳定通过；同时确认其余测试、签名打包与
   Check and freeze 不受影响。
+
+### M5.6 修复：CI #47 监管器回归（GPT 决策）（2026-11-22）
+
+- **基线/失败证据**：CI #47（远端 `f3c9cfd0`，本地 `53b02b5`）总体 Failure；
+  Go、Frontend 绿，Interop、macOS、macOS 26 UI (glass) 红，build 47 未生成。
+  两条 macOS job 单元测试各 74 项、9 个失败断言（5 个失败用例）：四个
+  `SidecarTests` 全败，套件耗时由 #46 的 3.579 秒涨到 210.603 秒；端口测试
+  改在等待占用者核心就绪处失败（SidecarTests.swift:186，30.084 秒，连第一
+  个核心都没就绪）；`CoreSupervisorTests.testACoreThatNeverAnswersFailsAtTheEndOfTheBudget`
+  报 budget never expired（20.156 秒）；令牌轮换用例 4 条错误（首核心未就绪、
+  首核心没停掉、第二核心未就绪、令牌未轮换）。UI 测试两条 job 各 5 项 0 失败。
+  Interop 仅 `TestInteropSnell/v5/udp` 超时（10.00 秒）。
+- **定因**（GPT 决策，Muse 按 #44 流程逐项核验）：M5.6 把可能阻塞的
+  `availableData` 移到了监管器串行队列；可读通知不保证稍后执行的每次读取
+  都能立即返回——同一批字节引发两次排队时，第一次读走握手，第二次在空
+  管道上等待，堵死串行队列，`tick()`、探测结果、`childExited`、`shutdown`
+  全部停摆，核心永不就绪、预算永不到期、停也停不掉。GPT 另补一点：迟到的
+  `ingestAvailable` 通过可变 `outputPipe` 定位读端，可能读到下一次启动的
+  管道。证据：预算测试失败耗时 20.156 秒恰等于假核心的 `sleep 20`（队列在
+  子进程退出、管道到 EOF 时解堵）；真实核心用例的 `/v1/status` 请求仍拿到
+  预期字段、错误令牌仍得到未授权响应，说明核心本身在服务，故障只在监管器
+  对就绪状态的推进。
+- **完成内容**（只改 `CoreSupervisor.swift` 与本节 DEVLOG，补丁原样应用，
+  未改动）：读端在启动前设 `O_NONBLOCK`（`F_GETFL`/`F_SETFL` 检查，失败走
+  `.launchFailed`）；每轮启动一个 `DispatchSourceRead` 直接在监管器队列上
+  读，事件先核对 `child === process`，取消后关闭该次启动的读端；新增
+  `readOutput(upTo:)` 每次调度最多读 64 KiB，`EINTR` 重试，
+  `EAGAIN`/`EWOULDBLOCK` 把队列还给定时器与停机，EOF 或永久读错取消事件源；
+  `ingest` 改按字节匹配，`captured` 由 `String` 改 `Data`，握手与端口错误可
+  跨读取边界匹配，保留最近 8 KiB；退出与停机前由 `finishOutput()` 按 Darwin
+  管道 `fstat().st_size` 的未读字节数收尾再调用 `describeExit`，取长度失败
+  回退 64 KiB 上限；删除 `outputPipe`、`drainOutput()`、`ingestAvailable()`、
+  `readabilityHandler`。测试、Go 核心与其他文件未动。
+- **本地验证**：
+  `python3 apps/macos/scripts/check-project.py` 通过（162 objects /
+  31 app sources / 25 test sources / 1 UI test source）；
+  `python3 apps/macos/scripts/check-strings.py` 通过（220 keys /
+  144 literal references / 2 languages，仅有既有说明键提示）；
+  `~/sdks/swift/usr/bin/swiftc -parse` 对改动文件为 `PARSE_OK`
+  （本机 Linux 无 Xcode/SwiftUI/AppKit，仅语法检查，不声称已编译通过，
+  代码按 CI 的 Swift 6.2.4 语言级别写，未用 6.4 专有语法）；
+  `git diff --check` 干净；grep 确认文件内已无 `readabilityHandler` /
+  `outputPipe` / `drainOutput` / `ingestAvailable` 残留引用；补丁提取
+  SHA-256 与 GPT 声称一致，`git apply --check --index` 干净通过；
+  Linux 测试架子 `~/workspace/projects/melonarc-linux-tests/run.sh`
+  跑完 59 项，58 过 / 1 败，唯一失败仍是既有的预算测试
+  （Linux Foundation 行为差异，main 上同样失败，非产品缺陷）。
+- **关键决策及理由**：按用户指示交 GPT 定夺，补丁原样应用不改动；非阻塞读
+  + 事件源 + 收尾分类同时修复 #46 的分类竞态与 #47 的队列停滞；
+  Snell v5/udp 确认独立（Interop 调用链不经过 Swift 监管器，同款超时在
+  #38 出现过并自愈），本轮不捆绑修。
+- **扩展点**：本阶段只改读取机制，未新增或改动扩展点。
+- **待验**：CI #48 是真正的验证者——两条 macOS job 各 74/74 单元测试通过
+  （4 项 `SidecarTests` 全部实际执行）、UI 0 失败、build 48 产物生成且清单
+  核对一致；竞态修复一次绿灯证据偏弱，按 GPT 建议观察后续 3–5 次正常 CI，
+  重点看 SidecarTests 是否稳定、是否再出现 30 秒倍数的超时。
