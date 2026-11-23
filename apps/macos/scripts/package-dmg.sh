@@ -16,6 +16,12 @@ if [ ! -x "$core" ] || [ ! -x "$main" ]; then
   exit 1
 fi
 mkdir -p "$(dirname "$dmg")"
+dmg_dir=$(cd "$(dirname "$dmg")" && pwd)
+dmg_file=$(basename "$dmg")
+
+# Third-party licence texts belong in the bundle before either codesign call:
+# adding them afterwards would break the seals (pre-release checklist B2).
+bash "$here/collect-core-licenses.sh" "$app"
 
 # Ad-hoc identity, Hardened Runtime, no entitlements, sandbox off.
 codesign --force --sign - --options runtime "$core"
@@ -68,6 +74,8 @@ fi
 detach
 trap - EXIT
 
-shasum -a 256 "$dmg" > "$dmg.sha256"
-cat "$dmg.sha256"
+# Hash the basename from inside the DMG's own directory: the public sidecar
+# must not carry a runner's absolute path. check-candidate.sh reads field 1.
+(cd "$dmg_dir" && shasum -a 256 "$dmg_file" > "$dmg_file.sha256")
+cat "$dmg_dir/$dmg_file.sha256"
 printf 'ok: signed, mounted and verified %s\n' "$dmg"

@@ -11,7 +11,7 @@ An open-source, cross-platform rule-based proxy client. It dispatches traffic to
 [![CI](https://github.com/Melon-tgj/MelonARC/actions/workflows/ci.yml/badge.svg)](https://github.com/Melon-tgj/MelonARC/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8.svg?logo=go&logoColor=white)](go.mod)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)](#platforms-and-build-artefacts)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#platforms-and-build-artefacts)
 [![Preview](https://img.shields.io/badge/preview-0.1.0--preview.1-orange.svg)](docs/release-notes-0.1.0-preview.1.md)
 
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md)
@@ -20,7 +20,7 @@ An open-source, cross-platform rule-based proxy client. It dispatches traffic to
 
 ---
 
-**Status: 0.x source preview, not a stable release.** The Go core, the local API, the CLI and the desktop frontend are implemented; native installers, a compiled desktop shell and end-to-end validation on the release targets are not. The support matrix below is the single source of truth for what has actually been verified. Do not read the feature list as a promise of working combinations.
+**Status: 0.x source preview, not a stable release.** The Go core, the local API, the CLI, the desktop frontend and a native macOS arm64 shell (SwiftUI + AppKit) are implemented. CI builds the macOS shell and its core sidecar with Xcode 26.3 / Swift 6.2.4; build 48 is the accepted regression baseline, whose candidate DMG layout was accepted in the user's macOS 27 arm64 VM. That DMG is ad-hoc signed, not notarized, and its Gatekeeper first-open, system-proxy end-to-end and macOS 13 checks are still pending. The Windows/Linux desktop shell remains unbuilt, and end-to-end validation on the release targets is still pending. The support matrix below is the single source of truth for what has actually been verified. Do not read the feature list as a promise of working combinations.
 
 ## Support matrix
 
@@ -56,8 +56,8 @@ The VLESS `xtls-rprx-vision` flow is rejected at configuration time and is not s
 |---|---|---|
 | Linux x86_64 | Source build and tests pass in this workspace | `go build ./...`, `go vet ./...`, `go test ./...`, `gofmt` and the offline frontend suite run here. No installer, no packaged release, no long-running soak test. |
 | Windows x86_64 | **Cross-compile only** | `GOOS=windows go build ./cmd/... ./internal/...` succeeds; the external review also built `CGO_ENABLED=0` for both targets. Nothing has been executed natively: no installer, no runtime test, no device session. The Windows TUN device entry still returns "session not implemented". |
-| macOS arm64 | External review host only | The 2026-11-15 review ran on macOS arm64 with Go 1.27.4 and Node 24.20.0. It is not a declared release target. |
-| Desktop application | Frontend tested, native shell **not built** | The frontend offline and live-core suites pass. The Rust shell has not been compiled here (no `rustc`/`cargo`/WebKitGTK), `Cargo.lock` is absent, and there are no native window screenshots or native IPC tests. Its newest job — starting, supervising and stopping the core process — exists only as source: process hosting, the single-instance lock and the shell settings file have **not** been executed. |
+| macOS arm64 | Declared preview target: native shell built by CI | A native SwiftUI + AppKit shell supervises the Go core sidecar; system proxy mode only, no macOS TUN. CI builds and ad-hoc signs both binaries with Xcode 26.3 / Swift 6.2.4. Build 48 is the regression baseline: its candidate DMG layout was accepted in the user's macOS 27 arm64 VM. Minimum deployment target 13.0; only macOS 27 has been exercised, 13.x is pending, and the DMG is not notarized. Gatekeeper first-open and system-proxy end-to-end checks are still pending. |
+| Desktop application | Frontend tested; native macOS shell built, Windows/Linux Tauri shell **not built** | The frontend offline and live-core suites pass. The native macOS arm64 shell is built by CI and shipped as a DMG (see row above). The Tauri shell intended for Windows/Linux has not been compiled here (no `rustc`/`cargo`/WebKitGTK), `Cargo.lock` is absent, and there are no native window screenshots or native IPC tests for it. On those platforms, process hosting, the single-instance lock and the shell settings file exist only as source and have **not** been executed. |
 
 The development document's promise of a dual-platform installable build with a resident tray, working system proxy and TUN, every protocol connected and all performance figures measured is **not met**. Treat it as a future acceptance criterion, not a description of this tree.
 

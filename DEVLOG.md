@@ -7848,3 +7848,307 @@ Xcode 系统要求兼容矩阵（<https://developer.apple.com/xcode/system-requi
   （4 项 `SidecarTests` 全部实际执行）、UI 0 失败、build 48 产物生成且清单
   核对一致；竞态修复一次绿灯证据偏弱，按 GPT 建议观察后续 3–5 次正常 CI，
   重点看 SidecarTests 是否稳定、是否再出现 30 秒倍数的超时。
+
+### 阶段 0 — 冻结基线（功能完善计划）（2026-11-23）
+
+- **目标**：从 build 48 固定演进起点，保存可追溯的基线原件并制作可分段填写的
+  验收表；范围严格按 `.f0-brief.md`，不改产品代码、CI、回滚、许可与版本注入。
+- **基准 SHA**：本地 HEAD `2d312f4`（`2d312f406c94d1c679ea41d8a865625e0f9df0ab`；
+  按红线只本地提交，无远端、不推送）；远端/CI #48 对应提交
+  `10f2718b872abfb51c181ffc58be479a25b7eb63`；DMG 本体 SHA-256
+  `35247200658f0960eeb0705cd1c20d4e14678026f34ef3e2f6f061aebf232fa9`。
+- **完成内容**：
+  1. 只读核验本地归档 `~/workspace/projects/melonarc-m5-candidate-48/`：
+     重算六份文件的 SHA-256，核对 DMG 大小与 `candidate.json` 全字段；
+     从 `xcodebuild-test.log`、`toolchain.txt`、`xcodebuild-release.log`
+     抄录测试结果与工具链。
+  2. 在归档目录（仓库外）新增 `ARCHIVE-INVENTORY.md`：文件清单与逐文件哈希、
+     逐项核对结果、CI artifact 服务端到期日（北京时间 2026-12-07 00:49:59，
+     来源 GPT 方案 §0）、本地持久位置与取用说明；该文件不提交。
+  3. 把 `docs/pre-release-checklist.md` 改为分段验收表：基线核对、阶段 4
+     首开与浏览器通路、阶段 5 异常与最低系统、发布门槛；每项含断言、验证
+     方法（本地/CI/VM）、结果、build、OS、架构、证据编号。断言取 GPT 方案
+     §4/§5 的现场表与 §6 发布门槛；原 A/B/C/D 压缩为文末「历史记录」附录。
+- **核对结果**：DMG 9,902,002 字节，重算哈希与 `candidate.json.sha256` 及
+  原始 `.sha256` 的哈希值三者一致；`candidate.json` 的 commit、build 48、
+  version `0.1.0-preview-candidate.48`、short_version `0.1.0`、arch `arm64`、
+  `minimum_system_version=13.0`、`bundle_id=org.melonarc.app` 全项一致。
+  归档中只有一份 `xcodebuild test` 日志（runner macOS 15.8.2）：单元测试
+  74/74 通过、0 失败，`SidecarTests` 四项实际执行并通过（3.547 秒，计入 74），
+  UI 5 项 3 通过 2 跳过 0 失败，跳过项为侧栏方向键边界与规则摘要可访问性，
+  末尾 `** TEST SUCCEEDED **`；macOS 26 UI job 的逐项日志**未在归档中找到**，
+  不把方案中的已核实结论冒充为日志原文。`toolchain.txt` 记 Xcode 26.3
+  （17C529）、SDK 26.2、Swift 6.2.4、Go 1.27.4。Release 日志为
+  `CURRENT_PROJECT_VERSION=48` 且 `** BUILD SUCCEEDED **`。原始 `.sha256`
+  含 runner 绝对路径，本阶段只比哈希值，路径修正留阶段 3。
+- **关键决策及理由**：build 48 只作回归对照，不冒充阶段 3 的冻结候选；
+  验收表结果栏除阶段 0 已核的基线行外一律留「未执行＋待阶段 4/5 VM 窗口」，
+  避免以本地或 CI 通过代替用户现场签收；归档取本地持久目录而非 CI 链接，
+  因 artifact 14 天后到期；不改两处已确认的排版瑕疵、不动 `ci.yml`、
+  不修阶段 1/2/3 的内容。
+- **本地验证**：`sha256sum` 与 `stat` 覆盖归档六份原件；`candidate.json`
+  逐字段人工比对；Markdown 表格列数按段一致；`git diff --check` 干净；
+  本阶段无 Swift/Go 代码改动，未运行构建与测试套件。
+- **扩展点**：验收表按 `B0.x / 4.x / 5.x / Gx` 稳定编号分段，后续阶段只填
+  结果、build、OS、架构与证据编号，不必改表结构；证据编号与脱敏规则沿用
+  GPT 方案的分层验证约定。面板注册、API 客户端分层、出站/规则/策略组与
+  文案键值化等扩展点未改动。
+- **归档位置**：`~/workspace/projects/melonarc-m5-candidate-48/`（仓库外，
+  六份原件 + `ARCHIVE-INVENTORY.md`）；取用前按清单重算哈希。
+- **遗留与下一步**：阶段 4、5 的 VM 现场验收待用户窗口，方案建议
+  2026-12-21 或之后（12-01 至 12-20 静默）；冻结候选待阶段 3 产生，
+  阶段 1/2/3 的回滚修复、许可证声明与版本注入均未在本阶段启动；macOS 26
+  job 原始日志与公开校验文件的 basename 形式分别留待阶段 3/归档补取。
+- **提交范围**：仅 `docs/pre-release-checklist.md` 与本文档本地提交；任务简报
+  `.f0-brief.md` 提交后删除，不进仓库；未推送。
+
+### 阶段 1 — Darwin 恢复契约：即时回滚修复（2026-11-23）
+
+- **目标**：只修已复现的即时回滚缺口：接管中途写失败时，回滚不得覆盖接管未触及
+  字段上的人工改值；写回前要比对归属，读不回当前值时不盲写。范围严格按
+  `.f1-brief.md`，不动正常 `Restore`、控制器、快照格式、其他平台后端、CI、
+  命令行与 Swift 侧。
+- **基准 SHA**：本地 HEAD `3fa2355`（`3fa23558ebdd4c340594167d7dd937fe853863d1`，
+  阶段 0 冻结基线）；按红线只本地提交，无远端、不推送。
+- **已核实缺口**：旧 `rollback` 逆序遍历 `snap.Fields` 的全部非 `Observed` 字段，
+  不检查本次是否写过、当前值是否仍等于 `Written`，直接写回 `Before`；正常
+  `Restore` 走 `restoreFields`，带 `current == f.Written` 守卫。第二服务绕过列表
+  在接管中途被人工改动、第一服务第 3 次写失败时，旧回滚会清掉人工改值
+  （GPT 方案记录 3/3 重现）。
+- **完成内容**（只改 `internal/sysproxy/networksetup.go`、
+  `internal/sysproxy/networksetup_test.go` 与本节 DEVLOG）：
+  1. `applyField` 返回本次实际生效的系统命令数。带地址字段先写地址、再写开关：
+     地址命令失败记 0，地址成功而开关失败记 1；单命令字段成功记 1、失败记 0。
+  2. `Commit` 用字段下标记录失败位置，把 `(failedAt, applied, cause)` 交给
+     `rollback`；回滚候选只到失败字段为止，且仅当失败字段有命令生效证据时
+     才把它纳入。`Observed` 字段继续跳过。写过集合只存在于这次调用的内存里，
+     快照字段与 JSON 格式零改动。
+  3. `rollback` 对每个候选先用既有 `readField` 读回，只有 `current == f.Written`
+     才写 `Before`；逆序处理。`Observed` 跳过、当前值已变的用户字段保留；读回
+     失败、写回失败，以及跨命令半写后当前值与 `Written` 不符（归属无法证明）
+     都保留该字段、把错误文本与当前值写进证据，并返回包装既有
+     `ErrRollbackIncomplete` 的错误。错误文本仍为
+     `原因: <ErrRollbackIncomplete原文> (N of M settings could not be put back: 明细)`，
+     控制器据此保留快照的行为逐行只读核对，未改 `sysproxy.go`。
+- **关键决策及理由**：跨命令半写按证据分级——地址命令成功且读回仍等于
+  `Written` 时归属可证，字段按既有 `applyField` 顺序整体写回 `Before`（与
+  `Restore` 同语义）；若人工改过、读不回或命令 outcome 不明，则不整组盲写，
+  保留证据并报 `ErrRollbackIncomplete`，把决定书留给下次启动恢复。已写完字段
+  被用户改动时按 `Restore` 同款语义静默保留，不算不完整；这与半写歧义不同，
+  因为后者仍有部分命令生效、归属无法判定。回滚从失败点向前收敛，未触及服务
+  连 getter 都不会被回滚调用，避免回滚本身再碰别人的设置。
+- **新增测试**（全部使用 `fakeNetworkSetup` 内存夹具，未碰真实网络设置）：
+  `TestNetworkSetupRollbackKeepsAChangeMadeDuringTheTakeover` 是 GPT 指定回归
+  （第二服务绕过列表中途改值 + 第一服务第 3 次写失败，人工值保留且第二服务零
+  回滚写入）；矩阵另有 `TestNetworkSetupRollbackRestoresOnlyFieldsItWrote`
+  （已完成字段逆序写回、失败字段与未触及服务零写入）、
+  `TestNetworkSetupRollbackRestoresAProxyWhoseSwitchWriteFailed`（地址已写、开关
+  失败，读回等于 `Written` 时写回 `Before`）、
+  `TestNetworkSetupRollbackKeepsAChangedHalfWrittenProxy`（半写后被改，留值并报
+  `ErrRollbackIncomplete`，错误保留证据）、
+  `TestNetworkSetupRollbackReportsAReadItCannotDo`（读回失败不盲写，控制器保留
+  `system-proxy.json`）、
+  `TestNetworkSetupRollbackWritesNothingWhenNothingWasWritten`（首写失败，回滚零
+  命令）。夹具只增加 `afterWrite`/`failGet` 两个注入点，不改变既有断言。
+  为确认这些用例确实钉住缺陷，曾在临时 `git worktree` 的基准提交上只替换测试文件
+  运行：6 条新增用例全部失败（旧回滚覆盖 Ethernet 人工绕过列表、写入未触及服务
+  和未写字段、半写改值被覆盖、读失败仍盲写且快照被移除）；工作树已删除。
+- **本地验证**（Linux，Go 在 `~/sdks/go/bin/go`）：
+  `gofmt -l` 对两个改动文件为空；`go vet ./internal/sysproxy/` 通过；
+  `go test ./internal/sysproxy/ -count=1 -v` 全包测试以 `-json` 计数为 61 项通过 /
+  0 失败 / 0 跳过，其中既有的
+  `TestNetworkSetupRollbackPutsBackWhatItWrote`、
+  `TestNetworkSetupReportsAnIncompleteRollback`、
+  `TestNetworkSetupRestoreKeepsWhatTheUserChanged`、
+  `TestNetworkSetupRestoreLeavesAnAddressItCannotUnwrite` 保持通过（空地址例外
+  仍是既有行为，本阶段未改）。
+  `go test ./... -count=1` 全量回归以 `-json` 逐项计数为 **1,393 条目 /
+  1,372 通过 / 21 跳过 / 0 失败**（21 跳过与既有基线同批，非本次新增）。
+  第一次全量运行时 `internal/outbound` 的
+  `TestRealityRejectsWrongCredential` 出现过一次瞬时失败
+  （`the dial succeeded, want a refused handshake`）；该用例单独 `-count=5`
+  5/5 通过，随后全量重跑全绿，上述计数取绿跑；本阶段未改 outbound，不把这次
+  失败算作本次结果，也不冒充从未发生。`git diff --check` 干净。
+- **开放项（待用户决策，只记录不改实现）**：① 原本关闭且地址为空的手动代理，
+  恢复后残留回环地址/端口的已知例外：是否接受为预览版公开限制未定；本阶段只
+  保留 `TestNetworkSetupRestoreLeavesAnAddressItCannotUnwrite` 的既有断言。
+  ② 启动错误分类：恢复失败先于 HTTP API、壳只看到通用退出的问题未动；
+  `cmd/melonarc-core` 与 Swift 侧均未改，建议仍按 GPT 方案给出 Go 定义的稳定
+  启动错误类别后再决策。
+- **扩展点**：本阶段未新增扩展点。恢复契约仍集中在 `internal/sysproxy`；
+  `Field.Written` 与 `readField` 的归属比较、`ErrRollbackIncomplete` 的保留快照
+  语义、面板注册、API 客户端分层、出站/规则/策略组与文案键值化均未改动。
+- **遗留与下一步**：真实 `networksetup` 读写、授权弹窗与双失败现场仍留阶段 4/5
+  的 VM 验证；CI 重跑确认 Go 回归与两条 macOS job 不受影响；阶段 2/3 的许可证
+  声明、版本注入与发布文案未在本阶段启动。
+- **提交范围**：仅 `internal/sysproxy/networksetup.go`、
+  `internal/sysproxy/networksetup_test.go` 与本文档本地提交；任务简报
+  `.f1-brief.md` 提交后删除，不进仓库；未推送。
+
+### 阶段 2 — 随包许可证覆盖实际二进制（功能完善计划）（2026-11-23）
+
+- **目标**：按 `.f2-brief.md` 只做发行物声明与验包：让 `THIRD-PARTY-NOTICES.md`
+  按目标平台列出实际链接依赖，把每个目标核心的第三方许可全文随包装入，并让验包
+  脚本按包内核心的模块清单核对声明与全文。不改产品代码、不改 `ci.yml`、不碰
+  阶段 1/3 的回滚、版本注入与发布文案，也不修两处已确认的排版瑕疵。
+- **基准 SHA**：本地 HEAD `0226cf2`
+  （`0226cf26f548a77c41daa0776264197970ddfdbe`，阶段 1 提交）；回归对照仍为
+  build 48（远端 `10f2718b872abfb51c181ffc58be479a25b7eb63`，DMG 本体 SHA-256
+  `35247200658f0960eeb0705cd1c20d4e14678026f34ef3e2f6f061aebf232fa9`）。按红线
+  只本地提交，无远端、不推送。
+- **已核实缺口**：#48 的 darwin/arm64 核心 `go version -m` 有 19 个 `dep`，声明第 1 节
+  只列 Linux 的 17 项，`go-isatty v0.0.24` 与 `go-strftime v1.1.0` 被列作未链接；
+  DMG 有 GPL 全文与声明索引但没有第三方许可全文目录。本阶段开工时重新交叉编译
+  两目标确认：Darwin 19、Linux 17，差集正是这两项。
+- **完成内容**：
+  1. `THIRD-PARTY-NOTICES.md` 第 1 节改成一张机器可解析的六列表：原四列后追加
+     `Darwin core` / `Linux core` 两列（`yes`/`no`），Darwin 19 行、Linux 17 行。
+     两项 Darwin 专属模块从「未链接」表（第 2 节，现 26 行）移入第 1 节并注明
+     由 `modernc.org/libc` 在非 Linux 目标引入；其许可证从模块缓存中该确切版本的
+     `LICENSE` 逐字读出：`go-isatty v0.0.24` 是 MIT（Yasuhiro MATSUMOTO，题头
+     “MIT License (Expat)”），`go-strftime v1.1.0` 是 MIT（Nuno Cruces，2022）。
+     卷首的 45 个模块/链接数、第 6 节的随包路径一并改为分平台口径：Linux 归档
+     `licenses/`，macOS app `Contents/Resources/licenses/`。
+  2. `scripts/build-release.sh` 仍用第 1 节作声明索引，只取新增的 Linux 列
+     （awk 第 7 字段），并要求该列取值为 `yes`/`no`，解析失败即中止；Linux 与核心
+     dep 清单必须逐项相等，`expected_linked=17` 绊线原样保留。
+  3. 新增 `apps/macos/scripts/collect-core-licenses.sh`，沿用 Linux 打包的收集规则
+     （包内核心的 `go version -m` 为权威清单、`GOPROXY=off` 只读模块缓存、取该版本
+     根目录的 `LICENSE*`/`LICENCE*`/`COPYING*`/`NOTICE*`、每模块一束
+     `<module>@<version>.txt` 且 `/` 写成 `_`、束内注明源文件名、源文件须存在且
+     非空），生成 19 束装入 `$app/Contents/Resources/licenses/`。`package-dmg.sh`
+     在两次 `codesign` 之前调用它：签后补文件会破坏封印，且 CI 的
+     `build-core.sh → xcodebuild → verify-binaries.sh → package-dmg.sh →
+     check-candidate.sh` 顺序不许改。Xcode 工程资源引用未变，`check-project.py`
+     的对象数期望无需调整。
+  4. `apps/macos/scripts/check-candidate.sh` 新增一节：Go 必须可用（否则明确报
+     `::error::`，不静默跳过），以包内核心的 dep 清单为准，核对包内声明的 Darwin
+     列模块名+精确版本完全一致，并为每个 dep 检查 `Resources/licenses/` 内存在
+     同名非空全文束；沿用既有 `fail` 风格，原有五份声明、GPL、图标、版权、最低
+     版本、双二进制 arm64 与 DMG 校验全部未动。
+- **关键决策及理由**：选择「签名前由打包脚本直接写入 app 资源」而不是
+  `build-core.sh` 生成 + Xcode 文件夹引用：前者以最终包内的核心为清单来源，声明、
+  全文和签名对象是同一份实物，也不需要新增工程对象或改 `ci.yml`；收集规则与
+  Linux 脚本保持一致，避免两份包用不同命名或不同原文口径。Linux 解析只认 Linux
+  列，Darwin 多出的两项不会让 Linux 打包误报。
+- **本地验证**（Linux，Go 在 `~/sdks/go/bin/go`）：
+  - `GOOS=darwin GOARCH=arm64` 与 `GOOS=linux GOARCH=amd64` 交叉编译核心并导出
+    dep 清单：Darwin 19 / Linux 17，逐项比对与声明两列全一致，差集仅两项新登记模块。
+  - 新收集脚本对 fake app 内的 Darwin 核心实跑：19 束、26 份许可源文件，逐束
+    解析分隔符后与模块缓存原文按字节比较，26/26 完全一致（抽查项含
+    `go-isatty` 与 `go-strftime`），无一为空。
+  - 在临时 `git worktree` 跑完整 Linux 打包路径成功，17 束全文、CLI 版本回读与
+    tar/SHA 均正常；同工作树内故意改错一处 Linux 声明（漏列、版本错）均按预期
+    失败并把声明与清单判为不同步，把绊线临时改为 16 也如预期失败；每步后恢复，
+    工作树已删除。
+  - `check-candidate.sh` 无法在 Linux 全跑（缺 codesign/plutil/xcrun/iconutil/
+    sips），用 fake app + 假苹果工具 + 真 `go version -m` 输出做逻辑演练：正常候选
+    全检查通过并写出 manifest；删掉一束、改错包内声明版本、PATH 中无 `go` 三种
+    情况分别命中对应 `::error::` 并退出 1。macOS 侧真实执行仍只能等推送后的 CI。
+  - `bash -n` 覆盖四个改动/新增 shell 脚本；`python3 check-project.py` 162 个对象、
+    `check-strings.py` 220 个键均通过；`git diff --check` 干净。
+- **遗留与下一步**：macOS 打包、签名前后时序、只读挂载后的全文与声明核对只能由
+  CI 验证，待推送后跟踪对应 SHA 的 job；阶段 3 的版本注入与发布文案、阶段 4/5 的
+  VM 现场验收均未在本阶段启动。Linux arm64 的声明与 amd64 同源，本阶段按同一份
+  Linux 列覆盖；未在原生 arm64 机器上运行二进制。
+- **扩展点**：声明表用两列布尔标记表达「模块 × 目标核心」，将来新增目标只需加一列
+  并同步解析脚本的字段号；许可束命名与收集规则沿用 checklist B2，验包输入始终是
+  包内核心而非硬编码清单。面板注册、API 客户端分层、出站/规则/策略组与文案
+  键值化均未改动。
+- **提交范围**：仅 `THIRD-PARTY-NOTICES.md`、`scripts/build-release.sh`、
+  `apps/macos/scripts/collect-core-licenses.sh`、
+  `apps/macos/scripts/package-dmg.sh`、`apps/macos/scripts/check-candidate.sh`
+  与本文档本地提交；任务简报 `.f2-brief.md` 提交前删除，不进仓库；未推送。
+
+### 阶段 3 — 冻结待验版本（功能完善计划）（2026-11-23）
+
+- **目标**：按 `.f3-brief.md` 把公开文案、构建版本输入与三件产品资产对齐到同一
+  提交，形成待验材料；两笔独立提交（先文案、后构建输入），不建标签、不发布、
+  不推送。不改产品 Go 代码、不改 Swift、不动 `ci.yml`、不修两处已确认的排版瑕疵。
+- **基准 SHA**：阶段 2 提交 `c69dcd3`；文案提交①
+  `10be6514684e45de8261fbaa04acae15bfb2d486`（`docs: describe the real macOS
+  shell in readmes and release draft (feature-plan stage 3)`，5 文件）；
+  构建提交②为本提交（`build: inject the preview core version and write portable
+  checksums (feature-plan stage 3)`，3 文件）。Git 不把提交的自身 SHA 写进自身，
+  ②的实际值以提交后的 `git rev-parse HEAD` 为准，已在本次会话结果中报告。
+  回归对照仍是 build 48（远端 `10f2718b872abfb51c181ffc58be479a25b7eb63`，
+  DMG 本体 SHA-256 `35247200658f0960eeb0705cd1c20d4e14678026f34ef3e2f6f061aebf232fa9`）。
+- **三种编号的区分**：公开预发布标签 `v0.1.0-preview.1`；app 的
+  `CFBundleShortVersionString` 保持数值 `0.1.0`；`CFBundleVersion` 是实际 CI
+  build。核心发行号 `0.1.0-preview.1` 由链接期 `-X` 注入，开发构建保留源码默认
+  `0.1.0-dev`。冻结 DMG 仍用 `melonarc-0.1.0-preview-candidate.<N>-macos-arm64.dmg`
+  原名，发布页负责解释它与标签的对应；`candidate.json` 的 `candidate` 字段按
+  basename 精确匹配唯一 DMG。
+- **完成内容①（发布文案）**：四份 README 的状态段、平台徽章、macOS arm64 行与
+  桌面应用行改为真实口径：原生 SwiftUI + AppKit 壳监护 Go 核心 sidecar，CI 用
+  Xcode 26.3 / Swift 6.2.4 构建并 ad-hoc 签名；build 48 是回归基线，其候选 DMG
+  排版已在用户 macOS 27 arm64 虚拟机验收；系统代理模式，macOS TUN 未实现；
+  部署下限 13.0，目前仅 macOS 27 实测，13.x 待阶段 5；DMG 未公证，Gatekeeper
+  首开、系统代理端到端待阶段 4；Windows/Linux 的 Tauri 壳仍未编译。`docs/release-notes-0.1.0-preview.1.md`
+  同步改为三件资产的草稿（linux-amd64、linux-arm64 核心包 + macOS arm64 DMG），
+  保留头部 `Draft, not a release`，补 ad-hoc/未公证与「系统设置 → 隐私与安全性 →
+  仍要打开」首开路径，并把它明确标为待验；协议矩阵、性能目标未测的口径均未改。
+- **完成内容②（构建版本输入）**：
+  1. `apps/macos/scripts/build-core.sh` 默认注入
+     `-X github.com/melon-tgj/melonarc/internal/version.Version=0.1.0-preview.1`；
+     `MELONARC_CORE_VERSION` 是唯一开关，显式空值表示不注入、报告
+     `internal/version.Default`（`0.1.0-dev`），脚本注释已写明。Plain `go build`
+     本来不注入，源码常量与 `internal/version/version_test.go` 的默认值断言未动。
+  2. `apps/macos/scripts/package-dmg.sh` 先进入 DMG 所在目录、对 basename 做
+     `shasum -a 256`，`.sha256` 只剩摘要与文件名，不再含 runner 绝对路径；
+     `check-candidate.sh:115` 只取第一字段，兼容且未改。
+  3. 从文案提交①的干净检出**顺序**执行两次 `scripts/build-release.sh`：
+     先 amd64、后 arm64，未并发。第一次试跑时未跟踪的 `.f3-brief.md` 让 Go
+     VCS 戳记为 `vcs.modified=true`；随即把简报临时移出仓库，确认工作树干净后
+     重跑两包，最终二进制的 `vcs.revision=10be6514…`、`vcs.modified=false`。
+- **Linux 顺序打包核对**（版本 `0.1.0-preview.1`，输出在 gitignored
+  `dist-release/`，不提交）：
+
+  | 资产 | 核心 / CLI 字节 | tar.gz 字节 | SHA-256 |
+  |---|---|---|---|
+  | `melonarc-0.1.0-preview.1-linux-amd64.tar.gz` | 16,494,752 / 6,865,056 | 9,836,991 | `09dc5867d222a183d3821d515ce9e2c4317d3c469102c7c3d09ac6bd7601479c` |
+  | `melonarc-0.1.0-preview.1-linux-arm64.tar.gz` | 15,335,584 / 6,357,152 | 8,886,544 | `a977d6cc9572a1ad476e0157d412fb688dc84921b2e81dd99bcc888b9fb59277` |
+
+  两包各 26 个 tar 成员：唯一顶层目录、`melonarc-core`、`melonarc-cli`、
+  `melonarc.conf`、`LICENSE`、`README.md`、`SECURITY.md`、
+  `THIRD-PARTY-NOTICES.md` 与 17 份许可束（24 份原文）；无绝对路径、`..` 或
+  `./` 前缀；`LICENSE` 含 GPL 全文、声明含 `GPL-3.0-only`、示例配置含 `FINAL`。
+  `file` 确认 amd64 两二进制为 ELF x86-64、arm64 两二进制为 ELF aarch64，均
+  静态链接且 stripped。amd64 包在本地原生解包实跑：`melonarc-cli version` 与
+  `melonarc-core -config ./melonarc.conf -check` 均报 `0.1.0-preview.1`，`-check`
+  后 `melonarc-data/` 不存在。arm64 只留交叉构建证据（`file` 为 aarch64、
+  `strings` 含发行号），未在原生 arm64 机器运行，按实标注。
+- **本地验证**：
+  - `apps/macos/scripts/build-core.sh` 实跑交叉编译 darwin/arm64：默认参数产出的
+    Mach-O arm64 可执行文件含 `0.1.0-preview.1`；`MELONARC_CORE_VERSION=` 产出
+    的同类文件含 `0.1.0-dev` 且无 preview 字符串。用同一 `-X` 参数另编
+    linux/amd64 核心并实跑 `-check`，横幅为 `melonarc-core 0.1.0-preview.1`；
+    不注入的参数编出的核心报 `melonarc-core 0.1.0-dev`。
+    `go test ./internal/version/ -count=1` 通过，默认值断言未受影响。
+  - `.sha256` 写出逻辑在临时目录用带空格的候选目录名模拟：sidecar 只有摘要与
+    basename，无 `/tmp/`、`/home/` 等绝对路径，`awk '{print $1}'` 仍取得摘要。
+  - `bash -n` 覆盖两个改动的 shell 脚本；`git diff --check` 干净；四份 README
+    的 macOS 表述逐份人工比对一致；本阶段无 Go 产品代码与 Swift 改动，未跑
+    全量套件。
+  - 只读核对更新器：`UpdateModel.swift:115-139` 从 bundle 的
+    `CFBundleShortVersionString` / `CFBundleVersion` 构造当前版本，
+    `ReleaseVersion.swift:47-50,138,211-223,238` 比较短版本与 build 并按
+    `candidate.json` 的 `candidate` 精确选 DMG，`ReleaseUpdateService.swift:169-175,219-224,263-264`
+    只消费该结果与清单摘要；两者都不读核心版本字符串，因此核心注入不影响更新
+    判断，Swift 未改。
+- **关键决策及理由**：文案与构建输入分两笔，是为了让待验 DMG 只对应最终文案，
+  后续补 VM 验收结果时不必重打已验包；版本注入只加在 macOS 发行构建脚本，
+  源码默认值与 Linux 打包既有注入方式保持不变；校验文件写 basename 是为了
+  用户能在下载目录直接 `shasum -c`，而不是被迫改 runner 路径。
+- **扩展点**：`MELONARC_CORE_VERSION` 是新增的版本输入开关，默认发行号集中在
+  一个位置；校验文件仍保持「摘要 + 文件名」两字段，manifest 的 `candidate`
+  仍按名称精确选包。面板注册、API 客户端分层、出站/规则/策略组与文案键值化
+  均未改动。
+- **遗留与下一步**：阶段 4 的干净系统 Gatekeeper 首开、系统代理端到端、节点
+  A/B 与关窗/退出，阶段 5 的预置设置、异常退出、双重失败与 macOS 13，均待
+  用户 VM 窗口（方案建议 12-21 后，12-01 至 12-20 静默）。冻结候选 DMG 要等
+  本提交推送后的 CI 产生并核对；发布标签、三个产品资产与摘要由用户在网页端
+  按阶段 6 执行。公开草稿不得把上述待验项写成已验证。
+- **提交范围**：① 四份 README + 发布草稿；② 两个 macOS 构建脚本 + 本文档。
+  任务简报 `.f3-brief.md` 在两笔提交后删除，不进仓库；`dist-release/` 是构建
+  输出且已被 gitignore，不提交；未推送、未建标签、未发布。

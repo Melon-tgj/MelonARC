@@ -33,6 +33,12 @@ type fakeNetworkSetup struct {
 	// block makes a mutating call wait for its context to end: the
 	// authorisation dialog nobody answers.
 	block bool
+	// afterWrite runs after a successful mutating call, so a test can change
+	// the in-memory setting while a takeover is still in progress.
+	afterWrite func(n int)
+	// failGet makes one getter refuse to answer, so a rollback cannot check
+	// who owns the field it is about to put back.
+	failGet string
 }
 
 func newFakeNetworkSetup() *fakeNetworkSetup {
@@ -85,11 +91,20 @@ func (f *fakeNetworkSetup) run(ctx context.Context, name string, args ...string)
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
-	return "", f.write(args)
+	if err := f.write(args); err != nil {
+		return "", err
+	}
+	if f.afterWrite != nil {
+		f.afterWrite(f.mutations)
+	}
+	return "", nil
 }
 
 // read answers one getter the way the tool does.
 func (f *fakeNetworkSetup) read(args []string) (string, error) {
+	if args[0] == f.failGet {
+		return "", errors.New("the getter was refused")
+	}
 	switch args[0] {
 	case "-listallnetworkservices":
 		return strings.Join(f.serviceLines, "\n") + "\n", nil
@@ -409,6 +424,227 @@ func TestNetworkSetupReportsAnIncompleteRollback(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "could not be put back") {
 		t.Errorf("the error does not say what is left behind: %v", err)
+	}
+}
+
+// TestNetworkSetupRollbackKeepsAChangeMadeDuringTheTakeover pins the reported
+// failure: a user edits a service the takeover never reached, and undoing a
+// failed write must not overwrite that edit.
+func TestNetworkSetupRollbackKeepsAChangeMadeDuringTheTakeover(t *testing.T) {
+	fake := newFakeNetworkSetup()
+	fake.failAt = 3
+	fake.afterWrite = func(n int) {
+		if n == 2 {
+			fake.state["Ethernet"].bypass = []string{"user.example"}
+			fake.calls = nil
+		}
+	}
+	err := newNetworkSetup(fake.run).Apply(context.Background(), Settings{
+		HTTP:   "127.0.0.1:7890",
+		SOCKS5: "127.0.0.1:7891",
+		Bypass: []string{"*.internal"},
+	})
+	if err == nil {
+		t.Fatal("Apply succeeded although the third write failed")
+	}
+	if !strings.Contains(err.Error(), "previous settings were restored") {
+		t.Errorf("a completed rollback was not reported: %v", err)
+	}
+	if errors.Is(err, ErrRollbackIncomplete) {
+		t.Errorf("the rollback was reported as incomplete: %v", err)
+	}
+	if got := strings.Join(fake.state["Ethernet"].bypass, ","); got != "user.example" {
+		t.Errorf("the user's bypass list was lost: %v", fake.state["Ethernet"].bypass)
+	}
+	if writes := fake.writesOf("Ethernet"); len(writes) != 0 {
+		t.Errorf("the rollback wrote to a service the takeover never reached:\n%s", strings.Join(writes, "\n"))
+	}
+	for _, want := range []string{
+		"networksetup -setautoproxystate Wi-Fi on",
+		"networksetup -setproxyautodiscovery Wi-Fi off",
+	} {
+		if !containsCall(fake.calls, want) {
+			t.Errorf("a field the takeover wrote was not put back: %s\n%s", want, strings.Join(fake.calls, "\n"))
+		}
+	}
+	if containsCall(fake.calls, "networksetup -setproxybypassdomains Wi-Fi corp.local *.internal") {
+		t.Errorf("the field whose write failed was put back anyway:\n%s", strings.Join(fake.calls, "\n"))
+	}
+}
+
+// TestNetworkSetupRollbackRestoresOnlyFieldsItWrote checks that a failure on the
+// first address command leaves that proxy alone while the completed fields go
+// back in reverse order.
+func TestNetworkSetupRollbackRestoresOnlyFieldsItWrote(t *testing.T) {
+	fake := newFakeNetworkSetup()
+	fake.failAt = 4
+	fake.afterWrite = func(n int) {
+		if n == 3 {
+			fake.calls = nil
+		}
+	}
+	err := rollbackApply(fake, Settings{HTTP: "127.0.0.1:7890", SOCKS5: "127.0.0.1:7891", Bypass: []string{"*.internal"}})
+	if err == nil {
+		t.Fatal("Apply succeeded although the fourth write failed")
+	}
+	if errors.Is(err, ErrRollbackIncomplete) {
+		t.Errorf("the rollback was reported as incomplete: %v", err)
+	}
+	want := []string{
+		"networksetup -setproxybypassdomains Wi-Fi corp.local *.internal",
+		"networksetup -setproxyautodiscovery Wi-Fi off",
+		"networksetup -setautoproxystate Wi-Fi on",
+	}
+	assertRollbackWrites(t, fake, want)
+	if got := fake.state["Wi-Fi"].web; !got.enabled || got.host != "proxy.corp" || got.port != 8080 {
+		t.Errorf("a proxy the takeover never wrote was touched: %+v", got)
+	}
+	if writes := fake.writesOf("Ethernet"); len(writes) != 0 {
+		t.Errorf("an untouched service was written to:\n%s", strings.Join(writes, "\n"))
+	}
+}
+
+// TestNetworkSetupRollbackRestoresAProxyWhoseSwitchWriteFailed is the
+// cross-command case: the address command took effect and the switch command
+// did not. The current value still matches the one this program wrote, so the
+// address is known to be ours and the whole group can be put back.
+func TestNetworkSetupRollbackRestoresAProxyWhoseSwitchWriteFailed(t *testing.T) {
+	fake := newFakeNetworkSetup()
+	fake.failAt = 5
+	fake.afterWrite = func(n int) {
+		if n == 4 {
+			fake.calls = nil
+		}
+	}
+	err := rollbackApply(fake, Settings{HTTP: "127.0.0.1:7890", SOCKS5: "127.0.0.1:7891", Bypass: []string{"*.internal"}})
+	if err == nil {
+		t.Fatal("Apply succeeded although the switch write failed")
+	}
+	if errors.Is(err, ErrRollbackIncomplete) {
+		t.Errorf("the rollback was reported as incomplete: %v", err)
+	}
+	want := []string{
+		"networksetup -setwebproxy Wi-Fi proxy.corp 8080",
+		"networksetup -setwebproxystate Wi-Fi on",
+		"networksetup -setproxybypassdomains Wi-Fi corp.local *.internal",
+		"networksetup -setproxyautodiscovery Wi-Fi off",
+		"networksetup -setautoproxystate Wi-Fi on",
+	}
+	assertRollbackWrites(t, fake, want)
+	if got := fake.state["Wi-Fi"].web; !got.enabled || got.host != "proxy.corp" || got.port != 8080 {
+		t.Errorf("the half-written proxy was not put back: %+v", got)
+	}
+}
+
+// TestNetworkSetupRollbackKeepsAChangedHalfWrittenProxy is the ambiguous case:
+// only the address command of one group was known to be ours, and someone
+// changed that address before the rollback. The edit stays and the error keeps
+// the evidence instead of a blind write of the whole group.
+func TestNetworkSetupRollbackKeepsAChangedHalfWrittenProxy(t *testing.T) {
+	fake := newFakeNetworkSetup()
+	fake.failAt = 5
+	fake.afterWrite = func(n int) {
+		if n == 4 {
+			fake.state["Wi-Fi"].web = proxyValue{enabled: true, host: "user.proxy", port: 1080}
+			fake.calls = nil
+		}
+	}
+	err := rollbackApply(fake, Settings{HTTP: "127.0.0.1:7890", SOCKS5: "127.0.0.1:7891", Bypass: []string{"*.internal"}})
+	if err == nil {
+		t.Fatal("Apply succeeded although the switch write failed")
+	}
+	if !errors.Is(err, ErrRollbackIncomplete) {
+		t.Errorf("the ambiguous field was not reported as incomplete: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Wi-Fi web-proxy") || !strings.Contains(err.Error(), "user.proxy") {
+		t.Errorf("the error does not keep the evidence: %v", err)
+	}
+	if containsCall(fake.calls, "networksetup -setwebproxy Wi-Fi proxy.corp 8080") {
+		t.Errorf("a changed proxy was written back anyway:\n%s", strings.Join(fake.calls, "\n"))
+	}
+	for _, want := range []string{
+		"networksetup -setproxybypassdomains Wi-Fi corp.local *.internal",
+		"networksetup -setautoproxystate Wi-Fi on",
+	} {
+		if !containsCall(fake.calls, want) {
+			t.Errorf("a field whose ownership was clear was not put back: %s\n%s", want, strings.Join(fake.calls, "\n"))
+		}
+	}
+	if got := fake.state["Wi-Fi"].web; !got.enabled || got.host != "user.proxy" || got.port != 1080 {
+		t.Errorf("the user's proxy was replaced: %+v", got)
+	}
+}
+
+// TestNetworkSetupRollbackReportsAReadItCannotDo checks that a failed read is
+// neither treated as ownership nor silently dropped: the record survives so the
+// next start can decide what to do with the field.
+func TestNetworkSetupRollbackReportsAReadItCannotDo(t *testing.T) {
+	fake := newFakeNetworkSetup()
+	fake.failAt = 2
+	fake.afterWrite = func(n int) {
+		if n == 1 {
+			fake.failGet = "-getautoproxyurl"
+			fake.calls = nil
+		}
+	}
+	path := filepath.Join(t.TempDir(), SnapshotFile)
+	c := WithBackend(newNetworkSetup(fake.run), nil, path)
+	err := c.Enable(context.Background(), Settings{HTTP: "127.0.0.1:7890", SOCKS5: "127.0.0.1:7891"})
+	if err == nil {
+		t.Fatal("Enable succeeded although the second write failed")
+	}
+	if !errors.Is(err, ErrRollbackIncomplete) {
+		t.Errorf("a field that could not be read was not reported as incomplete: %v", err)
+	}
+	if !strings.Contains(err.Error(), "read Wi-Fi autoproxy-state") || !strings.Contains(err.Error(), "the getter was refused") {
+		t.Errorf("the error does not keep the evidence: %v", err)
+	}
+	for _, call := range fake.calls[1:] {
+		if strings.HasPrefix(call, "networksetup -set") {
+			t.Errorf("a field was written back without being checked: %q", call)
+		}
+	}
+	kept, err := loadSnapshot(path)
+	if err != nil {
+		t.Fatalf("the takeover record was not kept: %v", err)
+	}
+	if kept.Backend != "networksetup" {
+		t.Errorf("the kept record names %q", kept.Backend)
+	}
+}
+
+// TestNetworkSetupRollbackWritesNothingWhenNothingWasWritten checks the other
+// end of the matrix: a failure on the first command has no rollback to do.
+func TestNetworkSetupRollbackWritesNothingWhenNothingWasWritten(t *testing.T) {
+	fake := newFakeNetworkSetup()
+	fake.failAt = 1
+	err := rollbackApply(fake, Settings{HTTP: "127.0.0.1:7890", SOCKS5: "127.0.0.1:7891"})
+	if err == nil {
+		t.Fatal("Apply succeeded although the first write failed")
+	}
+	if strings.Contains(err.Error(), "could not be put back") {
+		t.Errorf("an empty rollback was reported as incomplete: %v", err)
+	}
+	failed := "networksetup -setautoproxystate Wi-Fi off"
+	if len(fake.calls) == 0 || fake.calls[len(fake.calls)-1] != failed {
+		t.Errorf("commands were issued after the failed first write:\n%s", strings.Join(fake.calls, "\n"))
+	}
+}
+
+func rollbackApply(fake *fakeNetworkSetup, s Settings) error {
+	return newNetworkSetup(fake.run).Apply(context.Background(), s)
+}
+
+func assertRollbackWrites(t *testing.T, fake *fakeNetworkSetup, want []string) {
+	t.Helper()
+	var got []string
+	for _, call := range fake.calls[1:] {
+		if strings.HasPrefix(call, "networksetup -set") {
+			got = append(got, call)
+		}
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("rollback writes:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

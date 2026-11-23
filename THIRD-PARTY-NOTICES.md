@@ -1,15 +1,18 @@
 # Third-Party Notices
 
 What this file is: every third-party component this repository builds on, the version
-this tree selects, the licence that component ships, and whether its code ends up in the
-binaries `scripts/build-release.sh` produces.
+this tree selects, the licence that component ships, and whether its code is linked into
+the Darwin core shipped in the macOS app or the Linux core in the release archives.
 
 MelonARC itself is distributed under GPL-3.0-only (see LICENSE); this file lists only
 third-party components and does not change the licence of any of them.
 
 - **Checked on** 2026-11-15 (stage 21), Linux/x86_64, Go 1.27.4, against the module cache
   of that toolchain. The four module-graph-only modules that were unverified then were
-  downloaded and read on 2026-11-16 (stage 24); see section 2.
+  downloaded and read on 2026-11-16 (stage 24); see section 2. The per-target lists were
+  checked again on 2026-11-23 (feature-plan stage 2) with `go version -m` on darwin/arm64
+  and linux/amd64 cores built from the same tree; their licences were read from the exact
+  versions in that toolchain's cache.
 - **Checked how** the licence of each module was read from the `LICENSE`, `LICENCE`,
   `COPYING` and `NOTICE` files that ship **inside that exact version** of the module in
   the local module cache (`$GOMODCACHE/<module>@<version>/`). Nothing here is written
@@ -34,42 +37,51 @@ that do work offline, and they agree with each other:
    authoritative answer to "what is in the artefact";
 3. the `require` blocks of `go.mod`, for the direct dependencies.
 
-The result is 45 modules, of which **17 are linked into the shipped binaries**. The other
-28 are in the module graph but contribute no code to the artefact; they are listed in
-section 2 so that a reader comparing this file against `go.sum` or an SBOM is not left
-wondering about the difference.
+The result is 45 modules, of which **19 are linked into the darwin/arm64 core** and
+**17 into the linux/amd64 and linux/arm64 cores**. The other 26 are in the module graph
+but contribute no code to either core; they are listed in section 2 so that a reader
+comparing this file against `go.sum` or an SBOM is not left wondering about the difference.
 
-## 1. Modules linked into the shipped binaries
+## 1. Modules linked into a shipped core
 
-All 17 are linked into `melonarc-core`. `melonarc-cli` links none of them: it is a client
-for the local API and needs only the standard library.
+The last two columns name the target cores this tree ships. `Darwin core` is the
+darwin/arm64 `melonarc-core` inside the macOS app; `Linux core` is the linux/amd64 or
+linux/arm64 `melonarc-core` in the release archives. `yes` means that exact version is
+linked into that core (`go version -m` reports a `dep` line); `no` means the module is in
+the graph only. The two modules marked Darwin-only are pulled in by `modernc.org/libc`
+on non-Linux targets. `melonarc-cli` links none of these modules: it is a client for the
+local API and needs only the standard library.
 
-| Module | Version | Licence | What it does in this product |
-|---|---|---|---|
-| `github.com/dustin/go-humanize` | v1.1.0 | MIT | `modernc.org/libc`: number and time formatting |
-| `github.com/google/uuid` | v1.6.0 | BSD-3-Clause | `modernc.org/libc`: UUID type |
-| `github.com/klauspost/compress` | v1.20.1 | BSD-3-Clause; the `gzhttp/` subset is Apache-2.0 and is not imported | `utls` imports `zstd` for the certificate-compression extension |
-| `github.com/klauspost/cpuid/v2` | v2.0.9 | MIT | `lukechampine.com/blake3`: runtime CPU feature detection (AVX2/AVX-512 code paths) |
-| `github.com/molecule-man/go-brrr` | v1.2.0 | MIT | `utls` imports brotli for the same extension |
-| `github.com/oschwald/maxminddb-golang` | v1.13.1 | ISC | reads the MaxMind DB files behind `GEOIP` / `IP-ASN` rules |
-| `github.com/quic-go/quic-go` | v0.65.0 | MIT | QUIC transport for the Hysteria2 and TUIC outbounds |
-| `github.com/refraction-networking/utls` | v1.8.3-0.20261108164504-a13c59ffe98b | BSD-3-Clause | TLS 1.3 client handshake for the REALITY adapter (pinned to the version a reference implementation locks) |
-| `github.com/remyoudompheng/bigfft` | v0.0.0-20230129092748-24d4a6f8daec | BSD-3-Clause | `modernc.org/mathutil`: FFT multiplication |
-| `golang.org/x/crypto` | v0.57.0 | BSD-3-Clause | `argon2`, `chacha20poly1305`, `blake2b` in the Shadowsocks and Hysteria2 paths |
-| `golang.org/x/net` | v0.59.0 | BSD-3-Clause | `http2/hpack` Huffman table for the HTTP/3 header blocks |
-| `golang.org/x/sys` | v0.50.0 | BSD-3-Clause | ioctl, poll and rtnetlink constants for the TUN inbound; also the driver's syscall surface |
-| `lukechampine.com/blake3` | v1.4.1 | MIT | Shadowsocks 2022 subkey derivation, hash and keyed hash |
-| `modernc.org/libc` | v1.80.1 | BSD-3-Clause | transpiled C runtime the SQLite driver runs on |
-| `modernc.org/mathutil` | v1.7.1 | BSD-3-Clause | driver dependency: big integers and bit operations |
-| `modernc.org/memory` | v1.12.1 | BSD-3-Clause; the logo file `LICENSE-LOGO` is an attribution reference, not a licence over code | driver dependency: allocator |
-| `modernc.org/sqlite` | v1.62.0 | BSD-3-Clause | `database/sql` driver for the observation history |
+| Module | Version | Licence | What it does in this product | Darwin core | Linux core |
+|---|---|---|---|---|---|
+| `github.com/dustin/go-humanize` | v1.1.0 | MIT | `modernc.org/libc`: number and time formatting | yes | yes |
+| `github.com/google/uuid` | v1.6.0 | BSD-3-Clause | `modernc.org/libc`: UUID type | yes | yes |
+| `github.com/klauspost/compress` | v1.20.1 | BSD-3-Clause; the `gzhttp/` subset is Apache-2.0 and is not imported | `utls` imports `zstd` for the certificate-compression extension | yes | yes |
+| `github.com/klauspost/cpuid/v2` | v2.0.9 | MIT | `lukechampine.com/blake3`: runtime CPU feature detection (AVX2/AVX-512 code paths) | yes | yes |
+| `github.com/mattn/go-isatty` | v0.0.24 | MIT | `modernc.org/libc`: terminal detection on non-Linux targets | yes | no |
+| `github.com/molecule-man/go-brrr` | v1.2.0 | MIT | `utls` imports brotli for the same extension | yes | yes |
+| `github.com/ncruces/go-strftime` | v1.1.0 | MIT | `modernc.org/libc`: `strftime` formatting on non-Linux targets | yes | no |
+| `github.com/oschwald/maxminddb-golang` | v1.13.1 | ISC | reads the MaxMind DB files behind `GEOIP` / `IP-ASN` rules | yes | yes |
+| `github.com/quic-go/quic-go` | v0.65.0 | MIT | QUIC transport for the Hysteria2 and TUIC outbounds | yes | yes |
+| `github.com/refraction-networking/utls` | v1.8.3-0.20261108164504-a13c59ffe98b | BSD-3-Clause | TLS 1.3 client handshake for the REALITY adapter (pinned to the version a reference implementation locks) | yes | yes |
+| `github.com/remyoudompheng/bigfft` | v0.0.0-20230129092748-24d4a6f8daec | BSD-3-Clause | `modernc.org/mathutil`: FFT multiplication | yes | yes |
+| `golang.org/x/crypto` | v0.57.0 | BSD-3-Clause | `argon2`, `chacha20poly1305`, `blake2b` in the Shadowsocks and Hysteria2 paths | yes | yes |
+| `golang.org/x/net` | v0.59.0 | BSD-3-Clause | `http2/hpack` Huffman table for the HTTP/3 header blocks | yes | yes |
+| `golang.org/x/sys` | v0.50.0 | BSD-3-Clause | ioctl, poll and rtnetlink constants for the TUN inbound; also the driver's syscall surface | yes | yes |
+| `lukechampine.com/blake3` | v1.4.1 | MIT | Shadowsocks 2022 subkey derivation, hash and keyed hash | yes | yes |
+| `modernc.org/libc` | v1.80.1 | BSD-3-Clause | transpiled C runtime the SQLite driver runs on | yes | yes |
+| `modernc.org/mathutil` | v1.7.1 | BSD-3-Clause | driver dependency: big integers and bit operations | yes | yes |
+| `modernc.org/memory` | v1.12.1 | BSD-3-Clause; the logo file `LICENSE-LOGO` is an attribution reference, not a licence over code | driver dependency: allocator | yes | yes |
+| `modernc.org/sqlite` | v1.62.0 | BSD-3-Clause | `database/sql` driver for the observation history | yes | yes |
 
 Two notes on that table:
 
 - `modernc.org/sqlite` also ships `LICENSE-SQLITE` (public domain) and
   `LICENSE-SQLITE_VEC` (MIT); the C code those cover is section 3.
-- `github.com/mattn/go-isatty` and `github.com/ncruces/go-strftime` are required by
-  `go.mod` but **not** linked into a linux/amd64 binary; they are in section 2.
+- The MIT licences of `github.com/mattn/go-isatty` v0.0.24 and
+  `github.com/ncruces/go-strftime` v1.1.0 were read from the `LICENSE` file inside each
+  of those exact versions in the local module cache on 2026-11-23. Both are linked into
+  the Darwin core only; neither is linked into either Linux core.
 
 ## 2. In the module graph, not in the artefact
 
@@ -83,8 +95,6 @@ graph and a `go list -m all` on a connected machine will all report them.
 | `github.com/google/pprof` | v0.0.0-20261016150608-1facf8f91b50 | Apache-2.0 | test-only dependency of the SQLite driver |
 | `github.com/hashicorp/golang-lru/v2` | v2.0.7 | MPL-2.0 | module-graph-only dependency of `modernc.org/libc`; file-level copyleft, and no file of it is linked |
 | `github.com/jordanlewis/gcassert` | v0.0.0-20250430164644-389ef753e22e | MIT (stage 24, from `LICENSE.txt`) | test-only tooling of another module |
-| `github.com/mattn/go-isatty` | v0.0.24 | MIT | required by `go.mod` for other targets; no package of it is reached on linux/amd64 |
-| `github.com/ncruces/go-strftime` | v1.1.0 | MIT | same |
 | `github.com/pmezard/go-difflib` | v1.0.0 | BSD-3-Clause (stage 24, from `LICENSE`) | test-only dependency of another module |
 | `github.com/quic-go/go-ossfuzz-seeds` | v0.1.0 | MIT | fuzz corpus module of `quic-go` |
 | `github.com/quic-go/qpack` | v0.6.0 | MIT (stage 24, from `LICENSE.md`) | `quic-go` uses its own copy; no package of this module is linked |
@@ -163,13 +173,16 @@ it.
 
 ## 6. What this file does not do
 
-- It is an **index**, not a copy of the full licence texts. Since stage 24 the archive
-  carries them too: `licenses/<module>@<version>.txt` (with `/` written as `_` in the
-  filename), one bundle per module linked into `melonarc-core`. Each bundle holds every
-  `LICENSE*` / `LICENCE*` / `COPYING*` / `NOTICE*` file that exact version ships, copied
-  verbatim from the local Go module cache by `scripts/build-release.sh`, with the source
-  filename above each section. The project's own `LICENSE` stays at the archive root.
-  See `docs/pre-release-checklist.md` B2.
+- It is an **index**, not a copy of the full licence texts. Each target carries one
+  bundle per module linked into its own core: the Linux archives carry 17 bundles under
+  `licenses/<module>@<version>.txt`, and the macOS app carries 19 bundles under
+  `Contents/Resources/licenses/<module>@<version>.txt`. Each filename writes `/` as `_`.
+  A bundle holds every `LICENSE*` / `LICENCE*` / `COPYING*` / `NOTICE*` file that exact
+  version ships, copied verbatim from the local Go module cache with `GOPROXY=off`:
+  `scripts/build-release.sh` does this for Linux, and
+  `apps/macos/scripts/collect-core-licenses.sh` does it for macOS before signing, with
+  the source filename above each section. The project's own `LICENSE` stays at the
+  archive root / in `Contents/Resources`. See `docs/pre-release-checklist.md` B2.
 - It does not decide which GNU GPL version the project is released under; that is the
   copyright holder's decision, and the current divergence between the manifests is
   recorded in `DEVLOG.md` (stage 21).

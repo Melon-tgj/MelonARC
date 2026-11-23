@@ -11,7 +11,7 @@
 [![CI](https://github.com/Melon-tgj/MelonARC/actions/workflows/ci.yml/badge.svg)](https://github.com/Melon-tgj/MelonARC/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8.svg?logo=go&logoColor=white)](go.mod)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)](#プラットフォームとビルド成果物)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#プラットフォームとビルド成果物)
 [![Preview](https://img.shields.io/badge/preview-0.1.0--preview.1-orange.svg)](docs/release-notes-0.1.0-preview.1.md)
 
 [English](README.md) · [简体中文](README.zh-CN.md) · **日本語** · [한국어](README.ko.md)
@@ -20,7 +20,7 @@
 
 ---
 
-**ステータス：0.x ソースプレビューであり、安定版リリースではありません。** Go コア、ローカル API、CLI、デスクトップフロントエンドは実装済みですが、ネイティブインストーラ、コンパイル済みのデスクトップシェル、リリース対象プラットフォームでのエンドツーエンド検証はまだありません。以下のサポートマトリクスが「実際に何が検証されたか」の唯一の情報源です。機能一覧を動作する組み合わせの約束として読まないでください。
+**ステータス：0.x ソースプレビューであり、安定版リリースではありません。** Go コア、ローカル API、CLI、デスクトップフロントエンド、およびネイティブの macOS arm64 シェル（SwiftUI + AppKit）は実装済みです。CI は Xcode 26.3 / Swift 6.2.4 で macOS シェルとそのコア sidecar をビルドします。build 48 が回帰比較の基準であり、その候補 DMG のレイアウトはユーザーの macOS 27 arm64 仮想マシンで受け入れられました。この DMG は ad-hoc 署名済みですが公証はされておらず、Gatekeeper 初回起動、システムプロキシのエンドツーエンド、macOS 13 の確認は未実施です。Windows/Linux のデスクトップシェルは依然として未ビルドで、リリース対象でのエンドツーエンド検証も未完了です。以下のサポートマトリクスが「実際に何が検証されたか」の唯一の情報源です。機能一覧を動作する組み合わせの約束として読まないでください。
 
 ## サポートマトリクス
 
@@ -56,8 +56,8 @@ VLESS の `xtls-rprx-vision` フローは設定時点で拒否され、サポー
 |---|---|---|
 | Linux x86_64 | このワークスペースでソースビルドとテストが合格 | `go build ./...`、`go vet ./...`、`go test ./...`、`gofmt`、フロントエンドのオフラインスイートがここで動きます。インストーラ、パッケージ化されたリリース、長時間のソークテストはありません。 |
 | Windows x86_64 | **クロスコンパイルのみ** | `GOOS=windows go build ./cmd/... ./internal/...` が成功。外部レビューも両ターゲットで `CGO_ENABLED=0` ビルドを行いました。ネイティブ実行は一切なし：インストーラ、ランタイムテスト、デバイスセッションはありません。Windows TUN デバイスの入口は今も「session not implemented」を返します。 |
-| macOS arm64 | 外部レビューのホストのみ | 2026-11-15 のレビューは macOS arm64、Go 1.27.4、Node 24.20.0 で実行されました。宣言されたリリース対象ではありません。 |
-| デスクトップアプリ | フロントエンドはテスト済み、ネイティブシェルは**未ビルド** | フロントエンドのオフラインおよび実コア接続スイートが合格。Rust シェルはここではコンパイルされたことがありません（`rustc`/`cargo`/WebKitGTK なし）。`Cargo.lock` は不在で、ネイティブウィンドウのスクリーンショットやネイティブ IPC テストもありません。その最新の責務——コアプロセスの起動・監視・停止——はソースとしてのみ存在します。プロセスホスティング、単一インスタンスロック、シェル設定ファイルはいずれも**実行されたことがありません**。 |
+| macOS arm64 | 宣言済みのプレビュー対象：ネイティブシェルは CI でビルド | ネイティブの SwiftUI + AppKit シェルが Go コア sidecar を監視します。システムプロキシモードのみで、macOS の TUN は未実装です。CI は Xcode 26.3 / Swift 6.2.4 で両方のバイナリをビルドし ad-hoc 署名します。build 48 が回帰基準で、その候補 DMG のレイアウトはユーザーの macOS 27 arm64 仮想マシンで受け入れられました。最低展開ターゲットは 13.0 ですが、実際に試したのは macOS 27 のみで、13.x は未実施、DMG は未公証です。Gatekeeper 初回起動とシステムプロキシのエンドツーエンド確認も未実施です。 |
+| デスクトップアプリ | フロントエンドはテスト済み、macOS ネイティブシェルはビルド済み、Windows/Linux の Tauri シェルは**未ビルド** | フロントエンドのオフラインおよび実コア接続スイートが合格。macOS arm64 のネイティブシェルは CI でビルドされ DMG として配布されます（前の行を参照）。Windows/Linux 向けの Tauri シェルはここでコンパイルされたことがなく（`rustc`/`cargo`/WebKitGTK なし）、`Cargo.lock` も、それ用のネイティブウィンドウのスクリーンショットやネイティブ IPC テストもありません。それらのプラットフォームでは、プロセスホスティング、単一インスタンスロック、シェル設定ファイルはいずれもソースとしてのみ存在し、**実行されたことがありません**。 |
 
 開発ドキュメントが約束する「両プラットフォームへのインストール可能なビルド、常駐トレイ、動作するシステムプロキシと TUN、全プロトコル接続、全性能数値の実測」は**まだ達成されていません**。将来の受け入れ基準として扱い、このツリーの説明としては読まないでください。
 

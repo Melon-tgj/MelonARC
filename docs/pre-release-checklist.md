@@ -1,50 +1,77 @@
 # Pre-release checklist
 
-Everything that stands between this tree and a public 0.x preview, item by item, with
-what is blocked, who can unblock it and how. Written at stage 21 (2026-11-15), when
-`scripts/build-release.sh` started producing `dist-release/melonarc-<version>-linux-amd64.tar.gz`.
+本表是功能完善计划的分段验收表，供阶段 4、5 现场填写，阶段 6 对照发布门槛。
 
-State words used below:
+- **build 48 只是回归对照**（`10f2718b872abfb51c181ffc58be479a25b7eb63`，DMG SHA-256 `35247200658f0960eeb0705cd1c20d4e14678026f34ef3e2f6f061aebf232fa9`），不是待验候选；**冻结候选待阶段 3 产生**。
+- 基线核对一段由阶段 0 预填；其余各段的「结果」栏在阶段 4、5 按实填写，取值 **通过 / 失败 / 未执行＋原因**。未取得现场证据的格子保留「未执行」，不代用户签收。
+- 「证据编号」填写脱敏记录、截图、日志、端点请求编号或 CI 运行号；不记录令牌、真实订阅地址、个人浏览记录或原始网络配置。
+- 验证方法一栏标注执行层：**本地**（Linux 确定性用例/脚本）、**CI**（带版本的签名包与 sidecar）、**VM**（用户干净 arm64 快照现场）。
+- 历史 A/B/C/D 清单压缩后保留在文末「历史记录」，不用于替代本表的现场结论。
 
-- **blocked** — cannot be done in this workspace, by this agent, or without a decision.
-- **ready** — done, with the evidence named.
-- **owner decision** — nothing to build; somebody has to choose.
+## 1 · 基线核对（build 48 对照）
 
-## A. Before the repository becomes public
+| # | 断言 | 验证方法（本地/CI/VM） | 结果（通过/失败/未执行＋原因） | build | OS 版本 | 架构 | 证据编号 |
+|---|---|---|---|---|---|---|---|
+| B0.1 | DMG 本体 SHA-256 与大小等于 `candidate.json` 与原始 `.sha256` 的哈希值：`35247200658f…32fa9`，9,902,002 字节 | 本地：重算归档 DMG 与全部文件哈希，只读核对 | 通过（阶段 0 已核对；归档目录 `~/workspace/projects/melonarc-m5-candidate-48/`） | 48 | 不适用 | arm64 | A-INV-01 |
+| B0.2 | `candidate.json` 的 commit、build、version、short_version、arch、`minimum_system_version=13.0`、bundle id 与清单一致 | 本地：解析清单逐字段比对 | 通过（阶段 0 已核对） | 48 | 不适用 | arm64 | A-INV-02 |
+| B0.3 | 归档含单元测试 74/74、SidecarTests 四项实际执行、UI 5 项 3 通过 2 跳过 0 失败；工具链 Xcode 26.3 / Swift 6.2.4 | 本地：抄录 `xcodebuild-test.log` 与 `toolchain.txt`；归档中无 macOS 26 UI job 原始日志，该结论另据方案「基线与证据的口径」 | 通过（仅一份测试日志可抄；第二 job 日志未在归档中找到） | 48 | runner 15.8.2 | arm64 | A-INV-03 |
+| B0.4 | 原件不依赖 CI artifact 链接；服务端到期北京时间 2026-12-07 00:49:59 前已落本地持久位置 | 本地：清单与文件落盘核对 | 通过（阶段 0 已归档；原始 `.sha256` 的 runner 路径留阶段 3 修正） | 48 | 不适用 | arm64 | A-INV-04 |
 
-| # | Item | State | What blocks it, who, how |
+## 2 · 阶段 4 首开与浏览器通路（macOS 27 干净 arm64 VM）
+
+初始配置须为 `FINAL,DIRECT`；只使用协作者控制的节点、域名与逐请求编号的回显端点，不重复整轮排版评审。
+
+| # | 断言 | 验证方法（本地/CI/VM） | 结果（通过/失败/未执行＋原因） | build | OS 版本 | 架构 | 证据编号 |
+|---|---|---|---|---|---|---|---|
+| 4.1 · A5 首开 | 从系统浏览器下载验收 DMG，核对摘要与隔离标记；首次被拦截后经「系统设置 → 隐私与安全性 → 仍要打开」放行；壳与核心都启动，第二次双击正常。无隔离标记、已有例外、签名损坏或恶意软件告警均须换样本或停止 | 本地：确认包与摘要；VM：干净快照、正常安全策略、记录首次拦截类型 | 未执行（待阶段 4 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 4.2 · A1 开启系统代理 | 先记录每个启用服务原值与 `scutil --proxy`，旁证默认直连可用；启用系统代理并保存、等待受控重启后，`/v1/config`、界面与逐服务系统读数一致；配置保存、待重启、实际接管可区分；健康检查使用实际 data-dir 的本次令牌。授权拒绝另记，不误标成功 | 本地：测试配置与匹配顺序；CI：签名包与 sidecar；VM：逐服务写读 | 未执行（待阶段 4 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 4.3 · A7 先拒绝 | 访问测试 HTTPS 域名失败，`/v1/failures` 出现对应目标与拒绝类别，目标服务日志没有该请求，`/v1/rules/explain` 可辅助标定规则；先确认 DNS 可解析且 TLS 证书有效。仅有错误页不算通过 | 本地：规则与 explain 夹具；VM：逐请求编号的端点与核心记录 | 未执行（待阶段 4 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 4.4 · A7 切节点 | 两份仅目标规则不同的测试配置保留同一 data-dir，第二份先过核心 `-check` 再 `/v1/config/reload`，把该域名交给 Select 组；依次选 A、B 并使用新 HTTPS 连接，端点回显编号、实际出口与所选策略三者相符；另测一条经系统代理匹配 `DIRECT` 的对照；已结束连接可在 `/v1/history/connections` 对应主机、时间、规则、策略与实际出站。共用出口时改用可区分的节点端日志 | 本地：配置校验与规则匹配；VM：受控节点与端点日志 | 未执行（待阶段 4 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 4.5 · A4 关窗唤起 | 关闭全部业务窗口后访问新测试 URL，流量仍由所选节点承载；从菜单栏及程序坞重新打开后，子进程 PID 不变，只有一个主窗口和一个受监护核心 | VM：窗口生命周期、PID 与流量关联 | 未执行（待阶段 4 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 4.6 · A1 退出恢复 | 通过应用菜单「退出」后壳与核心停止、回环监听释放、新连接走原网络路径；逐服务读回原值，预置字段按阶段 1 的精确口径核对，无未恢复字段时快照移除；此前关窗不触发这些变化 | 本地/ CI：退出顺序回归；VM：逐服务读回与新连接 | 未执行（待阶段 4 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+
+## 3 · 阶段 5 异常与最低系统（依赖阶段 4 正常通路，同一候选）
+
+| # | 断言 | 验证方法（本地/CI/VM） | 结果（通过/失败/未执行＋原因） | build | OS 版本 | 架构 | 证据编号 |
+|---|---|---|---|---|---|---|---|
+| 5.1 · 预置设置与人工改值 | 分服务留存接管前、中、退出后对照：HTTP/HTTPS/SOCKS 开关、地址、端口，PAC 开关与原 URL、自动发现、空/多条绕过列表、停用服务。接管后只改一个服务的一组，退出时该组保留人工值，其余程序写入字段回到原值；PAC URL 未被写入；认证代理场景拒绝覆盖；一个服务被拒不留另一个服务的半接管状态。各 getter 输出脱敏留存。绕过列表按带标签的一行或英文空列表提示解析，两种 OS 的非空返回形状都核对 | 本地：字段归属矩阵；VM：真实 `networksetup` 前后读回 | 未执行（待阶段 5 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 5.1a · 空地址例外 | 原本关闭且地址为空的手动代理，恢复后是否继续代理、主机/端口是否回到原值分别记录；保留残值标为差异，公开披露前由用户确认 | 本地：既有断言对照；VM：该服务逐字段读回 | 未执行（待用户决定是否作为公开限制） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 5.2 · 授权与双重失败 | 记录账户类型、是否弹授权、允许／拒绝／超时与弹窗次数，比较多服务读写与单批 12 秒预算、壳 15 秒预算、退出时 Go 5 秒上下文与壳 12 秒宽限。协作者的测试驱动在一次真实写入后制造后续写失败，再使一个回滚写失败：异常可识别、原快照可读、人工改值不被覆盖；移除障碍后用**原样候选**重启读回，再启动一次验证幂等。记录哪些调用真实到达系统、哪些为注入；生产包不含故障开关，无法安全触发的系统错误标未现场覆盖 | 本地：确定性双故障、旧快照与幂等；CI：壳/核心联动与错误呈现；VM：系统真实读回与授权记录 | 未执行（待阶段 5 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 5.3 · 只强退核心 | 壳保持运行，记录旧 PID、监管器重启与新令牌生效（不记录令牌内容）；旧快照先恢复，配置仍开则重新接管，最终只有一个有效子进程，新请求出口与重启后核心策略一致；从遗留快照用关闭配置启动只恢复原设置；连续失败上限、1/2/5 秒退避与 15 秒预算主要用可控时钟/测试验证，VM 只核现场时序与无持续重启 | 本地：预算与退避测试；CI：四项真实 sidecar；VM：强退与恢复 | 未执行（待阶段 5 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 5.4 · 只强退壳／两者都异常停止 | 强退壳时核心从 `-supervise-stdin` 收到 EOF 并尝试正常退出恢复；两者都来不及清理时下次启动读取旧记录。无孤儿、第二个核心、端口冲突或永久失效的单实例锁；配置仍要求接管时允许新的合法快照；最终以正常退出证明原设置仍可恢复 | 本地/ CI：存活管道与锁回归；VM：强退现场与重启读回 | 未执行（待阶段 5 VM 窗口） | 待阶段 3 | 待填 | arm64 | 待填 |
+| 5.5 · macOS 13 下限 | 优先 13.0 arm64 干净快照并记录完整系统 build；重复首开、六面板与设置可进入、订阅表单可操作、一次拒绝/选点、关窗再唤起、预置恢复、一次强退恢复及正常退出；检查无不可用符号或启动崩溃，旧版样式与键盘可操作。复杂双失败在 27 做完整矩阵，13 保留一次真实异常恢复；两系统逐项标记覆盖范围。仅有 13.x 时只签收该小版本；缺 13 快照默认顺延 | VM：13.x 干净快照逐项执行 | 未执行（待阶段 5 VM 窗口与 13.x 快照） | 待阶段 3 | 待填 | arm64 | 待填 |
+
+## 4 · 发布门槛（阶段 6 对照）
+
+| # | 断言 | 验证方法（本地/CI/VM） | 结果（通过/失败/未执行＋原因） | build | OS 版本 | 架构 | 证据编号 |
+|---|---|---|---|---|---|---|---|
+| G1 · 阻断项 | 无以下任一情形：可复现的外部设置丢失、恢复失败却误报正常、走错节点或拒绝规则放行、无法从干净 VM 正常首开、实物许可声明不全、标签/签名/资产/哈希不一致；A1–A7 的现场或分层记录逐项具名 | 本地 + CI + VM：汇总 2、3 段与出包校验 | 未执行（待阶段 4、5 结论） | 冻结候选 | 待填 | arm64 | 待填 |
+| G2 · 可下载资产 | 标签 `v0.1.0-preview.1` 指向产生已验 DMG 的确切提交；三个产品包（linux-amd64、linux-arm64、macOS arm64）同名同哈希；`candidate.json` 与 DMG `.sha256` 作为附件独立下载且文件名精确匹配，校验文本用下载文件 basename，不含 runner 路径 | 本地：哈希、清单与下载夹具；网页发布后回读由协作者完成 | 未执行（待阶段 3 冻结 + 用户网页发布） | 冻结候选 | 不适用 | 三目标 | 待填 |
+| G3 · 说明与例外 | 发布说明分别列出 CI、13.x/27 VM、Linux 原生实测与未覆盖项；五项性能（千兆单连接、10 万规则 <1 ms、p50 <5 ms、空闲 ≤80 MB、1,000 并发 ≤300 MB）注明未在物理真机测量；macOS TUN 未实现、两处排版瑕疵按现状披露；空地址恢复例外与 13.0 覆盖差异按用户决定写明 | 本地：发布草稿逐条核对 | 未执行（待阶段 3 冻结后修订） | 冻结候选 | 不适用 | 不适用 | 待填 |
+| G4 · 更新器回读 | 公开后同短版本、同 build 的客户端显示已安装；build 48 旧版按 `candidate.json` 发现更高 build、核验哈希、保存带隔离标记的 DMG；用户正常退出后手工替换 | 本地：夹具验证版本判断；阶段 6 后协作者公开回读，旧版 VM 收尾 | 未执行（待阶段 6 公开） | 48 与冻结候选 | 待填 | arm64 | 待填 |
+
+## 历史记录（阶段 21 清单，压缩存档；结论以证据为准）
+
+状态词：**blocked** 当时不能在本工作区完成；**ready** 已有具名证据；**owner decision** 只需决策。
+
+| # | 项目 | 历史状态 | 证据摘要 |
 |---|---|---|---|
-| A1 | Six image assets are in local history but were never part of the published snapshot | **ready (resolved)** | Uploaded through the GitHub web UI on 2026-11-16 (the snapshot channel carries UTF-8 text only, so the binaries travel separately). All six blob SHAs on the remote were compared with the local files and match byte-for-byte: `apps/desktop/src/assets/logo.png`, `apps/desktop/src-tauri/icons/{32x32,128x128,128x128@2x,icon}.png`, `icons/icon.ico`. Two `.gitkeep` placeholders created to open the folders remain in those directories; harmless. Future snapshot pushes keep excluding the six binaries. |
-| A2 | `Cargo.lock` does not exist | **blocked** | Needs one networked `cargo build` / `cargo generate-lockfile` on a machine with rustc ≥ 1.89 and WebKitGTK 4.1. Owner: any machine with those. Then commit the lock and rewrite `THIRD-PARTY-NOTICES.md` section 5 from the locked versions. |
-| A3 | CI has never run on Actions | **ready (resolved)** | CI first ran on Actions on 2026-11-16 (four runs). The Go and Frontend jobs are green. The Interop job's fetch/verify/layout steps needed four fix rounds, all in `ci.yml` (shadowsocks glob is dot-separated, the TUIC tag is `tuic-server-1.0.0` under the renamed `tuic-protocol/tuic`, the Xray `.dgst` uses `SHA2-256=`, hysteria's `hashes.txt` prefixes names with `build/`, the shadowsocks tarball has no wrapping directory, the TUIC asset is a bare binary, and snapshot pushes drop the exec bit so the gate runs via `bash`); the Snell repository variables are set from the official 5.0.0 zip (sha256 verified locally). The gate then ran the real cases: one run failed only the Snell UDP subtests, and the next run (triggered by the documentation push that recorded it, on an identical code tree) passed every case — all three jobs green, run #5, 2026-11-16. A3 is therefore closed; the transient Snell UDP failure is recorded at B6. The stage 20 expectation held: the renamed `TestQUICFixture*` cases do not count against the job. |
-| A4 | The private vulnerability channel is not enabled | **ready (resolved)** | The repository went public on 2026-11-16 and Private vulnerability reporting was enabled the same day (Settings → Advanced Security shows it active). `SECURITY.md`'s *Report a vulnerability* route is live. |
-| A5 | Licence scope: `GPL-3.0-only` (decision closed) | **ready (resolved)** | The copyright owner decided on 2026-11-15: **GPL-3.0-only** for the whole tree. Root `LICENSE` (the GPLv3 full text) and `README.md` ("version 3") already read as only and were left intact. Stage 23 aligned the four metadata fields — `apps/desktop/package.json` (`license`), `apps/desktop/src-tauri/Cargo.toml` (`[package] license`), `apps/desktop/src-tauri/tauri.conf.json` (`bundle.license`), `apps/desktop/src/version.js` (`APP_LICENSE`) — to the SPDX string `GPL-3.0-only`, and kept `package-lock.json` and the `build.test.mjs` assertion in sync. The stage 21 divergence is closed; see `DEVLOG.md`, stage 23. |
-| A6 | Redaction scan | **ready (resolved)** | Both stage 21 loose ends were closed at stage 24. **(b)** the withheld literal `password=<value>` sub-check was re-run over all **58 reachable commits** and the working tree: 2,215 history lines, 73 distinct (path, line) pairs, 54 commits with a hit. Classification (distinct lines / raw hits): 45 test fixtures / 1,828; 17 production-code lines / 298 (195 `== ""` comparisons, 54 comment or key-name fragments, 49 variable or constant assignments — no stored credential); 8 documentation / 158; 1 link-syntax example / 47; 2 example-config `change-me` lines / 12. Zero credentialed URLs naming a non-reserved host; the three longest values were checked individually and are `_test.go` constants or a malformed-config fixture with placeholder wording. The first full-line report was withheld by the environment's sensitive-content gate (the same block as stage 21); the completed runs printed only counts, categories, paths and redacted lines, and did not reconstruct the withheld output. **(a)** the four module licences were read after `go mod download` succeeded in this workspace — see B3 and `THIRD-PARTY-NOTICES.md` section 2. Neither half is open; the classification table and conclusion are in `DEVLOG.md`, stage 24. |
-| A7 | Private paths in the development log | **ready (resolved)** | Owner decision (stage 24): document and log text uses the `$HOME` form, fixture strings in test code stay where a rewrite would change what the test asserts. `DEVLOG.md` (five stage-16/20/21 occurrences plus the stage 21 scan table and its leftovers) and `docs/interop-testing.md` now say `$HOME/interop-bin` everywhere; the scan table keeps its historical counts but no longer spells out account names. The 20 remaining lines are all fixture inputs or literal expected paths in `apps/desktop/test/*.test.mjs` and the `#[cfg(test)]` block of `apps/desktop/src-tauri/src/settings.rs`: they pin the Linux and macOS home-directory shapes that `configHome` / `resolveDataDir` / `settingsPath` must produce, and `$HOME` is not expanded inside a JS or Rust string literal, so substituting it would change the test's meaning rather than just its spelling. `scripts/build-release.sh` now writes licence-bundle sources as symbolic `$GOMODCACHE/<module>@<version>/`, so no local account path is baked into the archive either. The before/after `grep -rn` comparison and the per-file retention reasons are in `DEVLOG.md`, stage 24, task-five addendum. |
-
-## B. Before a binary is published
-
-| # | Item | State | What blocks it, who, how |
-|---|---|---|---|
-| B1 | Release archive builds reproducibly enough to identify | **ready** | `scripts/build-release.sh 0.1.0-preview.1` produced `dist-release/melonarc-0.1.0-preview.1-linux-amd64.tar.gz` (9,765,930 bytes, sha256 printed by the script). The shipped core validates the shipped `melonarc.conf` with `-check`, and both binaries report the injected version. |
-| B2 | Third-party licence *texts* are not in the archive | **ready** | Owner decision (stage 24): **ship the full texts in the archive**. `scripts/build-release.sh` now reads the `dep` lines of the freshly built `melonarc-core`, compares them with the 17 rows of `THIRD-PARTY-NOTICES.md` section 1 (a mismatch or a count other than 17 fails the build), and copies every `LICENSE*` / `LICENCE*` / `COPYING*` / `NOTICE*` file of that exact version from the **local Go module cache** into `licenses/<module>@<version>.txt` (`/` written as `_`), one bundle per module, checking each source exists and is non-empty; `GOPROXY=off` keeps the copy cache-only. Clean-state run: 17 bundles / 24 verbatim licence sections, all byte-identical to their cache sources on the unpacked archive; manifest grew by exactly one `licenses/` entry plus 17 files (8 → 26 entries) and the tar by 9,768,766 → 9,795,437 B (+26,671 B). Unpacked `-check` (7 rules / 1 proxy / 3 groups) and both version strings still pass, and `-check` created no data directory. `THIRD-PARTY-NOTICES.md` remains the index and now names the in-package location (section 6). |
-| B3 | Four modules have no verified licence line | **ready (resolved)** | Stage 24 attempted `go mod download` for all four and the module proxy **was reachable on this run** (stage 21's offline note no longer holds for this workspace). Each licence was read from that exact version's own file in the module cache: `github.com/davecgh/go-spew` v1.1.1 ISC (`LICENSE`), `github.com/pmezard/go-difflib` v1.0.0 BSD-3-Clause (`LICENSE`), `github.com/quic-go/qpack` v0.6.0 MIT (`LICENSE.md`), `github.com/jordanlewis/gcassert` MIT (`LICENSE.txt`). `THIRD-PARTY-NOTICES.md` section 2 is updated; no Go-module row says "not verified" now. None of the four is linked into a binary, so this closed an accounting gap, not a distribution obligation. The Rust shell (section 5) is still unverified locally and is tracked at A2 / B4. |
-| B4 | Rust shell never compiled, installed or exercised over IPC | **blocked** | No `rustc`/`cargo`/WebKitGTK here. Needs `cargo test --locked`, `cargo build --release --locked`, a native window, and a run of the process-hosting, single-instance-lock and settings-file paths. Owner: a Linux or Windows machine with the Tauri prerequisites. Until then the shell is source only and is not in the archive. |
-| B5 | Hysteria2 / TUIC: real interoperability not re-verified | **ready (resolved)** | Re-run in CI (GitHub Actions, ubuntu, 2026-11-16) with all seven reference slots filled: every Hysteria2 and TUIC case passes, TCP and UDP business alike, against Hysteria app/v2.13.0 and tuic-server 1.0.0. The README matrix rows moved from "Unusable" to "Verified" with that run as the evidence. |
-| B6 | Snell UDP (classic relay) failed in one CI run | **ready (resolved as transient)** | In the 2026-11-16 CI series, one gate run failed `TestInteropSnell/v4/udp` and `TestInteropSnell/v5/udp` against snell-server 5.0.0 while Snell TCP and every other protocol's UDP passed; the next run, on an identical code tree (only documentation and the gate script's output handling changed), passed every case, all three jobs green. The failure is therefore recorded as transient rather than a client defect: the client's framing had independently been verified byte-for-byte against the public mihomo client and open-snell server, and its session setup, reply byte and datagram write against the real 4.1.1 and 5.0.0 servers (locally the reference server's unconnected `sendto` is denied by this sandbox's seccomp, so the forwarding leg itself is only observable in CI). `scripts/check-interop.sh` now prints the full captured output whenever the gate fails, so a recurrence arrives with its message attached. |
-
-## C. Before the release targets are claimed
-
-| # | Item | State | What blocks it, who, how |
-|---|---|---|---|
-| C1 | Windows was never executed natively | **blocked** | The Windows TUN device entry still returns "session not implemented"; the system-proxy registry backend, the token file and the history migration have only been cross-compiled, never run. Owner: a Windows x86_64 machine. Start with `-check`, then the system proxy, then the token file, then the history migration with the base64 fixture from stage 19. |
-| C2 | Five performance targets not measured on real hardware | **blocked** | Throughput, rule-match latency at 100k rules, added connection latency, and idle/1000-connection memory all need a wired rig with pinned builds and interleaved direct/proxy runs. `README.md` says so; nothing in this stage changes that. Owner: the same environment as B5. |
-| C3 | A packaged installation has never been exercised end to end | **blocked** | Needs an installer (A1 + B4) and a machine to install it on. Owner: after A1, A2 and B4. |
-
-## D. Known costs accepted for the preview
-
-| # | Item | State | Note |
-|---|---|---|---|
-| D1 | One full history flush costs ~40 ms (was 10–14 ms) | **ready (accepted)** | Stage 19 measurement, `BenchmarkFlushFullHistory`. At one flush per 30 s that is 0.13% duty cycle; the preview may ship with it. Revisit if the retention size grows. |
-| D2 | Each flush rewrites all three tables | **ready (accepted)** | Design, not an accident: the in-memory tables are the only truth. An incremental writer is a separate design, not a bug fix. |
-| D3 | Fuzz targets run only in bounded local sessions | **ready (noted)** | Four targets, seed corpora committed, 75 s per target in stage 20. No scheduled fuzz job yet; that is on the stage 20 follow-up list. |
+| A1 | 六张图片曾未进公开快照 | ready (resolved) | 2026-11-16 经网页端上传，六个远端 blob SHA 与本地逐字节一致；两个占位 `.gitkeep` 无害。 |
+| A2 | 无 `Cargo.lock` | blocked | 需在有 rustc ≥ 1.89 与 WebKitGTK 4.1 的机器跑一次联网 `cargo generate-lockfile`，再同步第三方声明第 5 节。 |
+| A3 | CI 首次运行与 Interop 门 | ready (resolved) | 2026-11-16 Actions 首跑，Go/Frontend 绿；Interop 修补快照 dot 分隔、TUIC 标签与裸二进制、Xray 校验行、hysteria 哈希路径、tarball 目录、执行位后全绿；Snell UDP 瞬时失败记 B6。 |
+| A4 | 私有漏洞通道未开 | ready (resolved) | 仓库 2026-11-16 公开并启用 Private vulnerability reporting，`SECURITY.md` 路由有效。 |
+| A5 | 许可范围 | ready (resolved) | 所有者 2026-11-15 定 GPL-3.0-only；阶段 23 对齐四处元数据与锁文件/测试断言。 |
+| A6 | 脱敏扫描 | ready (resolved) | 阶段 24 重跑 58 个可达提交与工作区：2,215 行、73 个不同 (路径, 行)、54 个命中提交；45 类测试夹具、17 类生产代码（无存储凭据）、8 类文档、1 类链接示例、2 类示例配置；无带凭据的外部主机 URL；四个模块许可在阶段 24 从模块缓存原文核实。 |
+| A7 | 开发日志中的私有路径 | ready (resolved) | 文档与日志改用 `$HOME` 形式；测试代码中的固定路径是断言输入，不改；出包脚本许可证源写成符号化 `$GOMODCACHE/…`。 |
+| B1 | 发布归档可辨识 | ready | `scripts/build-release.sh 0.1.0-preview.1` 产出 linux-amd64 tar（9,765,930 字节），`-check` 与注入版本通过。 |
+| B2 | 第三方许可全文未随包 | ready | 所有者决定随包全文；脚本按二进制 17 个模块从本地模块缓存复制 17 份许可包（24 节原文，逐字节相同），清单 8 → 26 项，tar 9,795,437 字节；解包 `-check` 与版本仍通过。 |
+| B3 | 四个模块许可未核实 | ready (resolved) | 阶段 24 从各精确版本模块缓存读到 ISC、BSD-3-Clause、MIT、MIT，声明第 2 节更新；未链接进二进制，属记账缺口。 |
+| B4 | Rust 壳从未编译/安装/IPC 实测 | blocked | 需 rustc/cargo/WebKitGTK 齐全的机器跑 `cargo test/build --locked`、原生窗口与进程托管、单实例锁、设置文件路径。 |
+| B5 | Hysteria2 / TUIC 互通未复验 | ready (resolved) | 2026-11-16 CI 七个参考位齐全，TCP/UDP 全部通过，README 矩阵改为 Verified。 |
+| B6 | Snell UDP 曾失败一次 | ready (resolved as transient) | 同一代码树下一轮全绿；客户端帧格式已逐字节对照公开客户端与服务端，失败归为瞬时；门脚本现失败即打印完整输出。 |
+| C1 | Windows 未原生运行 | blocked | 仅交叉编译；需 Windows x86_64 机器按 `-check`、系统代理、令牌文件、历史迁移顺序实测。 |
+| C2 | 五项性能未真机测量 | blocked | 需有线硬件、固定构建与配置、交错直连/代理测；README 已如实声明。 |
+| C3 | 安装包端到端未验 | blocked | 依赖 A1/A2/B4 与安装环境。 |
+| D1 | 全量历史写入约 40 ms | ready (accepted) | 阶段 19 `BenchmarkFlushFullHistory`，30 秒一次约 0.13% 占空比；预览可接受。 |
+| D2 | 每次写入重写三张表 | ready (accepted) | 设计使然：内存表是唯一事实来源，增量写入是独立设计。 |
+| D3 | fuzz 仅做有界本地会话 | ready (noted) | 四个目标、种子语料已提交，阶段 20 各跑 75 秒；尚无定时 fuzz 任务。 |

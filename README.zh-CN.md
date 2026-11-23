@@ -11,7 +11,7 @@
 [![CI](https://github.com/Melon-tgj/MelonARC/actions/workflows/ci.yml/badge.svg)](https://github.com/Melon-tgj/MelonARC/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Go 1.27](https://img.shields.io/badge/Go-1.27-00ADD8.svg?logo=go&logoColor=white)](go.mod)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)](#平台与构建产物)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#平台与构建产物)
 [![Preview](https://img.shields.io/badge/preview-0.1.0--preview.1-orange.svg)](docs/release-notes-0.1.0-preview.1.md)
 
 [English](README.md) · **简体中文** · [日本語](README.ja.md) · [한국어](README.ko.md)
@@ -20,7 +20,7 @@
 
 ---
 
-**状态：0.x 源码预览，不是稳定版。** Go 核心、本地 API、CLI 与桌面端前端均已实现；原生安装包、编译好的桌面端外壳、以及在发布目标平台上的端到端验证都还没有。下方的支持矩阵是"到底验证过什么"的唯一事实来源，不要把功能列表读成可用组合的承诺。
+**状态：0.x 源码预览，不是稳定版。** Go 核心、本地 API、CLI、桌面端前端与原生 macOS arm64 外壳（SwiftUI + AppKit）均已实现。CI 用 Xcode 26.3 / Swift 6.2.4 构建 macOS 外壳及其核心 sidecar；build 48 是可对照基线，其候选 DMG 排版已在用户的 macOS 27 arm64 虚拟机上验收。该 DMG 为 ad-hoc 签名、未公证；Gatekeeper 首开、系统代理端到端与 macOS 13 检查仍待验。Windows/Linux 桌面外壳仍未编译，发布目标平台上的端到端验证也仍待完成。下方的支持矩阵是"到底验证过什么"的唯一事实来源，不要把功能列表读成可用组合的承诺。
 
 ## 支持矩阵
 
@@ -56,8 +56,8 @@ VLESS 的 `xtls-rprx-vision` 流会在配置期被拒绝，不支持。
 |---|---|---|
 | Linux x86_64 | 在本工作区源码构建与测试通过 | `go build ./...`、`go vet ./...`、`go test ./...`、`gofmt` 与前端离线套件都在这里跑。没有安装包、没有打包发布、没有长时间浸泡测试。 |
 | Windows x86_64 | **仅交叉编译** | `GOOS=windows go build ./cmd/... ./internal/...` 成功；外部评审也为两个目标做过 `CGO_ENABLED=0` 构建。从未原生执行：没有安装包、运行时测试、设备会话。Windows TUN 设备入口仍返回"session not implemented"。 |
-| macOS arm64 | 仅外部评审主机 | 2026-11-15 的评审在 macOS arm64 上运行，Go 1.27.4、Node 24.20.0。它不是声明的发布目标。 |
-| 桌面应用 | 前端已测试，原生外壳**未构建** | 前端离线与连真实核心的套件通过。Rust 外壳从未在此编译（没有 `rustc`/`cargo`/WebKitGTK），`Cargo.lock` 缺失，没有原生窗口截图或原生 IPC 测试。它最新的职责——启动、监护与停止核心进程——只有源码：进程托管、单实例锁与外壳设置文件都**未被执行过**。 |
+| macOS arm64 | 已声明的预览目标：原生外壳由 CI 构建 | 原生 SwiftUI + AppKit 外壳监护 Go 核心 sidecar；仅系统代理模式，macOS 上 TUN 尚未实现。CI 用 Xcode 26.3 / Swift 6.2.4 构建并对两个二进制做 ad-hoc 签名。build 48 是回归基线：其候选 DMG 排版已在用户的 macOS 27 arm64 虚拟机上验收。部署下限 13.0；目前仅 macOS 27 实测，13.x 待验，DMG 未公证。Gatekeeper 首开与系统代理端到端检查仍待验。 |
+| 桌面应用 | 前端已测试；macOS 原生外壳已构建，Windows/Linux 的 Tauri 外壳**未构建** | 前端离线与连真实核心的套件通过。macOS arm64 原生外壳由 CI 构建并以 DMG 交付（见上一行）。面向 Windows/Linux 的 Tauri 外壳从未在此编译（没有 `rustc`/`cargo`/WebKitGTK），`Cargo.lock` 缺失，也没有针对它的原生窗口截图或原生 IPC 测试。在这两个平台上，进程托管、单实例锁与外壳设置文件仍只有源码，**未被执行过**。 |
 
 开发文档承诺的"双平台可安装构建、常驻托盘、可用的系统代理与 TUN、全部协议连通、全部性能数字实测"**尚未达成**。请把它当作未来的验收标准，而不是对这棵树的描述。
 

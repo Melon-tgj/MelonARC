@@ -8,15 +8,20 @@
 > source of truth.
 
 **Status: 0.x source preview, not a stable release.** MelonARC is an open-source,
-cross-platform rule-based proxy client. This archive is a Linux x86_64 source-preview
-build of the Go core and its CLI. Native installers, a compiled desktop shell and
-end-to-end validation on the release targets do not exist yet. Do not read the feature
-list as a promise of working combinations.
+cross-platform rule-based proxy client. The intended preview assets are three,
+all to be built from one source commit: the `linux-amd64` and `linux-arm64` Go
+core archives and a macOS arm64 system-proxy client DMG with a native SwiftUI +
+AppKit shell. CI builds the macOS shell and its core sidecar with Xcode 26.3 /
+Swift 6.2.4; build 48 is the regression baseline and its candidate DMG layout
+was accepted in the user's macOS 27 arm64 VM. That DMG is ad-hoc signed, not
+notarized. Gatekeeper first-open, system-proxy end-to-end and macOS 13 checks
+are still pending, and the Windows/Linux desktop shell is not built. Do not read
+the feature list as a promise of working combinations.
 
-## What is in the archive
+## What is in the archives
 
-`melonarc-0.1.0-preview.1-linux-amd64.tar.gz` contains one directory. A second
-archive, `melonarc-0.1.0-preview.1-linux-arm64.tar.gz`, has exactly the same
+`melonarc-0.1.0-preview.1-linux-amd64.tar.gz` contains one directory. The
+`melonarc-0.1.0-preview.1-linux-arm64.tar.gz` archive has exactly the same
 layout with linux/arm64 binaries (for ARM machines and ARM virtual machines):
 
 ```
@@ -34,15 +39,34 @@ melonarc-0.1.0-preview.1-linux-amd64/
 `licenses/` holds 17 bundles (24 licence files) copied verbatim from the local Go
 module cache for exactly the modules linked into `melonarc-core`; each bundle is named
 `<module>@<version>.txt` with `/` written as `_`. `melonarc-cli` links no third-party
-module. The archive is not claimed to be bit-reproducible: tar records modification
+module. The archives are not claimed to be bit-reproducible: tar records modification
 times and gzip records the time it ran, so use the SHA-256 printed by the build of the
 archive you actually have, not a digest copied from an earlier run.
 
-## Install and run from the tar
+The third asset is an arm64 DMG containing `MelonARC.app`: the native SwiftUI +
+AppKit shell and the Go core as a sidecar. It provides system proxy mode only;
+macOS TUN is not implemented. Its minimum deployment target is 13.0, with only
+macOS 27 exercised so far and 13.x still pending. CI freezes it as
+`melonarc-0.1.0-preview-candidate.<build>-macos-arm64.dmg` (build 48 is the
+current regression baseline), ad-hoc signed and not notarized. The exact
+candidate name, source commit, build number and SHA-256 of the DMG file itself
+are recorded in `candidate.json` and its `.sha256` sidecar; verify the bytes you
+actually download. The candidate file name is not the public tag: the tag is
+`v0.1.0-preview.1`, the app short version stays `0.1.0`, and its
+`CFBundleVersion` is the actual CI build number.
 
-There is no installer. Unpack it, edit one file, and run two binaries. Linux
-x86_64 and arm64; no Windows binary and no desktop application are in either
-archive.
+## Install and run
+
+There is no installer. Unpack a Linux tarball, edit one file and run two
+binaries; on macOS, drag the app from the DMG to Applications. Linux x86_64 and
+arm64 are covered by the two tarballs, macOS arm64 by the DMG. No Windows binary
+or Windows/Linux desktop shell is in any of the three assets.
+
+For an ad-hoc signed, unnotarized DMG, first open the app with a right-click →
+**Open**; if Gatekeeper blocks it, use **System Settings → Privacy & Security →
+Open Anyway**. This first-open path is a stage-4 acceptance item and has not yet
+been exercised in a clean VM. The shell supervises the Go core and operates in
+system proxy mode; macOS TUN is not implemented.
 
 ```sh
 tar -xzf melonarc-0.1.0-preview.1-linux-amd64.tar.gz   # or ...-linux-arm64.tar.gz
@@ -89,9 +113,11 @@ these on loopback — an inbound listening on every interface is an open relay. 
 local API is loopback-only by design. `melonarc-cli help` lists the remaining commands
 (`policies`, `select`, `reload`, `explain`, `audit`, `history`).
 
-Nothing in this procedure has been exercised as a packaged installation end to end:
-there is no service unit, no tray, no auto-start, no signed artefact, and no recorded
-run that goes from an installed copy through an inbound listener to an outbound.
+No packaged installation has been exercised end to end: the Linux tarballs have
+no service unit, tray or auto-start; the macOS DMG's Gatekeeper first-open,
+system proxy end-to-end and macOS 13 behavior are still pending VM acceptance.
+There is no recorded run that goes from an installed copy through an inbound
+listener to an outbound, and no notarised artefact.
 
 ## What has actually been verified
 
@@ -108,9 +134,11 @@ the matrix defines it and a future regression can put a row back there.
 | Snell v4 / v5 | **Verified** (CI, 2026-11-16) for TCP and UDP business. Stage 11 first carried TCP for both versions against a pinned Snell reference server. The full interop gate then ran in CI (GitHub Actions, ubuntu, 2026-11-16) against snell-server 5.0.0 with both version configurations, and every Snell case passes. One earlier run in that series failed only the two UDP subtests on an identical code tree and passed on the next, so that failure is recorded as transient (`docs/pre-release-checklist.md` B6). |
 | SOCKS5 (+TLS), HTTP / HTTPS outbounds | **Unit-tested only**; UDP **Unverified**. Not part of the reference-server matrix. |
 | Hysteria2 and TUIC v5 | **Verified** (CI, 2026-11-16) for TCP and UDP business. The 2026-11-15 external review failed every echo attempt against Hysteria 2.13.0 (the HTTP/3 stage reported a QPACK field-section decode failure, error 512) and against tuic-server 1.0.0 (authentication failure from a text-formatted UUID exporter label); stage 15 repaired both and added known-answer tests. The gate re-ran in CI (GitHub Actions, ubuntu, 2026-11-16) with all seven reference slots filled, and every Hysteria2 and TUIC case passes. Neither is on the core's unusable list any more, so a configuration that uses them starts without a warning. |
-| Linux x86_64 | Source build, `go build` / `go vet` / `go test`, `gofmt` and the offline frontend suite pass in this workspace. No installer, no packaged release, no long-running soak test. |
+| Linux x86_64 | Source build, `go build` / `go vet` / `go test`, `gofmt` and the offline frontend suite pass in this workspace. The amd64 release tarball is built and unpacked locally with version and `-check` readback; no installer and no long-running soak test. |
+| Linux arm64 | The arm64 tarball is cross-built from the same commit with the same layout and licence texts. Only cross-build evidence is available here; no native arm64 execution was performed. |
 | Windows x86_64 | **Cross-compile only.** Nothing has been executed natively; the Windows TUN device entry still returns "session not implemented". |
-| Desktop application | Frontend offline and live-core suites pass, but the frontend is **not in this archive**. The Rust shell has never been compiled here (no `rustc` / `cargo` / WebKitGTK, no `Cargo.lock`, no native window or native IPC test). Process hosting, the single-instance lock and the shell settings file exist only as source. |
+| macOS arm64 | CI builds and ad-hoc signs the native SwiftUI + AppKit shell and the Go core sidecar; build 48's candidate DMG layout was accepted in the user's macOS 27 arm64 VM. Minimum deployment target 13.0, only macOS 27 exercised. Gatekeeper first-open, system-proxy end-to-end and macOS 13 checks are **pending**. |
+| Desktop application | Frontend offline and live-core suites pass; the frontend is not in the Linux tarballs. The native macOS arm64 shell is built by CI and shipped in the DMG. The Tauri shell intended for Windows/Linux has never been compiled here (no `rustc` / `cargo` / WebKitGTK, no `Cargo.lock`, no native window or native IPC test); on those platforms process hosting, the single-instance lock and the shell settings file exist only as source. |
 
 Not claimed anywhere in this note:
 
@@ -121,8 +149,12 @@ Not claimed anywhere in this note:
   congestion-control or certificate setting was exercised.
 - **REALITY verified beyond one Chrome template.** No general fingerprint
   compatibility, no REALITY UDP evidence.
-- **A desktop build.** No compiled native shell, no installer, no tray, no signed
-  artefacts on either release target.
+- **A Windows/Linux desktop build.** Their Tauri shell is still uncompiled, with no
+  installer or tray. The macOS arm64 DMG exists but is ad-hoc signed and not
+  notarized; Gatekeeper first-open in a clean VM and system-proxy end-to-end are
+  still pending.
+- **macOS 13 or macOS TUN.** The deployment floor is 13.0, but only macOS 27 has
+  been exercised; 13.x is pending, and macOS TUN is not implemented.
 - **Performance.** The five performance targets in the development document have
   **not been measured on real hardware**. The published rule-match numbers are
   microbenchmarks on a fixed rule set from different machines and stages; they cannot
@@ -140,7 +172,12 @@ Not claimed anywhere in this note:
   public-network, multi-process or crash-recovery results.
 - The Linux TUN inbound is IPv4-only user-space TCP in source; zero-window,
   retransmission, reordering, half-close and long-connection behaviour are not
-  validated. Windows TUN is not implemented.
+  validated. Windows and macOS TUN are not implemented; the macOS client offers
+  system proxy mode only.
+- The macOS DMG is ad-hoc signed and unnotarized, so first open needs the
+  Gatekeeper exception described above. Only the build 48 layout has been
+  accepted in the user's macOS 27 arm64 VM; system-proxy takeover/restore,
+  abnormal exit, first-open and macOS 13 remain stage 4/5 acceptance items.
 - System-proxy restore only returns fields still equal to what this program wrote;
   the Linux backend covers gsettings desktop environments only. No validation of a
   settings-refresh broadcast to already-running Windows applications.

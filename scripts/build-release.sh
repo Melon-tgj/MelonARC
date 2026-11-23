@@ -13,8 +13,8 @@
 #   2. fills a staging directory melonarc-<version>-linux-<arch>/ with the two
 #      binaries, the example configuration, the licence and the three documents a
 #      reader needs before running a binary from the internet;
-#   3. copies the licence texts of every third-party module linked into
-#      melonarc-core into licenses/, one file per module (checklist B2);
+#   3. copies the licence texts of every third-party module linked into the
+#      linux melonarc-core into licenses/, one file per module (checklist B2);
 #   4. writes dist-release/melonarc-<version>-linux-<arch>.tar.gz and prints its
 #      SHA-256.
 #
@@ -104,9 +104,10 @@ cp -- "$root/examples/melonarc.conf" "$stage/melonarc.conf" || die "cannot copy 
 #
 # Which modules: the dep lines of the core we just built are the authoritative
 # answer to "what is in the artefact". THIRD-PARTY-NOTICES.md section 1 is the
-# published index, so the two sets are compared first: a dependency change that
-# is not reflected in that file fails the build instead of shipping an archive
-# whose notices and licence texts disagree.
+# published index; its last column says which modules are linked into the Linux
+# core (the Darwin column carries two extra modules). The two sets are compared
+# first: a dependency change that is not reflected in that column fails the
+# build instead of shipping an archive whose notices and licence texts disagree.
 #
 # Which texts: every LICENSE/LICENCE/COPYING/NOTICE file at the root of that
 # exact module version in the local Go module cache. A module that ships
@@ -120,13 +121,17 @@ awk '
     /^## 2\./ { in1 = 0 }
     in1 && /^\| `/ {
         split($0, f, "|")
-        m = f[2]; v = f[3]
+        m = f[2]; v = f[3]; linux = f[7]
         gsub(/[` \t]/, "", m)
         gsub(/[ \t]/, "", v)
-        if (m != "" && v ~ /^v/) print m "@" v
+        gsub(/[ \t]/, "", linux)
+        if (linux != "yes" && linux != "no") exit 1
+        if (m != "" && v ~ /^v/ && linux == "yes") print m "@" v
     }
-' "$root/THIRD-PARTY-NOTICES.md" | LC_ALL=C sort > "$tmp/notices" ||
-    die "cannot read THIRD-PARTY-NOTICES.md section 1"
+' "$root/THIRD-PARTY-NOTICES.md" > "$tmp/declared" ||
+    die "cannot read the Linux column of THIRD-PARTY-NOTICES.md section 1"
+LC_ALL=C sort "$tmp/declared" > "$tmp/notices" ||
+    die "cannot sort the declared Linux modules"
 go version -m "$stage/melonarc-core" |
     awk '$1 == "dep" { print $2 "@" $3 }' |
     LC_ALL=C sort > "$tmp/deps" || die "cannot read the core build info"

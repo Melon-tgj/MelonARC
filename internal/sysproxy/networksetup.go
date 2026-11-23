@@ -286,12 +286,13 @@ func (n *networksetup) Plan(ctx context.Context, s Settings) (Snapshot, error) {
 func (n *networksetup) Commit(ctx context.Context, snap Snapshot) error {
 	ctx, cancel := context.WithTimeout(ctx, n.budgetOrDefault())
 	defer cancel()
-	for _, f := range snap.Fields {
+	for i, f := range snap.Fields {
 		if f.Observed {
 			continue
 		}
-		if err := n.applyField(ctx, f, f.Written); err != nil {
-			return n.rollback(ctx, snap, err)
+		applied, err := n.applyField(ctx, f, f.Written)
+		if err != nil {
+			return n.rollback(ctx, snap, i, applied, err)
 		}
 	}
 	return nil
@@ -307,7 +308,10 @@ func (n *networksetup) Restore(ctx context.Context, snap Snapshot) (RestoreResul
 			return value, true, err
 		},
 		func(f Field, current string) bool { return current == f.Written },
-		func(f Field) error { return n.applyField(ctx, f, f.Before) },
+		func(f Field) error {
+			_, err := n.applyField(ctx, f, f.Before)
+			return err
+		},
 		func(f Field) error {
 			return fmt.Errorf("%s has no value to delete", fieldName(f))
 		},
@@ -349,24 +353,44 @@ func (n *networksetup) Clear(ctx context.Context) error {
 	return errors.Join(problems...)
 }
 
-// rollback puts every field this takeover wrote back, in reverse order, so the
-// switches that turn a proxy on go back before the addresses do. It reports
-// ErrRollbackIncomplete when a field could not be put back: part of what this
-// program wrote is then still in force, and the controller has to keep the
-// takeover record for the next start.
-func (n *networksetup) rollback(ctx context.Context, snap Snapshot, cause error) error {
-	done, total := 0, 0
-	for i := len(snap.Fields) - 1; i >= 0; i-- {
+// rollback puts back only the fields this takeover actually wrote, in reverse
+// order, so the switches that turn a proxy on go back before the addresses do.
+// failedAt is the field whose write failed and applied is how many tool commands
+// of that field took effect: a group that only got its address is ours only if
+// the value read back still matches what this program wrote. It reports
+// ErrRollbackIncomplete when a field it wrote could not be put back: part of
+// what this program wrote is then still in force, and the controller has to
+// keep the takeover record for the next start.
+func (n *networksetup) rollback(ctx context.Context, snap Snapshot, failedAt, applied int, cause error) error {
+	last := failedAt - 1
+	if applied > 0 {
+		last = failedAt
+	}
+	total, problems := 0, []error(nil)
+	for i := last; i >= 0; i-- {
 		f := snap.Fields[i]
 		if f.Observed {
 			continue
 		}
 		total++
-		if err := n.applyField(ctx, f, f.Before); err != nil {
-			return fmt.Errorf("%w: %w (%d of %d settings could not be put back: %v)",
-				cause, ErrRollbackIncomplete, total-done, total, err)
+		current, err := n.readField(ctx, f)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("read %s (expected %q): %w", fieldName(f), f.Written, err))
+			continue
 		}
-		done++
+		if current != f.Written {
+			if i == failedAt {
+				problems = append(problems, fmt.Errorf("%s was changed after a partial write (current %q, written %q)", fieldName(f), current, f.Written))
+			}
+			continue
+		}
+		if _, err := n.applyField(ctx, f, f.Before); err != nil {
+			problems = append(problems, fmt.Errorf("restore %s: %w", fieldName(f), err))
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%w: %w (%d of %d settings could not be put back: %v)",
+			cause, ErrRollbackIncomplete, len(problems), total, errors.Join(problems...))
 	}
 	return fmt.Errorf("%w (the previous settings were restored)", cause)
 }
@@ -465,47 +489,65 @@ func (n *networksetup) readField(ctx context.Context, f Field) (string, error) {
 	return current.String(), nil
 }
 
-// applyField writes value into one field. An address is only written when the
-// value carries one: a restore of a service that had no address leaves the one
-// this program wrote behind with the proxy switched off, which is how the
-// registry backend treats the same case.
-func (n *networksetup) applyField(ctx context.Context, f Field, value string) error {
+// applyField writes value into one field and reports how many tool commands
+// took effect. An address is only written when the value carries one: a restore
+// of a service that had no address leaves the one this program wrote behind
+// with the proxy switched off, which is how the registry backend treats the
+// same case.
+func (n *networksetup) applyField(ctx context.Context, f Field, value string) (int, error) {
+	applied := 0
 	if kind, ok := proxyKinds[f.Key]; ok {
 		if kind.set == "" {
 			state, err := switchArg(f, value)
 			if err != nil {
-				return err
+				return applied, err
 			}
-			return n.mutate(ctx, kind.state, f.Service, state)
+			if err := n.mutate(ctx, kind.state, f.Service, state); err != nil {
+				return applied, err
+			}
+			return 1, nil
 		}
 		proxy, err := splitProxyValue(value)
 		if err != nil {
-			return fmt.Errorf("write %s: %w", fieldName(f), err)
+			return applied, fmt.Errorf("write %s: %w", fieldName(f), err)
 		}
 		if proxy.host != "" {
 			if err := n.mutate(ctx, kind.set, f.Service, proxy.host, strconv.Itoa(proxy.port)); err != nil {
-				return err
+				return applied, err
 			}
+			applied++
 		}
-		return n.mutate(ctx, kind.state, f.Service, stateWord(proxy.enabled))
+		if err := n.mutate(ctx, kind.state, f.Service, stateWord(proxy.enabled)); err != nil {
+			return applied, err
+		}
+		return applied + 1, nil
 	}
 	switch f.Key {
 	case keyAutoProxyState:
 		state, err := switchArg(f, value)
 		if err != nil {
-			return err
+			return applied, err
 		}
-		return n.mutate(ctx, "-setautoproxystate", f.Service, state)
+		if err := n.mutate(ctx, "-setautoproxystate", f.Service, state); err != nil {
+			return applied, err
+		}
+		return 1, nil
 	case keyAutoDiscovery:
 		state, err := switchArg(f, value)
 		if err != nil {
-			return err
+			return applied, err
 		}
-		return n.mutate(ctx, "-setproxyautodiscovery", f.Service, state)
+		if err := n.mutate(ctx, "-setproxyautodiscovery", f.Service, state); err != nil {
+			return applied, err
+		}
+		return 1, nil
 	case keyBypass:
-		return n.writeBypass(ctx, f.Service, value)
+		if err := n.writeBypass(ctx, f.Service, value); err != nil {
+			return applied, err
+		}
+		return 1, nil
 	}
-	return fmt.Errorf("unknown setting %q", f.Key)
+	return applied, fmt.Errorf("unknown setting %q", f.Key)
 }
 
 // switchArg normalises a switch out of a snapshot. The value is written as the

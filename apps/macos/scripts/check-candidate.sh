@@ -41,6 +41,47 @@ grep -q 'Privacy statement' "$resources/PRIVACY.md" \
   && grep -q '隐私声明' "$resources/PRIVACY.md" \
   || fail "the bundled privacy statement is not bilingual"
 
+# The core in this bundle is the authority for what the bundle has to declare.
+# Section 1 of the bundled notices is the published index; its Darwin column
+# must name the same module versions, each with a non-empty licence text bundle.
+command -v go >/dev/null 2>&1 || fail "go is required to verify the bundled core's modules"
+core="$app/Contents/MacOS/melonarc-core"
+[ -f "$core" ] || fail "the bundled core is missing: $core"
+licdir="$resources/licenses"
+[ -d "$licdir" ] || fail "the bundle has no third-party licence texts: $licdir"
+
+licence_work=$(mktemp -d "${TMPDIR:-/tmp}/melonarc-licence-check.XXXXXX")
+trap 'rm -rf "$licence_work"' EXIT
+awk '
+    /^## 1\./ { in1 = 1; next }
+    /^## 2\./ { in1 = 0 }
+    in1 && /^\| `/ {
+        split($0, f, "|")
+        m = f[2]; v = f[3]; darwin = f[6]
+        gsub(/[` \t]/, "", m)
+        gsub(/[ \t]/, "", v)
+        gsub(/[ \t]/, "", darwin)
+        if (darwin != "yes" && darwin != "no") exit 1
+        if (m != "" && v ~ /^v/ && darwin == "yes") print m "@" v
+    }
+' "$resources/THIRD-PARTY-NOTICES.md" > "$licence_work/declared" \
+  || fail "cannot read the Darwin column of the bundled notices"
+LC_ALL=C sort "$licence_work/declared" > "$licence_work/sorted-declared" \
+  || fail "cannot sort the declared Darwin modules"
+go version -m "$core" | awk '$1 == "dep" { print $2 "@" $3 }' | LC_ALL=C sort > "$licence_work/deps" \
+  || fail "cannot read the bundled core's build info"
+[ -s "$licence_work/deps" ] || fail "the bundled core reports no linked modules"
+if ! cmp -s "$licence_work/sorted-declared" "$licence_work/deps"; then
+  diff -u "$licence_work/sorted-declared" "$licence_work/deps" >&2 || true
+  fail "the bundled notices' Darwin column does not match the bundled core's linked modules"
+fi
+while IFS= read -r mod; do
+  [ -n "$mod" ] || continue
+  safe=$(printf '%s' "$mod" | tr '/' '_')
+  bundle="$licdir/$safe.txt"
+  [ -s "$bundle" ] || fail "missing or empty licence bundle for $mod: $bundle"
+done < "$licence_work/deps"
+
 bash "$here/verify-app-icon.sh" "$app"
 
 copyright=$(plutil -extract NSHumanReadableCopyright raw -o - "$app/Contents/Info.plist") \
